@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         [Youtube] Save & Resume Progress [20251111] v1.0.3
+// @name         [Youtube] Save & Resume Progress [20251111] v1.1.0
 // @namespace    0_V userscripts/Youtube Save & Resume Progress
 // @description  Save & resume YouTube playback progress. Storage backend selection (localStorage or GM storage) with migration, import/export under a settings sub-tab. Fix: On YouTube new UI, the settings popup opens reliably on the page (not on the player), without causing player zoom/jitter, even right after page load.
-// @version      [20251111] v1.0.3
-// @update-log   [20251111] v1.0.3 · Notes button auto-opens blank notes and saves edits on toggle
+// @version      [20251111] v1.1.0
+// @update-log   [20251111] v1.1.0 · Transcript status badge now shows blue re-fetch messages without duplicate labels
 // @license      MIT
 //
 // @match        *://*.youtube.com/*
@@ -49,6 +49,7 @@
   // ========== Constants ==========
   const KEY_PREFIX = 'Youtube_SaveResume_Progress-';
   const SETTINGS_MODE_KEY = 'YSRP_StorageMode';
+  const TRANSCRIPT_CONFIG_KEY = 'YSRP_TranscriptSettings';
   const DEFAULT_VIDEO_NAME = 'Unknown Title';
   const TITLE_PENDING_PLACEHOLDER = '正在获取标题…';
 
@@ -71,6 +72,17 @@
       source: 'default',
       confidence: 0
     },
+    transcript: {
+      endpoint: 'https://0-v-YouTube-Transcript-Generator-api.hf.space/v1/chat/completions',
+      apiKey: 'sk-asdlfjalalfja',
+      model: 'transcript',
+      timeoutMs: 600000,
+      lastVideoId: null,
+      lastFetchedAt: 0,
+      lastTranscript: '',
+      lastError: null,
+      isFetching: false
+    },
     dependenciesURLs: {
       fontAwesomeIcons: 'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css'
     }
@@ -90,6 +102,7 @@
     save: ['fa-solid', 'fa-save'],
     copy: ['fa-solid', 'fa-copy'],
     check: ['fa-solid', 'fa-check'],
+    captions: ['fa-solid', 'fa-closed-captioning'],
     open: ['fa-solid', 'fa-arrow-up-right-from-square'],
     database: ['fa-solid', 'fa-database'],
     download: ['fa-solid', 'fa-file-arrow-down'],
@@ -746,6 +759,407 @@
   })();
 
 /* -------------------------------------------------------------------------- *
+ * Module 07a · Transcript settings persistence and subtitle API helpers
+ * -------------------------------------------------------------------------- */
+
+  // ========== Transcript Settings & API ==========
+  const TRANSCRIPT_DEFAULT_BASE = 'https://0-v-YouTube-Transcript-Generator-api.hf.space';
+  const TRANSCRIPT_ENDPOINT_SUFFIX = '/v1/chat/completions';
+  const TRANSCRIPT_TIMEOUT_MIN_MINUTES = 1;
+  const TRANSCRIPT_TIMEOUT_MAX_MINUTES = 60;
+  const TRANSCRIPT_TIMEOUT_DEFAULT_MINUTES = 10;
+  const TRANSCRIPT_TIMEOUT_MIN_MS = TRANSCRIPT_TIMEOUT_MIN_MINUTES * 60 * 1000;
+  const TRANSCRIPT_TIMEOUT_MAX_MS = TRANSCRIPT_TIMEOUT_MAX_MINUTES * 60 * 1000;
+  const TRANSCRIPT_DEFAULT_TIMEOUT_MS = TRANSCRIPT_TIMEOUT_DEFAULT_MINUTES * 60 * 1000;
+
+  function clampTranscriptTimeoutMs(value) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+      return TRANSCRIPT_DEFAULT_TIMEOUT_MS;
+    }
+    return Math.max(
+      TRANSCRIPT_TIMEOUT_MIN_MS,
+      Math.min(TRANSCRIPT_TIMEOUT_MAX_MS, Math.round(numeric))
+    );
+  }
+
+  function transcriptMinutesToMs(minutes) {
+    return clampTranscriptTimeoutMs(Number(minutes) * 60 * 1000);
+  }
+
+  function transcriptMsToMinutes(ms) {
+    const numeric = Number(ms);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+      return TRANSCRIPT_TIMEOUT_DEFAULT_MINUTES;
+    }
+    return Math.round(numeric / 60000);
+  }
+
+  function normalizeTranscriptEndpoint(value) {
+    if (!value || typeof value !== 'string') return '';
+    let trimmed = value.trim();
+    if (!trimmed) return '';
+    if (!/^https?:\/\//i.test(trimmed)) {
+      trimmed = `https://${trimmed}`;
+    }
+    try {
+      const url = new URL(trimmed);
+      const normalizedPath = (url.pathname || '').replace(/\/+$/, '');
+      const hasSuffix = normalizedPath.toLowerCase().includes(TRANSCRIPT_ENDPOINT_SUFFIX);
+      if (!hasSuffix) {
+        if (!normalizedPath || normalizedPath === '' || normalizedPath === '/') {
+          url.pathname = TRANSCRIPT_ENDPOINT_SUFFIX;
+        } else {
+          url.pathname = normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`;
+        }
+      } else if (!normalizedPath) {
+        url.pathname = TRANSCRIPT_ENDPOINT_SUFFIX;
+      } else {
+        url.pathname = normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`;
+      }
+      return url.toString().replace(/\/+$/, '');
+    } catch {
+      const withoutTrailing = trimmed.replace(/\/+$/, '');
+      if (withoutTrailing.toLowerCase().includes(TRANSCRIPT_ENDPOINT_SUFFIX)) {
+        return withoutTrailing;
+      }
+      return `${withoutTrailing}${TRANSCRIPT_ENDPOINT_SUFFIX}`;
+    }
+  }
+
+  const DEFAULT_TRANSCRIPT_SETTINGS = Object.freeze({
+    endpoint: normalizeTranscriptEndpoint(
+      (configData.transcript && configData.transcript.endpoint) || TRANSCRIPT_DEFAULT_BASE
+    ),
+    model: (configData.transcript && configData.transcript.model) || 'transcript',
+    apiKey: (configData.transcript && configData.transcript.apiKey) || 'sk-asdlfjalalfja',
+    timeoutMs: clampTranscriptTimeoutMs(
+      (configData.transcript && configData.transcript.timeoutMs) || TRANSCRIPT_DEFAULT_TIMEOUT_MS
+    )
+  });
+  const TRANSCRIPT_CACHE_TTL = 1000 * 60 * 30; // 30 minutes
+  const transcriptCache = new Map();
+  const transcriptFetches = new Map();
+
+  function getVideoStorageKey(videoId) {
+    if (!videoId) return null;
+    return `${KEY_PREFIX}${videoId}`;
+  }
+
+  function readVideoRecord(videoId) {
+    const storageKey = getVideoStorageKey(videoId);
+    if (!storageKey) return null;
+    const raw = Storage.getItem(storageKey);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) || {};
+    } catch {
+      return null;
+    }
+  }
+
+  function persistTranscriptForVideo(videoId, transcriptText) {
+    const storageKey = getVideoStorageKey(videoId);
+    if (!storageKey) return;
+    let record = readVideoRecord(videoId) || {};
+    const trimmed = typeof transcriptText === 'string' ? transcriptText.trim() : '';
+    if (trimmed) {
+      record.videoTranscript = trimmed;
+      record.videoTranscriptUpdatedAt = Date.now();
+    } else {
+      delete record.videoTranscript;
+      delete record.videoTranscriptUpdatedAt;
+    }
+    try {
+      Storage.setItem(storageKey, JSON.stringify(record));
+    } catch (err) {
+      console.error('Failed to persist transcript to storage:', err);
+    }
+  }
+
+  function readStoredTranscriptForVideo(videoId) {
+    const record = readVideoRecord(videoId);
+    if (!record || typeof record.videoTranscript !== 'string' || !record.videoTranscript.trim()) {
+      return null;
+    }
+    return {
+      text: record.videoTranscript.trim(),
+      fetchedAt: record.videoTranscriptUpdatedAt || 0
+    };
+  }
+
+  function sanitizeTranscriptSettings(raw) {
+    if (!raw || typeof raw !== 'object') return {};
+    const out = {};
+    ['endpoint', 'model', 'apiKey'].forEach(key => {
+      if (typeof raw[key] !== 'string') return;
+      const value = raw[key].trim();
+      if (!value) return;
+      if (key === 'endpoint') {
+        out[key] = normalizeTranscriptEndpoint(value);
+      } else {
+        out[key] = value;
+      }
+    });
+    if (typeof raw.timeoutMs !== 'undefined') {
+      const numeric = Number(raw.timeoutMs);
+      if (Number.isFinite(numeric) && numeric > 0) {
+        out.timeoutMs = clampTranscriptTimeoutMs(numeric);
+      }
+    } else if (typeof raw.timeoutMinutes !== 'undefined') {
+      const minutes = Number(raw.timeoutMinutes);
+      if (Number.isFinite(minutes) && minutes > 0) {
+        out.timeoutMs = clampTranscriptTimeoutMs(minutes * 60 * 1000);
+      }
+    }
+    return out;
+  }
+
+  function readStoredTranscriptSettings() {
+    let stored = null;
+    try {
+      stored = window.localStorage ? window.localStorage.getItem(TRANSCRIPT_CONFIG_KEY) : null;
+    } catch {}
+    if (!stored && typeof GM_getValue === 'function') {
+      try {
+        stored = GM_getValue(TRANSCRIPT_CONFIG_KEY);
+      } catch {}
+    }
+    if (!stored) return null;
+    if (typeof stored === 'string') {
+      try { return JSON.parse(stored); } catch { return null; }
+    }
+    if (typeof stored === 'object') return stored;
+    return null;
+  }
+
+  function persistTranscriptSettings(settings) {
+    try {
+      if (window.localStorage) {
+        window.localStorage.setItem(TRANSCRIPT_CONFIG_KEY, JSON.stringify(settings));
+      }
+    } catch {}
+    if (typeof GM_setValue === 'function') {
+      try { GM_setValue(TRANSCRIPT_CONFIG_KEY, JSON.stringify(settings)); } catch {}
+    }
+  }
+
+  function hydrateTranscriptSettings() {
+    const stored = readStoredTranscriptSettings();
+    const merged = Object.assign({}, DEFAULT_TRANSCRIPT_SETTINGS, stored || {});
+    merged.endpoint = normalizeTranscriptEndpoint(merged.endpoint || DEFAULT_TRANSCRIPT_SETTINGS.endpoint);
+    merged.timeoutMs = clampTranscriptTimeoutMs(merged.timeoutMs || DEFAULT_TRANSCRIPT_SETTINGS.timeoutMs);
+    configData.transcript = Object.assign({}, configData.transcript || {}, merged);
+    return configData.transcript;
+  }
+  hydrateTranscriptSettings();
+
+  function getTranscriptSettings() {
+    if (!configData.transcript) {
+      return hydrateTranscriptSettings();
+    }
+    const { endpoint, model, apiKey, timeoutMs } = configData.transcript;
+    return {
+      endpoint: normalizeTranscriptEndpoint(endpoint || DEFAULT_TRANSCRIPT_SETTINGS.endpoint),
+      model: model || DEFAULT_TRANSCRIPT_SETTINGS.model,
+      apiKey: apiKey || '',
+      timeoutMs: clampTranscriptTimeoutMs(timeoutMs || DEFAULT_TRANSCRIPT_SETTINGS.timeoutMs)
+    };
+  }
+
+  function updateTranscriptSettings(partial) {
+    const sanitized = sanitizeTranscriptSettings(partial);
+    const prev = readStoredTranscriptSettings() || {};
+    const merged = Object.assign({}, DEFAULT_TRANSCRIPT_SETTINGS, prev, sanitized);
+    persistTranscriptSettings(merged);
+    configData.transcript = Object.assign({}, configData.transcript || {}, merged);
+    return Object.assign({}, configData.transcript);
+  }
+
+  function getCachedTranscript(videoId) {
+    if (!videoId) return null;
+    const cached = transcriptCache.get(videoId);
+    if (cached) {
+      if ((Date.now() - cached.fetchedAt) > TRANSCRIPT_CACHE_TTL) {
+        transcriptCache.delete(videoId);
+      } else {
+        return cached.text;
+      }
+    }
+    const stored = readStoredTranscriptForVideo(videoId);
+    if (stored && stored.text) {
+      transcriptCache.set(videoId, {
+        text: stored.text,
+        fetchedAt: stored.fetchedAt || Date.now()
+      });
+      return stored.text;
+    }
+    return null;
+  }
+
+  function setTranscriptError(message) {
+    configData.transcript.lastError = message || '';
+  }
+
+  function buildTranscriptPrompt(videoId, context) {
+    const ctxUrl = context && typeof context.videoUrl === 'string' ? context.videoUrl.trim() : '';
+    return ctxUrl || `https://www.youtube.com/watch?v=${videoId}`;
+  }
+
+  function buildTranscriptRequestBody(videoId, context) {
+    const settings = getTranscriptSettings();
+    const videoUrl = buildTranscriptPrompt(videoId, context);
+    return {
+      model: settings.model || DEFAULT_TRANSCRIPT_SETTINGS.model,
+      messages: [
+        { role: 'user', content: videoUrl }
+      ]
+    };
+  }
+
+  function extractTranscriptText(payload) {
+    if (!payload) return '';
+    if (typeof payload === 'string') return payload.trim();
+    if (Array.isArray(payload)) {
+      return payload.map(item => extractTranscriptText(item)).filter(Boolean).join('\n').trim();
+    }
+    if (payload.error && payload.error.message) {
+      throw new Error(payload.error.message);
+    }
+    if (typeof payload.transcript === 'string') return payload.transcript.trim();
+    if (Array.isArray(payload.transcript)) return payload.transcript.join('\n').trim();
+    if (payload.output_text) {
+      if (Array.isArray(payload.output_text)) return payload.output_text.join('\n').trim();
+      if (typeof payload.output_text === 'string') return payload.output_text.trim();
+    }
+    if (Array.isArray(payload.output)) {
+      const pieces = [];
+      payload.output.forEach(entry => {
+        if (entry && Array.isArray(entry.content)) {
+          entry.content.forEach(part => {
+            if (part && typeof part.text === 'string') {
+              pieces.push(part.text);
+            }
+          });
+        }
+      });
+      const joined = pieces.join('\n').trim();
+      if (joined) return joined;
+    }
+    if (Array.isArray(payload.choices)) {
+      const collected = payload.choices.map(choice => {
+        if (!choice) return '';
+        if (choice.message && typeof choice.message.content === 'string') {
+          return choice.message.content;
+        }
+        if (choice.message && Array.isArray(choice.message.content)) {
+          return choice.message.content.map(part => part && part.text ? part.text : '').join('\n');
+        }
+        if (typeof choice.text === 'string') return choice.text;
+        return '';
+      }).filter(Boolean);
+      const joined = collected.join('\n').trim();
+      if (joined) return joined;
+    }
+    if (typeof payload.text === 'string') return payload.text.trim();
+    if (payload.data && typeof payload.data === 'string') return payload.data.trim();
+    return '';
+  }
+
+  async function fetchTranscriptForVideo(videoId, options) {
+    const opts = Object.assign({ force: false }, options || {});
+    if (!videoId) throw new Error('无法识别当前视频 ID。');
+    if (!opts.force) {
+      const cachedValue = getCachedTranscript(videoId);
+      if (cachedValue) return cachedValue;
+      if (transcriptFetches.has(videoId)) {
+        return transcriptFetches.get(videoId);
+      }
+    }
+
+    const settings = getTranscriptSettings();
+    const endpoint = (settings.endpoint || '').trim();
+    if (!endpoint) throw new Error('请先配置字幕接口路径。');
+
+    const headers = { 'Content-Type': 'application/json' };
+    if (settings.apiKey && settings.apiKey.trim()) {
+      headers.Authorization = `Bearer ${settings.apiKey.trim()}`;
+    }
+
+    const timeoutMs = clampTranscriptTimeoutMs(settings.timeoutMs || DEFAULT_TRANSCRIPT_SETTINGS.timeoutMs);
+    const timeoutMinutesLabel = transcriptMsToMinutes(timeoutMs);
+    const requestBody = buildTranscriptRequestBody(videoId, { videoTitle: opts.videoTitle, videoUrl: opts.videoUrl });
+    const fetchPromise = (async () => {
+      configData.transcript.isFetching = true;
+      configData.transcript.lastVideoId = videoId;
+      let timeoutId = null;
+      try {
+        const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        const response = await Promise.race([
+          fetch(endpoint, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(requestBody),
+            signal: controller ? controller.signal : undefined
+          }),
+          new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+              const timeoutError = new Error(`字幕接口在 ${timeoutMinutesLabel} 分钟内无响应，已自动取消请求。`);
+              timeoutError.name = 'TranscriptTimeoutError';
+              if (controller && typeof controller.abort === 'function') {
+                try { controller.abort(); } catch {}
+              }
+              reject(timeoutError);
+            }, timeoutMs);
+          })
+        ]);
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        const rawText = await response.text();
+        let payload = null;
+        if (rawText) {
+          try { payload = JSON.parse(rawText); } catch { payload = rawText; }
+        }
+        if (!response.ok) {
+          const detail = (payload && payload.error && payload.error.message) ||
+                        (payload && payload.message) ||
+                        (typeof rawText === 'string' ? rawText : '') ||
+                        `HTTP ${response.status}`;
+          throw new Error(detail);
+        }
+        const transcriptText = extractTranscriptText(payload);
+        if (!transcriptText || !transcriptText.trim()) {
+          throw new Error('字幕接口未返回有效内容。');
+        }
+        const normalized = transcriptText.trim();
+        const fetchedAt = Date.now();
+        transcriptCache.set(videoId, { text: normalized, fetchedAt });
+        persistTranscriptForVideo(videoId, normalized);
+        configData.transcript.lastTranscript = normalized;
+        configData.transcript.lastFetchedAt = fetchedAt;
+        setTranscriptError('');
+        return normalized;
+      } catch (error) {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        const message = (error && error.message) ? error.message : String(error);
+        setTranscriptError(message);
+        throw error;
+      } finally {
+        configData.transcript.isFetching = false;
+        transcriptFetches.delete(videoId);
+      }
+    })();
+
+    transcriptFetches.set(videoId, fetchPromise);
+    return fetchPromise;
+  }
+
+/* -------------------------------------------------------------------------- *
  * Module 08 · "Last saved" info banner rendering and updates
  * -------------------------------------------------------------------------- */
 
@@ -970,9 +1384,8 @@
           e.stopImmediatePropagation();
           e.stopPropagation();
         } catch {}
-        // Toggle
         const hidden = (settingsContainer.style.display === 'none' || !settingsContainer.style.display);
-        if (hidden) openPopup(); else closePopup();
+        if (hidden) openPopup();
       };
       settingsButton.addEventListener('pointerdown', handlerPointerDown, { capture: true });
       // Also guard click bubbling to player
@@ -987,7 +1400,13 @@
 
     if (!backdrop._ysrpBound) {
       backdrop._ysrpBound = true;
-      backdrop.addEventListener('click', () => closePopup());
+      backdrop.addEventListener('click', (event) => {
+        try {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          event.stopPropagation();
+        } catch {}
+      });
     }
 
     // Expose for programmatic close
@@ -1043,6 +1462,7 @@
   }
 
   const pendingOriginalTitleGuarantees = new Map();
+  const transcriptVisibilityState = new Map(); // videoId -> true when transcript section is expanded
 
   function queueDearrowRetry(videoId) {
     if (!videoId) return;
@@ -1192,6 +1612,8 @@
     const settingsContainer = document.createElement('div');
     settingsContainer.classList.add(CLASS_NAMES.settingsContainer);
 
+    const LARGE_FORM_CONTROL_MAX_WIDTH = '48rem';
+
     // Header
     const settingsContainerHeader = document.createElement('div');
     settingsContainerHeader.style.display = 'flex';
@@ -1282,11 +1704,13 @@
       btn.style.cursor = 'pointer';
       btn.style.display = 'flex';
       btn.style.alignItems = 'center';
-      btn.style.gap = '0.4rem';
-      btn.style.padding = '0.25rem 0.5rem';
+      btn.style.gap = '0.5rem';
+      btn.style.padding = '0.25rem 0.75rem';
       btn.style.color = styles.tabInactive;
-      btn.style.fontWeight = '600';
+      btn.style.fontWeight = '700';
+      btn.style.fontSize = '1.6rem';
       const ic = createIcon(iconName, styles.tabInactive);
+      if (ic) ic.style.fontSize = '1.6rem';
       const span = document.createElement('span');
       span.textContent = label;
       btn.appendChild(ic);
@@ -1297,18 +1721,21 @@
 
     const tabRecords = makeTab('Records', 'database');
     const tabPrefs = makeTab('Settings', 'gear');
+    const tabTranscript = makeTab('Transcript', 'captions');
 
     tabsBar.appendChild(tabRecords);
     tabsBar.appendChild(tabPrefs);
+    tabsBar.appendChild(tabTranscript);
 
     function setActiveTab(tab) {
-      [tabRecords, tabPrefs].forEach(b => {
+      [tabRecords, tabPrefs, tabTranscript].forEach(b => {
         const active = (b === tab);
         b.style.color = active ? styles.tabActive : styles.tabInactive;
         if (b._icon) b._icon.style.color = active ? styles.tabActive : styles.tabInactive;
       });
       recordsContainer.style.display = tab === tabRecords ? 'flex' : 'none';
       prefsContainer.style.display = tab === tabPrefs ? 'flex' : 'none';
+      transcriptContainer.style.display = tab === tabTranscript ? 'flex' : 'none';
     }
 
     // Body root
@@ -1681,6 +2108,21 @@
           const noteIcon = createIcon('note', styles.editButtonColor);
           noteButton.appendChild(noteIcon);
 
+          const transcriptButton = document.createElement('button');
+          transcriptButton.style.background = 'transparent';
+          transcriptButton.style.border = 'none';
+          transcriptButton.style.cursor = 'pointer';
+          transcriptButton.style.marginRight = '0.5rem';
+          transcriptButton.style.display = 'flex';
+          transcriptButton.style.alignItems = 'center';
+          transcriptButton.style.justifyContent = 'center';
+          transcriptButton.style.width = '2rem';
+          transcriptButton.style.height = '2rem';
+          transcriptButton.style.borderRadius = '0.5rem';
+          transcriptButton.title = '获取字幕';
+          const transcriptIcon = createIcon('captions', styles.tabActive);
+          transcriptButton.appendChild(transcriptIcon);
+
           if (!originalTitleValue) {
             getOriginalTitle(videoId)
               .then(title => {
@@ -1717,6 +2159,7 @@
           if (dearrowToggleButton) {
             videoElTop.appendChild(dearrowToggleButton);
           }
+          videoElTop.appendChild(transcriptButton);
           videoElTop.appendChild(noteButton);
           videoElTop.appendChild(urlButton);
           videoElTop.appendChild(deleteButton);
@@ -1789,6 +2232,246 @@
           urlDisplay.appendChild(copyButton);
           urlDisplay.appendChild(openButton);
           videoEl.appendChild(urlDisplay);
+
+          const transcriptContainer = document.createElement('div');
+          transcriptContainer.classList.add('ysrp-transcript-container');
+          Object.assign(transcriptContainer.style, {
+            marginTop: '0.5rem',
+            padding: '0.5rem',
+            background: styles.urlBackground,
+            color: styles.color,
+            borderRadius: '0.5rem',
+            display: 'none',
+            flexDirection: 'column',
+            gap: '0.35rem'
+          });
+
+          const transcriptHeader = document.createElement('div');
+          Object.assign(transcriptHeader.style, {
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '0.5rem',
+            flexWrap: 'wrap'
+          });
+
+          const transcriptLabelGroup = document.createElement('div');
+          Object.assign(transcriptLabelGroup.style, {
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.4rem',
+            flexWrap: 'wrap',
+            minWidth: 0
+          });
+          const transcriptLabel = document.createElement('strong');
+          transcriptLabel.textContent = '字幕';
+          transcriptLabel.style.fontSize = '1rem';
+          transcriptLabel.style.fontWeight = '600';
+          transcriptLabel.style.color = styles.subtleText;
+          transcriptLabelGroup.appendChild(transcriptLabel);
+
+          const transcriptStatusText = document.createElement('span');
+          Object.assign(transcriptStatusText.style, {
+            fontSize: '0.85rem',
+            color: styles.tabActive || styles.subtleText,
+            opacity: '0.85',
+            display: 'none',
+            whiteSpace: 'nowrap'
+          });
+          transcriptLabelGroup.appendChild(transcriptStatusText);
+
+          const transcriptHeaderRight = document.createElement('div');
+          Object.assign(transcriptHeaderRight.style, {
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.35rem'
+          });
+
+          function makeTranscriptActionButton(titleText, iconName, iconColor) {
+            const btn = document.createElement('button');
+            Object.assign(btn.style, {
+              background: 'transparent',
+              border: styles.buttonBorder,
+              borderRadius: '0.4rem',
+              cursor: 'pointer',
+              padding: '0.25rem 0.4rem',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            });
+            btn.title = titleText;
+            btn.appendChild(createIcon(iconName, iconColor));
+            return btn;
+          }
+
+          const transcriptRefreshButton = makeTranscriptActionButton('刷新字幕', 'refresh', styles.tabInactive);
+          const transcriptCopyButton = makeTranscriptActionButton('复制字幕', 'copy', styles.copyButtonColor);
+          transcriptCopyButton.disabled = true;
+          transcriptHeaderRight.appendChild(transcriptRefreshButton);
+          transcriptHeaderRight.appendChild(transcriptCopyButton);
+          transcriptHeader.appendChild(transcriptLabelGroup);
+          transcriptHeader.appendChild(transcriptHeaderRight);
+
+    const transcriptOutput = document.createElement('textarea');
+    Object.assign(transcriptOutput.style, {
+      width: '100%',
+      minHeight: '6rem',
+      border: `1px solid ${styles.inputBorder}`,
+      background: styles.inputBg,
+      borderRadius: '0.3rem',
+      padding: '0.4rem',
+      fontFamily: 'monospace',
+      fontSize: '1rem',
+      lineHeight: '1.4',
+      color: styles.color,
+      resize: 'vertical',
+      boxSizing: 'border-box'
+    });
+    transcriptOutput.readOnly = true;
+    transcriptOutput.placeholder = '字幕内容加载后会显示在这里…';
+    const transcriptPlaceholderDefault = transcriptOutput.placeholder;
+
+          transcriptContainer.appendChild(transcriptHeader);
+          transcriptContainer.appendChild(transcriptOutput);
+          videoEl.appendChild(transcriptContainer);
+
+          let transcriptVisible = false;
+          let transcriptLoading = false;
+          let transcriptValue = '';
+          const shouldRestoreTranscript = transcriptVisibilityState.has(videoId);
+
+          const cachedTranscript = typeof getCachedTranscript === 'function' ? getCachedTranscript(videoId) : '';
+          if (cachedTranscript) {
+            transcriptValue = cachedTranscript;
+            transcriptOutput.value = transcriptValue;
+            transcriptCopyButton.disabled = false;
+            transcriptContainer.dataset.loaded = 'true';
+            setTranscriptStatus('字幕来自缓存。');
+          }
+
+          function normalizeTranscriptStatusMessage(rawText) {
+            if (!rawText) return '';
+            return rawText
+              .replace(/^\s*字幕(?:[:：]\s*)?/, '')
+              .trim();
+          }
+
+          function setTranscriptStatus(text) {
+            const rawMessage = typeof text === 'string' ? text.trim() : '';
+            const message = normalizeTranscriptStatusMessage(rawMessage);
+            const placeholderText = message || transcriptPlaceholderDefault;
+            transcriptOutput.title = placeholderText;
+            if (!transcriptValue) {
+              transcriptOutput.placeholder = placeholderText;
+            }
+            if (transcriptStatusText) {
+              if (message) {
+                transcriptStatusText.textContent = message;
+                transcriptStatusText.style.display = 'inline-flex';
+              } else {
+                transcriptStatusText.textContent = '';
+                transcriptStatusText.style.display = 'none';
+              }
+            }
+          }
+
+          function syncTranscriptOutput(value) {
+            transcriptValue = value || '';
+            transcriptOutput.value = transcriptValue;
+            transcriptCopyButton.disabled = !transcriptValue;
+            transcriptOutput.style.opacity = transcriptValue ? '1' : '0.7';
+            if (transcriptValue) {
+              transcriptOutput.placeholder = transcriptPlaceholderDefault;
+            }
+          }
+
+          function setTranscriptButtonsLoading(loading) {
+            transcriptLoading = loading;
+            const targetOpacity = loading ? '0.5' : '';
+            transcriptButton.disabled = loading;
+            transcriptRefreshButton.disabled = loading;
+            transcriptButton.style.opacity = targetOpacity || '';
+            transcriptRefreshButton.style.opacity = targetOpacity || '';
+          }
+
+          function setTranscriptVisibility(visible, options) {
+            const opts = Object.assign({ silent: false }, options || {});
+            const nextVisible = Boolean(visible);
+            transcriptVisible = nextVisible;
+            transcriptContainer.style.display = nextVisible ? 'flex' : 'none';
+            transcriptButton.title = nextVisible ? '隐藏字幕' : '获取字幕';
+            if (opts.silent || !videoId) return;
+            if (nextVisible) {
+              transcriptVisibilityState.set(videoId, true);
+            } else {
+              transcriptVisibilityState.delete(videoId);
+            }
+          }
+
+          function triggerTranscriptFetch(options) {
+            if (transcriptLoading) return;
+            if (typeof fetchTranscriptForVideo !== 'function') {
+              setTranscriptStatus('字幕模块未初始化。', styles.deleteButtonColor);
+              return;
+            }
+            const force = options && options.force;
+            setTranscriptButtonsLoading(true);
+            setTranscriptStatus('正在重新获取…', styles.subtleText);
+            fetchTranscriptForVideo(videoId, {
+              force: Boolean(force),
+              videoTitle: resolvedTitleInfo && resolvedTitleInfo.title,
+              videoUrl: videoURL
+            })
+              .then(text => {
+                syncTranscriptOutput(text);
+                transcriptContainer.dataset.loaded = 'true';
+                setTranscriptStatus(`字幕已更新（${new Date().toLocaleTimeString()}）`, styles.tabActive);
+              })
+              .catch(err => {
+                const message = err && err.message ? err.message : String(err);
+                setTranscriptStatus(`字幕获取失败：${message}`, styles.deleteButtonColor);
+              })
+              .finally(() => {
+                setTranscriptButtonsLoading(false);
+              });
+          }
+
+          setTranscriptVisibility(shouldRestoreTranscript, { silent: true });
+          if (shouldRestoreTranscript && !transcriptContainer.dataset.loaded) {
+            triggerTranscriptFetch();
+          }
+
+          transcriptButton.addEventListener('click', () => {
+            const nextVisible = !transcriptVisible;
+            setTranscriptVisibility(nextVisible);
+            if (nextVisible) {
+              if (!transcriptContainer.dataset.loaded) {
+                triggerTranscriptFetch();
+              }
+            }
+          });
+
+          transcriptRefreshButton.addEventListener('click', () => {
+            setTranscriptVisibility(true);
+            triggerTranscriptFetch({ force: true });
+          });
+
+          transcriptCopyButton.addEventListener('click', async () => {
+            const text = transcriptOutput.value.trim();
+            if (!text) {
+              setTranscriptStatus('暂无字幕内容可复制。', styles.subtleText);
+              return;
+            }
+            try {
+              await navigator.clipboard.writeText(text);
+              transcriptCopyButton.style.opacity = '0.6';
+              setTimeout(() => { transcriptCopyButton.style.opacity = '1'; }, 250);
+              setTranscriptStatus('字幕内容已复制。', styles.tabActive);
+            } catch (err) {
+              const message = err && err.message ? err.message : String(err);
+              setTranscriptStatus(`复制失败：${message}`, styles.deleteButtonColor);
+            }
+          });
 
           const noteContainer = document.createElement('div');
           noteContainer.classList.add('ysrp-note-container');
@@ -1939,6 +2622,9 @@
 
           deleteButton.addEventListener('click', () => {
             Storage.removeItem(key);
+            if (videoId) {
+              transcriptVisibilityState.delete(videoId);
+            }
             videosList.removeChild(videoEl);
             settingsContainerHeaderTitle.textContent = `Saved Videos - (${videosList.children.length})`;
           });
@@ -2093,6 +2779,18 @@
     // Prefs container (storage + import/export)
     const prefsContainer = document.createElement('div');
     Object.assign(prefsContainer.style, {
+      display: 'none',
+      flexDirection: 'column',
+      gap: '1rem',
+      minHeight: 0,
+      overflow: 'auto',
+      paddingRight: '0.25rem',
+      WebkitOverflowScrolling: 'touch'
+    });
+
+    // Transcript tab container
+    const transcriptContainer = document.createElement('div');
+    Object.assign(transcriptContainer.style, {
       display: 'none',
       flexDirection: 'column',
       gap: '1rem',
@@ -2287,23 +2985,29 @@
     const importTextarea = document.createElement('textarea');
     Object.assign(importTextarea.style, {
       width: '100%',
-      minHeight: '6rem',
+      maxWidth: LARGE_FORM_CONTROL_MAX_WIDTH,
+      minHeight: '7.5rem',
       background: styles.inputBg,
       color: styles.color,
       border: `1px solid ${styles.inputBorder}`,
-      borderRadius: '0.4rem',
-      padding: '0.5rem',
+      borderRadius: '0.6rem',
+      padding: '0.65rem 0.9rem',
       boxSizing: 'border-box',
       fontFamily: 'inherit',
-      fontSize: '0.95rem'
+      fontSize: '1.05rem',
+      lineHeight: '1.5'
     });
     importTextarea.placeholder = 'Paste exported JSON here...';
 
     const importActions = document.createElement('div');
-    importActions.style.display = 'flex';
-    importActions.style.gap = '0.5rem';
-    importActions.style.flexWrap = 'wrap';
-    importActions.style.alignItems = 'center';
+    Object.assign(importActions.style, {
+      display: 'flex',
+      gap: '0.5rem',
+      flexWrap: 'wrap',
+      alignItems: 'stretch',
+      width: '100%',
+      marginTop: '0.35rem'
+    });
 
     const btnImportText = document.createElement('button');
     Object.assign(btnImportText.style, {
@@ -2315,34 +3019,83 @@
       alignItems: 'center',
       justifyContent: 'center',
       gap: '0.5rem',
-      padding: '0.35rem 0.6rem',
-      color: styles.color
+      padding: '0.35rem 0.9rem',
+      color: styles.color,
+      minHeight: '3rem',
+      flex: '0 0 auto'
     });
     btnImportText.title = 'Import from pasted JSON';
     btnImportText.appendChild(createIcon('upload', styles.openButtonColor));
     btnImportText.appendChild(document.createTextNode('Import from Text'));
 
+    const fileInputWrapper = document.createElement('label');
+    Object.assign(fileInputWrapper.style, {
+      background: styles.buttonBackground,
+      border: styles.buttonBorder,
+      borderRadius: '0.5rem',
+      cursor: 'pointer',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '0.65rem',
+      padding: '0.35rem 0.9rem',
+      color: styles.color,
+      flex: '1',
+      minHeight: '3rem',
+      boxSizing: 'border-box'
+    });
+    fileInputWrapper.title = 'Select an export JSON file';
+
+    const fileInputIcon = createIcon('upload', styles.openButtonColor);
+    if (fileInputIcon) fileInputIcon.style.fontSize = '1.2rem';
+    const fileInputLabelText = document.createElement('span');
+    fileInputLabelText.textContent = 'Choose File';
+    fileInputLabelText.style.fontSize = '1rem';
+    fileInputLabelText.style.fontWeight = '700';
+
+    const fileInputDefaultLabel = 'No file chosen';
+    const fileNameDisplay = document.createElement('span');
+    fileNameDisplay.textContent = fileInputDefaultLabel;
+    Object.assign(fileNameDisplay.style, {
+      flex: '1',
+      color: styles.subtleText,
+      fontSize: '0.95rem',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+      whiteSpace: 'nowrap'
+    });
+
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
     fileInput.accept = 'application/json';
     Object.assign(fileInput.style, {
-      background: styles.buttonBackground,
-      border: styles.buttonBorder,
-      borderRadius: '0.5rem',
-      color: styles.color,
-      padding: '0.25rem'
+      display: 'none'
     });
 
-    const chkClear = document.createElement('label');
-    chkClear.style.display = 'flex';
-    chkClear.style.alignItems = 'center';
-    chkClear.style.gap = '0.4rem';
+    fileInputWrapper.appendChild(fileInputIcon);
+    fileInputWrapper.appendChild(fileInputLabelText);
+    fileInputWrapper.appendChild(fileNameDisplay);
+    fileInputWrapper.appendChild(fileInput);
+
+    const overwriteRow = document.createElement('div');
+    Object.assign(overwriteRow.style, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '0.55rem',
+      fontSize: '1.1rem',
+      marginTop: '0.6rem'
+    });
     const chk = document.createElement('input');
     chk.type = 'checkbox';
+    chk.style.width = '1.25rem';
+    chk.style.height = '1.25rem';
+    chk.style.borderRadius = '0.35rem';
+    chk.style.accentColor = styles.tabActive;
     const chkSpan = document.createElement('span');
     chkSpan.textContent = 'Overwrite';
-    chkClear.appendChild(chk);
-    chkClear.appendChild(chkSpan);
+    chkSpan.style.fontSize = '1.2rem';
+    chkSpan.style.fontWeight = '600';
+    overwriteRow.appendChild(chk);
+    overwriteRow.appendChild(chkSpan);
 
     const importHint = document.createElement('div');
     importHint.style.color = styles.subtleText;
@@ -2354,18 +3107,217 @@
     importStatus.style.fontSize = '0.85rem';
 
     importActions.appendChild(btnImportText);
-    importActions.appendChild(fileInput);
-    importActions.appendChild(chkClear);
+    importActions.appendChild(fileInputWrapper);
 
     importCard.appendChild(importTitle);
     importCard.appendChild(importTextarea);
     importCard.appendChild(importActions);
+    importCard.appendChild(overwriteRow);
     importCard.appendChild(importHint);
     importCard.appendChild(importStatus);
+
+    // Transcript card
+    const transcriptCard = document.createElement('div');
+    Object.assign(transcriptCard.style, {
+      background: styles.recordBackground,
+      borderRadius: '0.5rem',
+      padding: '0.75rem',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '0.6rem'
+    });
+
+    const transcriptTitle = document.createElement('div');
+    transcriptTitle.style.display = 'flex';
+    transcriptTitle.style.alignItems = 'center';
+    transcriptTitle.style.gap = '0.5rem';
+    transcriptTitle.appendChild(createIcon('captions', styles.color));
+    const transcriptTitleSpan = document.createElement('strong');
+    transcriptTitleSpan.textContent = 'Subtitles · Transcript';
+    transcriptTitleSpan.style.fontSize = '1.25rem';
+    transcriptTitleSpan.style.fontWeight = '700';
+    transcriptTitle.appendChild(transcriptTitleSpan);
+
+    const transcriptDesc = document.createElement('div');
+    transcriptDesc.textContent = 'Configure the OpenAI-compatible endpoint used for subtitles. Actual fetching now lives inside the Records tab.';
+    transcriptDesc.style.color = styles.subtleText;
+    transcriptDesc.style.fontSize = '1rem';
+
+    const transcriptFields = document.createElement('div');
+    Object.assign(transcriptFields.style, {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '0.5rem'
+    });
+
+    const transcriptSettings = getTranscriptSettings();
+    const timeoutMinMinutes = typeof TRANSCRIPT_TIMEOUT_MIN_MINUTES === 'number' ? TRANSCRIPT_TIMEOUT_MIN_MINUTES : 1;
+    const timeoutMaxMinutes = typeof TRANSCRIPT_TIMEOUT_MAX_MINUTES === 'number' ? TRANSCRIPT_TIMEOUT_MAX_MINUTES : 60;
+    const timeoutDefaultMinutes = typeof TRANSCRIPT_TIMEOUT_DEFAULT_MINUTES === 'number'
+      ? TRANSCRIPT_TIMEOUT_DEFAULT_MINUTES
+      : 10;
+
+    function makeTranscriptInput(labelText, inputEl) {
+      const wrapper = document.createElement('label');
+      wrapper.style.display = 'flex';
+      wrapper.style.flexDirection = 'column';
+      wrapper.style.gap = '0.45rem';
+      wrapper.style.width = '100%';
+      wrapper.style.maxWidth = LARGE_FORM_CONTROL_MAX_WIDTH;
+      const span = document.createElement('span');
+      span.textContent = labelText;
+      span.style.fontSize = '1.15rem';
+      span.style.fontWeight = '600';
+      span.style.color = styles.subtleText;
+      wrapper.appendChild(span);
+      wrapper.appendChild(inputEl);
+      return wrapper;
+    }
+
+    function decorateTextInput(input) {
+      Object.assign(input.style, {
+        background: styles.inputBg,
+        color: styles.color,
+        border: `1px solid ${styles.inputBorder}`,
+        borderRadius: '0.6rem',
+        padding: '0.65rem 0.9rem',
+        minHeight: '3rem',
+        width: '100%',
+        maxWidth: LARGE_FORM_CONTROL_MAX_WIDTH,
+        boxSizing: 'border-box',
+        fontFamily: 'inherit',
+        fontSize: '1.2rem',
+        lineHeight: '1.5'
+      });
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      return input;
+    }
+
+    const endpointInput = decorateTextInput(document.createElement('input'));
+    endpointInput.type = 'text';
+    endpointInput.placeholder = 'https://example.com/v1/chat/completions';
+    endpointInput.value = transcriptSettings.endpoint || '';
+
+    const modelInput = decorateTextInput(document.createElement('input'));
+    modelInput.type = 'text';
+    modelInput.placeholder = 'transcript';
+    modelInput.value = transcriptSettings.model || '';
+
+    const apiKeyInput = decorateTextInput(document.createElement('input'));
+    apiKeyInput.type = 'password';
+    apiKeyInput.placeholder = 'sk-***';
+    apiKeyInput.value = transcriptSettings.apiKey || '';
+    apiKeyInput.autocomplete = 'new-password';
+    const apiKeyToggle = document.createElement('button');
+    Object.assign(apiKeyToggle.style, {
+      background: styles.buttonBackground,
+      border: styles.buttonBorder,
+      borderRadius: '0.6rem',
+      cursor: 'pointer',
+      padding: '0 1rem',
+      color: styles.color,
+      fontSize: '1.05rem',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      minHeight: '3rem',
+      whiteSpace: 'nowrap'
+    });
+    apiKeyToggle.type = 'button';
+    apiKeyToggle.textContent = '显示';
+    apiKeyToggle.addEventListener('click', (event) => {
+      event.preventDefault();
+      const isHidden = apiKeyInput.type === 'password';
+      apiKeyInput.type = isHidden ? 'text' : 'password';
+      apiKeyToggle.textContent = isHidden ? '隐藏' : '显示';
+    });
+    const apiKeyInputRow = document.createElement('div');
+    Object.assign(apiKeyInputRow.style, {
+      display: 'flex',
+      alignItems: 'stretch',
+      gap: '0.5rem',
+      width: '100%'
+    });
+    apiKeyInput.style.flex = '1';
+    apiKeyInputRow.appendChild(apiKeyInput);
+    apiKeyInputRow.appendChild(apiKeyToggle);
+    const apiKeyField = makeTranscriptInput('API Key', apiKeyInputRow);
+
+    const timeoutInput = decorateTextInput(document.createElement('input'));
+    timeoutInput.type = 'number';
+    timeoutInput.min = String(timeoutMinMinutes);
+    timeoutInput.max = String(timeoutMaxMinutes);
+    timeoutInput.step = '1';
+    timeoutInput.placeholder = `${timeoutDefaultMinutes}`;
+    const timeoutDefaultMs = typeof TRANSCRIPT_DEFAULT_TIMEOUT_MS === 'number'
+      ? TRANSCRIPT_DEFAULT_TIMEOUT_MS
+      : timeoutDefaultMinutes * 60 * 1000;
+    const currentTimeoutMinutes = typeof transcriptMsToMinutes === 'function'
+      ? transcriptMsToMinutes((transcriptSettings.timeoutMs || timeoutDefaultMs))
+      : Math.round((transcriptSettings.timeoutMs || timeoutDefaultMs) / 60000);
+    timeoutInput.value = String(
+      Math.min(
+        timeoutMaxMinutes,
+        Math.max(timeoutMinMinutes, currentTimeoutMinutes)
+      )
+    );
+
+    transcriptFields.appendChild(makeTranscriptInput('API Endpoint', endpointInput));
+    transcriptFields.appendChild(makeTranscriptInput('Model', modelInput));
+    transcriptFields.appendChild(apiKeyField);
+    transcriptFields.appendChild(makeTranscriptInput('Timeout (minutes)', timeoutInput));
+
+    const transcriptVideoInfo = document.createElement('div');
+    transcriptVideoInfo.style.color = styles.subtleText;
+    transcriptVideoInfo.style.fontSize = '1rem';
+
+    function setTranscriptVideoInfo(detail) {
+      if (!detail) {
+        transcriptVideoInfo.textContent = '当前视频：未检测到可用的影片。';
+        return;
+      }
+      const vid = detail.videoId || getVideoId();
+      const title = detail.title || detail.value || getVideoName() || DEFAULT_VIDEO_NAME;
+      transcriptVideoInfo.textContent = `当前视频：${title}${vid ? ` · ${vid}` : ''}`;
+    }
+    setTranscriptVideoInfo(configData.cachedVideoTitle);
+    const transcriptVideoEventName = (typeof CURRENT_VIDEO_STATUS_EVENT === 'string' && CURRENT_VIDEO_STATUS_EVENT) || 'ysrp-current-video-status';
+    document.addEventListener(transcriptVideoEventName, evt => setTranscriptVideoInfo(evt.detail));
+
+    let transcriptSaveTimer = null;
+    function persistTranscriptInputs() {
+      if (transcriptSaveTimer) clearTimeout(transcriptSaveTimer);
+      transcriptSaveTimer = setTimeout(() => {
+        const parsedTimeoutMinutes = parseFloat(timeoutInput.value);
+        const timeoutMsValue = Number.isFinite(parsedTimeoutMinutes) && parsedTimeoutMinutes > 0
+          ? (typeof clampTranscriptTimeoutMs === 'function'
+              ? clampTranscriptTimeoutMs(parsedTimeoutMinutes * 60 * 1000)
+              : Math.round(parsedTimeoutMinutes * 60 * 1000))
+          : undefined;
+        updateTranscriptSettings({
+          endpoint: endpointInput.value,
+          model: modelInput.value,
+          apiKey: apiKeyInput.value,
+          timeoutMs: timeoutMsValue
+        });
+      }, 250);
+    }
+
+    [endpointInput, modelInput, apiKeyInput, timeoutInput].forEach(input => {
+      input.addEventListener('input', persistTranscriptInputs);
+      input.addEventListener('change', persistTranscriptInputs);
+    });
+
+    transcriptCard.appendChild(transcriptTitle);
+    transcriptCard.appendChild(transcriptDesc);
+    transcriptCard.appendChild(transcriptFields);
+    transcriptCard.appendChild(transcriptVideoInfo);
 
     prefsContainer.appendChild(storageCard);
     prefsContainer.appendChild(exportCard);
     prefsContainer.appendChild(importCard);
+    transcriptContainer.appendChild(transcriptCard);
 
     // Compose settings container (centered by default)
     settingsContainer.appendChild(settingsContainerHeader);
@@ -2373,6 +3325,7 @@
     settingsContainer.appendChild(settingsContainerBody);
     settingsContainerBody.appendChild(recordsContainer);
     settingsContainerBody.appendChild(prefsContainer);
+    settingsContainerBody.appendChild(transcriptContainer);
 
     Object.assign(settingsContainer.style, {
       all: 'initial',
@@ -2406,6 +3359,7 @@
     setActiveAndLock(tabRecords);
     tabRecords.addEventListener('click', () => setActiveAndLock(tabRecords));
     tabPrefs.addEventListener('click', () => setActiveAndLock(tabPrefs));
+    tabTranscript.addEventListener('click', () => setActiveAndLock(tabTranscript));
 
     // Build initial list
     rebuildRecords();
@@ -2492,6 +3446,7 @@
 
     fileInput.addEventListener('change', () => {
       const file = fileInput.files && fileInput.files[0];
+      fileNameDisplay.textContent = file ? file.name : fileInputDefaultLabel;
       if (!file) return;
       const reader = new FileReader();
       reader.onload = () => {
@@ -2501,6 +3456,7 @@
       };
       reader.readAsText(file);
       fileInput.value = '';
+      fileNameDisplay.textContent = fileInputDefaultLabel;
     });
   }
 
