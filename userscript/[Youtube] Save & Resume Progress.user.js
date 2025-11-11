@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         [Youtube] Save & Resume Progress [20251111] v1.0.2
+// @name         [Youtube] Save & Resume Progress [20251111] v1.0.3
 // @namespace    0_V userscripts/Youtube Save & Resume Progress
 // @description  Save & resume YouTube playback progress. Storage backend selection (localStorage or GM storage) with migration, import/export under a settings sub-tab. Fix: On YouTube new UI, the settings popup opens reliably on the page (not on the player), without causing player zoom/jitter, even right after page load.
-// @version      [20251111] v1.0.2
-// @update-log   [20251111] NOTICE/module spacing refinements
+// @version      [20251111] v1.0.3
+// @update-log   [20251111] v1.0.3 · Notes button auto-opens blank notes and saves edits on toggle
 // @license      MIT
 //
 // @match        *://*.youtube.com/*
@@ -86,6 +86,7 @@
     gear: ['fa-solid', 'fa-gear'],
     link: ['fa-solid', 'fa-link'],
     edit: ['fa-solid', 'fa-pencil'],
+    note: ['fa-solid', 'fa-pen-to-square'],
     save: ['fa-solid', 'fa-save'],
     copy: ['fa-solid', 'fa-copy'],
     check: ['fa-solid', 'fa-check'],
@@ -771,7 +772,21 @@
 
     const idToStore = `${KEY_PREFIX}${videoId}`;
     const originalTitle = originalTitleCache.get(videoId) || null;
-    const progressData = { videoProgress, saveDate: Date.now(), videoName, originalTitle };
+    let previousData = null;
+    try {
+      const existingRecord = Storage.getItem(idToStore);
+      if (existingRecord) {
+        previousData = JSON.parse(existingRecord) || {};
+      }
+    } catch {
+      previousData = null;
+    }
+    const progressData = Object.assign({}, previousData || {}, {
+      videoProgress,
+      saveDate: Date.now(),
+      videoName,
+      originalTitle
+    });
     try {
       Storage.setItem(idToStore, JSON.stringify(progressData));
       try {
@@ -994,6 +1009,7 @@
     DEFAULT_VIDEO_NAME.toLowerCase(),
     (TITLE_PENDING_PLACEHOLDER || '').toLowerCase()
   ]);
+  const NOTE_EMPTY_PLACEHOLDER = '暂无笔记';
 
   function isPlaceholderDeArrowTitle(text) {
     if (!text) return true;
@@ -1405,8 +1421,13 @@
           const videoName = parsedData.videoName;
           const videoProgress = parsedData.videoProgress;
           const storedOriginalTitle = parsedData.originalTitle;
+          const storedNoteValue = typeof parsedData.videoNote === 'string' ? parsedData.videoNote : '';
           const progress = videoProgress || 0;
           const videoId = key.split(KEY_PREFIX)[1];
+          let currentNoteValue = storedNoteValue;
+          let isEditingNote = false;
+          let noteTextarea = null;
+          let noteVisible = false;
 
           const videoEl = document.createElement('li');
           Object.assign(videoEl.style, {
@@ -1645,20 +1666,20 @@
           const linkIcon = createIcon('link', styles.linkButtonColor);
           urlButton.appendChild(linkIcon);
 
-          const editButton = document.createElement('button');
-          editButton.style.background = 'transparent';
-          editButton.style.border = 'none';
-          editButton.style.cursor = 'pointer';
-          editButton.style.marginRight = '0.5rem';
-          editButton.style.display = 'flex';
-          editButton.style.alignItems = 'center';
-          editButton.style.justifyContent = 'center';
-          editButton.style.width = '2rem';
-          editButton.style.height = '2rem';
-          editButton.style.borderRadius = '0.5rem';
-          editButton.title = '编辑视频名称';
-          const editIcon = createIcon('edit', styles.editButtonColor);
-          editButton.appendChild(editIcon);
+          const noteButton = document.createElement('button');
+          noteButton.style.background = 'transparent';
+          noteButton.style.border = 'none';
+          noteButton.style.cursor = 'pointer';
+          noteButton.style.marginRight = '0.5rem';
+          noteButton.style.display = 'flex';
+          noteButton.style.alignItems = 'center';
+          noteButton.style.justifyContent = 'center';
+          noteButton.style.width = '2rem';
+          noteButton.style.height = '2rem';
+          noteButton.style.borderRadius = '0.5rem';
+          noteButton.title = '显示笔记';
+          const noteIcon = createIcon('note', styles.editButtonColor);
+          noteButton.appendChild(noteIcon);
 
           if (!originalTitleValue) {
             getOriginalTitle(videoId)
@@ -1696,7 +1717,7 @@
           if (dearrowToggleButton) {
             videoElTop.appendChild(dearrowToggleButton);
           }
-          videoElTop.appendChild(editButton);
+          videoElTop.appendChild(noteButton);
           videoElTop.appendChild(urlButton);
           videoElTop.appendChild(deleteButton);
           videoEl.appendChild(videoElTop);
@@ -1769,6 +1790,122 @@
           urlDisplay.appendChild(openButton);
           videoEl.appendChild(urlDisplay);
 
+          const noteContainer = document.createElement('div');
+          noteContainer.classList.add('ysrp-note-container');
+          Object.assign(noteContainer.style, {
+            marginTop: '0.5rem',
+            padding: '0.5rem',
+            background: styles.urlBackground,
+            color: styles.color,
+            borderRadius: '0.5rem',
+            display: 'none',
+            flexDirection: 'column',
+            gap: '0.35rem'
+          });
+
+          const noteHeader = document.createElement('div');
+          Object.assign(noteHeader.style, {
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '0.5rem'
+          });
+
+          const noteLabel = document.createElement('strong');
+          noteLabel.textContent = '笔记';
+          Object.assign(noteLabel.style, {
+            fontSize: '0.85rem',
+            color: styles.subtleText
+          });
+
+          const noteEditButton = document.createElement('button');
+          Object.assign(noteEditButton.style, {
+            background: 'transparent',
+            border: 'none',
+            color: styles.editButtonColor,
+            cursor: 'pointer',
+            fontSize: '0.9rem',
+            padding: '0.15rem',
+            minWidth: 'auto',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center'
+          });
+          noteHeader.appendChild(noteLabel);
+          noteHeader.appendChild(noteEditButton);
+
+          const noteBody = document.createElement('div');
+          noteBody.classList.add('ysrp-note-body');
+          Object.assign(noteBody.style, {
+            display: 'none',
+            flexDirection: 'column',
+            gap: '0.35rem'
+          });
+
+          const noteContent = document.createElement('div');
+          noteContent.classList.add('ysrp-note-text');
+          Object.assign(noteContent.style, {
+            whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word',
+            lineHeight: '1.4',
+            fontSize: '0.95rem'
+          });
+
+          function syncNotePreview(value) {
+            const hasNote = Boolean(value);
+            noteContent.textContent = hasNote ? value : NOTE_EMPTY_PLACEHOLDER;
+            noteContent.style.color = hasNote ? styles.color : styles.subtleText;
+            noteContent.style.fontStyle = hasNote ? 'normal' : 'italic';
+            noteContent.style.opacity = hasNote ? '1' : '0.9';
+          }
+
+          syncNotePreview(currentNoteValue);
+          noteBody.appendChild(noteContent);
+          noteContainer.appendChild(noteHeader);
+          noteContainer.appendChild(noteBody);
+          videoEl.appendChild(noteContainer);
+
+          function updateNoteEditButtonState() {
+            noteEditButton.innerHTML = '';
+            const iconName = isEditingNote ? 'save' : 'edit';
+            const iconColor = isEditingNote ? styles.openButtonColor : styles.linkButtonColor;
+            noteEditButton.appendChild(createIcon(iconName, iconColor));
+            noteEditButton.title = isEditingNote ? '保存笔记' : '编辑笔记';
+          }
+
+          function hasNoteContent() {
+            return Boolean((currentNoteValue || '').trim());
+          }
+
+          function refreshNoteButtonState() {
+            const notePresent = hasNoteContent();
+            noteButton.disabled = false;
+            noteButton.style.opacity = '1';
+            noteButton.title = isEditingNote
+              ? '保存并折叠笔记'
+              : notePresent
+                ? (noteVisible ? '隐藏笔记' : '显示笔记')
+                : '添加笔记';
+          }
+
+          function setNoteVisibility(visible) {
+            if (!visible && isEditingNote) return;
+            noteVisible = Boolean(visible);
+            noteContainer.style.display = noteVisible ? 'flex' : 'none';
+            noteBody.style.display = noteVisible ? 'flex' : 'none';
+            refreshNoteButtonState();
+          }
+
+          function ensureNoteVisible() {
+            if (!noteVisible) {
+              setNoteVisibility(true);
+            }
+          }
+
+          updateNoteEditButtonState();
+          refreshNoteButtonState();
+          setNoteVisibility(false);
+
           urlButton.addEventListener('click', () => {
             if (urlDisplay.style.display === 'none') {
               urlDisplay.style.display = 'flex';
@@ -1806,57 +1943,95 @@
             settingsContainerHeaderTitle.textContent = `Saved Videos - (${videosList.children.length})`;
           });
 
-          // Edit name
-          let isEditing = false;
-          editButton.addEventListener('click', () => {
-            if (!isEditing) {
-              isEditing = true;
-              const textarea = document.createElement('textarea');
-              textarea.value = videoElText.textContent;
-              Object.assign(textarea.style, {
-                flex: '1',
-                marginRight: '0.5rem',
-                padding: '0.2rem',
-                border: `1px solid ${styles.inputBorder}`,
-                background: styles.inputBg,
-                borderRadius: '0.3rem',
-                resize: 'vertical',
-                minHeight: '1.5em',
-                fontSize: 'inherit',
-                lineHeight: 'inherit',
-                fontFamily: 'inherit',
-                boxSizing: 'border-box',
-                color: styles.color
-              });
-              textarea.addEventListener('input', () => {
-                textarea.style.height = 'auto';
-                textarea.style.height = `${textarea.scrollHeight}px`;
-              });
-              videoElTop.replaceChild(textarea, videoElText);
-              editIcon.classList.remove(...FontAwesomeIcons['edit']);
-              editIcon.classList.add(...FontAwesomeIcons['save']);
-              editIcon.style.color = styles.saveButtonColor;
-              editButton.title = '保存视频名称';
-            } else {
-              const textarea = videoElTop.querySelector('textarea');
-              const newName = textarea.value.trim() || DEFAULT_VIDEO_NAME;
-              dearrowTitle = newName;
-              if (!showingOriginalTitle) {
-                videoElText.textContent = dearrowTitle;
-              }
-              videoElTop.replaceChild(videoElText, textarea);
-              editIcon.classList.remove(...FontAwesomeIcons['save']);
-              editIcon.classList.add(...FontAwesomeIcons['edit']);
-              editIcon.style.color = styles.editButtonColor;
-              editButton.title = '编辑视频名称';
-              isEditing = false;
+          // Video notes
+
+          function enterNoteEditing() {
+            if (isEditingNote) return;
+            isEditingNote = true;
+            setNoteVisibility(true);
+            noteTextarea = document.createElement('textarea');
+            noteTextarea.value = currentNoteValue;
+            Object.assign(noteTextarea.style, {
+              width: '100%',
+              minHeight: '3rem',
+              border: `1px solid ${styles.inputBorder}`,
+              background: styles.inputBg,
+              borderRadius: '0.3rem',
+              padding: '0.35rem',
+              fontFamily: 'inherit',
+              fontSize: '0.95rem',
+              lineHeight: '1.4',
+              color: styles.color,
+              resize: 'vertical',
+              boxSizing: 'border-box'
+            });
+            noteTextarea.addEventListener('input', () => {
+              noteTextarea.style.height = 'auto';
+              noteTextarea.style.height = `${noteTextarea.scrollHeight}px`;
+            });
+            noteTextarea.dispatchEvent(new Event('input'));
+            noteBody.replaceChild(noteTextarea, noteContent);
+            updateNoteEditButtonState();
+            refreshNoteButtonState();
+            requestAnimationFrame(() => {
               try {
-                const savedData = JSON.parse(Storage.getItem(key)) || {};
-                savedData.videoName = newName;
-                Storage.setItem(key, JSON.stringify(savedData));
-              } catch (e) {
-                console.error('Failed to update video name in storage:', e);
+                noteTextarea.focus();
+                noteTextarea.setSelectionRange(noteTextarea.value.length, noteTextarea.value.length);
+              } catch {}
+            });
+          }
+
+          function persistNote(value) {
+            try {
+              const raw = Storage.getItem(key);
+              const savedData = raw ? (JSON.parse(raw) || {}) : {};
+              if (value) {
+                savedData.videoNote = value;
+              } else {
+                delete savedData.videoNote;
               }
+              Storage.setItem(key, JSON.stringify(savedData));
+            } catch (err) {
+              console.error('Failed to update video note in storage:', err);
+            }
+          }
+
+          function commitNoteEditing() {
+            if (!isEditingNote) return;
+            const textarea = noteTextarea || noteBody.querySelector('textarea');
+            const nextNote = textarea ? textarea.value.trim() : '';
+            currentNoteValue = nextNote;
+            syncNotePreview(currentNoteValue);
+            if (textarea) {
+              noteBody.replaceChild(noteContent, textarea);
+            }
+            isEditingNote = false;
+            noteTextarea = null;
+            persistNote(currentNoteValue);
+            updateNoteEditButtonState();
+            refreshNoteButtonState();
+          }
+
+          noteButton.addEventListener('click', () => {
+            if (isEditingNote) {
+              commitNoteEditing();
+              setNoteVisibility(false);
+              return;
+            }
+            if (!hasNoteContent()) {
+              ensureNoteVisible();
+              enterNoteEditing();
+              return;
+            }
+            setNoteVisibility(!noteVisible);
+          });
+
+          noteEditButton.addEventListener('click', () => {
+            if (!noteVisible) ensureNoteVisible();
+            if (!isEditingNote) {
+              enterNoteEditing();
+            } else {
+              commitNoteEditing();
             }
           });
 
