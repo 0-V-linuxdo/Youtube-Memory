@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         [Youtube] Save & Resume Progress [20251111] v1.1.0
+// @name         [Youtube] Video Memory [20251111] v1.2.0
 // @namespace    0_V userscripts/Youtube Save & Resume Progress
 // @description  Save & resume YouTube playback progress. Storage backend selection (localStorage or GM storage) with migration, import/export under a settings sub-tab. Fix: On YouTube new UI, the settings popup opens reliably on the page (not on the player), without causing player zoom/jitter, even right after page load.
-// @version      [20251111] v1.1.0
-// @update-log   [20251111] v1.1.0 · Transcript status badge now shows blue re-fetch messages without duplicate labels
+// @version      [20251111] v1.2.0
+// @update-log   [20251111] v1.2.0 · Added bilingual UI with language selector tab and refreshed transcript/records labels
 // @license      MIT
 //
 // @match        *://*.youtube.com/*
@@ -108,7 +108,8 @@
     download: ['fa-solid', 'fa-file-arrow-down'],
     upload: ['fa-solid', 'fa-file-arrow-up'],
     arrows: ['fa-solid', 'fa-right-left'],
-    refresh: ['fa-solid', 'fa-arrows-rotate']
+    refresh: ['fa-solid', 'fa-arrows-rotate'],
+    globe: ['fa-solid', 'fa-globe']
   };
 
 /* -------------------------------------------------------------------------- *
@@ -302,6 +303,267 @@
       observer.observe(document.body, { childList: true, subtree: true });
     });
   }
+
+/* -------------------------------------------------------------------------- *
+ * Module 05a · Internationalization helpers and language preference storage
+ * -------------------------------------------------------------------------- */
+
+  const LANGUAGE_STORAGE_KEY = 'YSRP_LanguagePreference';
+  const LANGUAGE_CHANGED_EVENT = 'ysrp-language-changed';
+  const LANGUAGE_PREFERENCE_OPTIONS = Object.freeze(['auto', 'zh', 'en']);
+  const LANGUAGE_FALLBACK = 'en';
+
+  function normalizeLanguagePreference(value) {
+    const raw = (value || '').toString().trim().toLowerCase();
+    if (raw === 'auto') return 'auto';
+    if (raw.startsWith('zh')) return 'zh';
+    if (raw === 'en' || raw.startsWith('en')) return 'en';
+    return 'auto';
+  }
+
+  function detectBrowserLanguage() {
+    const candidates = [];
+    if (Array.isArray(navigator.languages) && navigator.languages.length > 0) {
+      candidates.push(...navigator.languages);
+    }
+    if (typeof navigator.language === 'string') {
+      candidates.push(navigator.language);
+    }
+    if (typeof navigator.userLanguage === 'string') {
+      candidates.push(navigator.userLanguage);
+    }
+    const match = candidates.find(lang => typeof lang === 'string' && lang.trim());
+    if (!match) return LANGUAGE_FALLBACK;
+    const normalized = match.trim().toLowerCase();
+    if (normalized.startsWith('zh')) return 'zh';
+    return 'en';
+  }
+
+  function readStoredLanguagePreference() {
+    let stored = null;
+    try {
+      if (window.localStorage) {
+        stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
+      }
+    } catch {}
+    if (!stored && typeof GM_getValue === 'function') {
+      try {
+        stored = GM_getValue(LANGUAGE_STORAGE_KEY);
+      } catch {}
+    }
+    return normalizeLanguagePreference(stored);
+  }
+
+  function persistLanguagePreference(value) {
+    const normalized = normalizeLanguagePreference(value);
+    try {
+      if (window.localStorage) {
+        window.localStorage.setItem(LANGUAGE_STORAGE_KEY, normalized);
+      }
+    } catch {}
+    if (typeof GM_setValue === 'function') {
+      try {
+        GM_setValue(LANGUAGE_STORAGE_KEY, normalized);
+      } catch {}
+    }
+  }
+
+  function deepMerge(target, source) {
+    if (!source || typeof source !== 'object') return target;
+    const output = target && typeof target === 'object' ? target : {};
+    Object.keys(source).forEach(key => {
+      const value = source[key];
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        output[key] = deepMerge(output[key], value);
+      } else {
+        output[key] = value;
+      }
+    });
+    return output;
+  }
+
+  const translationStore = { en: {}, zh: {} };
+
+  function resolveMessage(lang, path) {
+    if (!path) return null;
+    const segments = path.split('.');
+    let current = translationStore[lang];
+    for (const segment of segments) {
+      if (!current || typeof current !== 'object') {
+        return null;
+      }
+      current = current[segment];
+    }
+    return typeof current === 'string' ? current : null;
+  }
+
+  function formatTemplate(template, params) {
+    if (typeof template !== 'string' || !params) return template;
+    return template.replace(/\{([^}]+)\}/g, (_, token) => {
+      const key = token.trim();
+      if (!key) return '';
+      return Object.prototype.hasOwnProperty.call(params, key) ? String(params[key]) : '';
+    });
+  }
+
+  let languagePreference = readStoredLanguagePreference();
+  if (!LANGUAGE_PREFERENCE_OPTIONS.includes(languagePreference)) {
+    languagePreference = 'auto';
+  }
+
+  function getResolvedLanguage() {
+    if (languagePreference === 'auto') {
+      return detectBrowserLanguage();
+    }
+    return languagePreference;
+  }
+
+  function updateConfigLanguageState() {
+    if (!configData || typeof configData !== 'object') return;
+    const resolved = getResolvedLanguage();
+    configData.language = Object.assign({}, configData.language || {}, {
+      preference: languagePreference,
+      resolved,
+      eventName: LANGUAGE_CHANGED_EVENT
+    });
+  }
+
+  updateConfigLanguageState();
+
+  const I18n = (() => {
+    function extend(messages) {
+      if (!messages || typeof messages !== 'object') return;
+      Object.keys(messages).forEach(langKey => {
+        if (!langKey) return;
+        const normalizedLang = langKey.toLowerCase().startsWith('zh') ? 'zh' : 'en';
+        translationStore[normalizedLang] = deepMerge(translationStore[normalizedLang], messages[langKey] || {});
+      });
+    }
+
+    function pick(messages, params) {
+      if (!messages || typeof messages !== 'object') return '';
+      const resolved = getResolvedLanguage();
+      const candidate = Object.prototype.hasOwnProperty.call(messages, resolved)
+        ? messages[resolved]
+        : (messages.en ?? messages.zh ?? messages[LANGUAGE_FALLBACK]);
+      let value = candidate;
+      if (typeof candidate === 'function') {
+        try {
+          value = candidate(params || {});
+        } catch {
+          value = '';
+        }
+      }
+      if (typeof value === 'string') {
+        return formatTemplate(value, params);
+      }
+      return '';
+    }
+
+    function t(path, params, fallback) {
+      if (!path) return typeof fallback === 'string' ? fallback : path;
+      const resolvedLang = getResolvedLanguage();
+      const primary = resolveMessage(resolvedLang, path);
+      if (primary) {
+        return formatTemplate(primary, params);
+      }
+      const secondary = resolveMessage('en', path);
+      if (secondary) {
+        return formatTemplate(secondary, params);
+      }
+      const tertiary = resolveMessage('zh', path);
+      if (tertiary) {
+        return formatTemplate(tertiary, params);
+      }
+      if (typeof fallback === 'string') return formatTemplate(fallback, params);
+      return path;
+    }
+
+    function setPreference(value) {
+      const normalized = normalizeLanguagePreference(value);
+      if (normalized === languagePreference) return;
+      languagePreference = normalized;
+      persistLanguagePreference(languagePreference);
+      updateConfigLanguageState();
+      try {
+        document.dispatchEvent(new CustomEvent(LANGUAGE_CHANGED_EVENT, {
+          detail: {
+            preference: languagePreference,
+            resolved: getResolvedLanguage()
+          }
+        }));
+      } catch {}
+    }
+
+    function getPreference() {
+      return languagePreference;
+    }
+
+    function getOptions() {
+      return LANGUAGE_PREFERENCE_OPTIONS.slice();
+    }
+
+    return {
+      t,
+      extend,
+      setPreference,
+      getPreference,
+      getResolvedLanguage,
+      getOptions,
+      detectBrowserLanguage,
+      getEventName: () => LANGUAGE_CHANGED_EVENT,
+      pick
+    };
+  })();
+
+  I18n.extend({
+    en: {
+      language: {
+        tabLabel: 'Display',
+        heading: 'Language',
+        description: 'Choose how the script UI should appear.',
+        options: {
+          auto: 'Auto',
+          zh: 'Chinese',
+          en: 'English'
+        },
+        optionHints: {
+          auto: 'Match the browser language automatically.',
+          zh: 'Always use Simplified Chinese.',
+          en: 'Always use English.'
+        },
+        badges: {
+          auto: 'Auto',
+          zh: 'ZH',
+          en: 'EN'
+        }
+      }
+    },
+    zh: {
+      language: {
+        tabLabel: '界面',
+        heading: '界面语言',
+        description: '为脚本 UI 选择显示语言。',
+        options: {
+          auto: '自动',
+          zh: '中文',
+          en: '英文'
+        },
+        optionHints: {
+          auto: '自动跟随浏览器语言。',
+          zh: '始终使用简体中文。',
+          en: '始终使用英文。'
+        },
+        badges: {
+          auto: '自动',
+          zh: '中文',
+          en: '英文'
+        }
+      }
+    }
+  });
+
+  updateConfigLanguageState();
 
 /* -------------------------------------------------------------------------- *
  * Module 06 · YouTube player detection and DeArrow title fetching
@@ -1166,7 +1428,12 @@
   // ========== UI: Last save info ==========
   function updateLastSaved(videoProgress) {
     const lastSaveEl = document.querySelector('.last-save-info-text');
-    if (lastSaveEl) lastSaveEl.textContent = fancyTimeFormat(videoProgress);
+    if (lastSaveEl) {
+      lastSaveEl.textContent = fancyTimeFormat(videoProgress);
+      if (lastSaveEl.dataset) {
+        delete lastSaveEl.dataset.i18nKey;
+      }
+    }
   }
 
 /* -------------------------------------------------------------------------- *
@@ -1409,8 +1676,9 @@
       });
     }
 
-    // Expose for programmatic close
+    // Expose for programmatic toggles
     settingsContainer._ysrpClose = closePopup;
+    settingsContainer._ysrpOpen = openPopup;
 
     // Keep centered on resize
     if (!window._ysrpResizeBound) {
@@ -1428,7 +1696,100 @@
     DEFAULT_VIDEO_NAME.toLowerCase(),
     (TITLE_PENDING_PLACEHOLDER || '').toLowerCase()
   ]);
-  const NOTE_EMPTY_PLACEHOLDER = '暂无笔记';
+  const LANGUAGE_EVENT_NAME = (typeof I18n !== 'undefined' && I18n && typeof I18n.getEventName === 'function')
+    ? I18n.getEventName()
+    : 'ysrp-language-changed';
+
+  const SETTINGS_TABS = Object.freeze({
+    records: 'records',
+    storage: 'storage',
+    transcript: 'transcript',
+    display: 'display'
+  });
+
+  function localizeText(enValue, zhValue, params) {
+    if (typeof I18n !== 'undefined' && I18n && typeof I18n.pick === 'function') {
+      return I18n.pick({ en: enValue, zh: zhValue }, params);
+    }
+    const fallback = typeof enValue !== 'undefined' ? enValue : zhValue;
+    if (typeof fallback === 'function') {
+      try {
+        return fallback(params || {});
+      } catch {
+        return '';
+      }
+    }
+    return typeof fallback === 'string' ? fallback : '';
+  }
+
+  function getNoteEmptyPlaceholder() {
+    return localizeText('No notes yet', '暂无笔记');
+  }
+
+  function getLanguageStateSnapshot() {
+    const state = configData.language || {};
+    const preference = (state.preference ||
+      (typeof I18n !== 'undefined' && I18n && typeof I18n.getPreference === 'function' ? I18n.getPreference() : null) ||
+      'auto');
+    const resolved = (state.resolved ||
+      (typeof I18n !== 'undefined' && I18n && typeof I18n.getResolvedLanguage === 'function' ? I18n.getResolvedLanguage() : null) ||
+      'en');
+    const browser = (typeof I18n !== 'undefined' && I18n && typeof I18n.detectBrowserLanguage === 'function')
+      ? I18n.detectBrowserLanguage()
+      : 'en';
+    return { preference, resolved, browser };
+  }
+
+  const LANGUAGE_OPTION_PRESETS = Object.freeze({
+    auto: {
+      label: () => localizeText('Auto', '自动'),
+      hint: () => localizeText('Match the browser language automatically.', '自动跟随浏览器语言。'),
+      badge: () => localizeText('Auto', '自动')
+    },
+    zh: {
+      label: '中文',
+      hint: '始终使用简体中文。',
+      badge: '中文'
+    },
+    en: {
+      label: 'English',
+      hint: 'Always use English.',
+      badge: 'English'
+    }
+  });
+
+  function resolveLanguageOptionText(value, key) {
+    const entry = LANGUAGE_OPTION_PRESETS[value];
+    if (!entry) return '';
+    const val = entry[key];
+    if (typeof val === 'function') {
+      try { return val(); } catch { return ''; }
+    }
+    return typeof val === 'string' ? val : '';
+  }
+
+  function getLanguageOptionLabel(value) {
+    const label = resolveLanguageOptionText(value, 'label');
+    if (label) return label;
+    return localizeText('Auto', '自动');
+  }
+
+  function getLanguageOptionHint(value) {
+    const hint = resolveLanguageOptionText(value, 'hint');
+    if (hint) return hint;
+    return localizeText('Match the browser language automatically.', '自动跟随浏览器语言。');
+  }
+
+  function getLanguageBadgeLabel(value) {
+    const badge = resolveLanguageOptionText(value, 'badge');
+    if (badge) return badge;
+    return getLanguageOptionLabel(value);
+  }
+
+  function getLanguageDisplayName(code) {
+    if (code === 'zh') return '中文';
+    return 'English';
+  }
 
   function isPlaceholderDeArrowTitle(text) {
     if (!text) return true;
@@ -1596,7 +1957,8 @@
     document.head.appendChild(styleEl);
   }
 
-  function createSettingsUI() {
+  function createSettingsUI(options) {
+    const opts = Object.assign({ defaultTab: SETTINGS_TABS.records }, options || {});
     const savedVideos = getSavedVideoList();
     const videosCount = savedVideos.length;
 
@@ -1626,12 +1988,21 @@
     headerLeft.style.gap = '0.5rem';
 
     const settingsContainerHeaderTitle = document.createElement('h3');
-    settingsContainerHeaderTitle.textContent = `Saved Videos - (${videosCount})`;
+    function renderSavedVideosTitle(countValue) {
+      settingsContainerHeaderTitle.textContent = localizeText(
+        'Saved Videos - ({count})',
+        '已保存视频 - ({count})',
+        { count: countValue }
+      );
+    }
+    renderSavedVideosTitle(videosCount);
     settingsContainerHeaderTitle.style.color = styles.color;
     settingsContainerHeaderTitle.style.margin = '0';
 
     const modeBadge = document.createElement('span');
-    modeBadge.textContent = Storage.getMode() === 'gm' ? 'GM Storage' : 'localStorage';
+    modeBadge.textContent = Storage.getMode() === 'gm'
+      ? localizeText('GM Storage', 'GM 存储')
+      : localizeText('localStorage', '浏览器本地存储');
     Object.assign(modeBadge.style, {
       fontSize: '0.8rem',
       padding: '0.15rem 0.5rem',
@@ -1658,7 +2029,7 @@
       background: styles.recordBackground,
       border: styles.border
     });
-    refreshStatusIndicator.title = '正在更新列表…';
+    refreshStatusIndicator.title = localizeText('Refreshing…', '正在更新列表…');
     const refreshStatusIcon = createIcon('refresh', styles.tabInactive);
     refreshStatusIcon.style.fontSize = '1rem';
     refreshStatusIndicator.appendChild(refreshStatusIcon);
@@ -1697,7 +2068,7 @@
     tabsBar.style.borderBottom = styles.border;
     tabsBar.style.paddingBottom = '0.25rem';
 
-    function makeTab(label, iconName) {
+    function makeTab(id, label, iconName) {
       const btn = document.createElement('button');
       btn.style.background = 'transparent';
       btn.style.border = 'none';
@@ -1716,26 +2087,38 @@
       btn.appendChild(ic);
       btn.appendChild(span);
       btn._icon = ic;
+      btn.dataset.tabId = id;
       return btn;
     }
 
-    const tabRecords = makeTab('Records', 'database');
-    const tabPrefs = makeTab('Settings', 'gear');
-    const tabTranscript = makeTab('Transcript', 'captions');
+    const tabRecords = makeTab(SETTINGS_TABS.records, localizeText('Records', '记录'), 'database');
+    const tabPrefs = makeTab(SETTINGS_TABS.storage, localizeText('Storage', '存储'), 'gear');
+    const tabTranscript = makeTab(SETTINGS_TABS.transcript, localizeText('Transcript', '字幕'), 'captions');
+    const tabDisplay = makeTab(SETTINGS_TABS.display,
+      (typeof I18n !== 'undefined' && I18n && typeof I18n.t === 'function')
+        ? I18n.t('language.tabLabel', null, localizeText('Display', '界面'))
+        : localizeText('Display', '界面'),
+      'globe'
+    );
+    let displayContainer = null;
 
     tabsBar.appendChild(tabRecords);
     tabsBar.appendChild(tabPrefs);
     tabsBar.appendChild(tabTranscript);
+    tabsBar.appendChild(tabDisplay);
 
     function setActiveTab(tab) {
-      [tabRecords, tabPrefs, tabTranscript].forEach(b => {
+      [tabRecords, tabPrefs, tabTranscript, tabDisplay].forEach(b => {
         const active = (b === tab);
         b.style.color = active ? styles.tabActive : styles.tabInactive;
         if (b._icon) b._icon.style.color = active ? styles.tabActive : styles.tabInactive;
       });
-      recordsContainer.style.display = tab === tabRecords ? 'flex' : 'none';
-      prefsContainer.style.display = tab === tabPrefs ? 'flex' : 'none';
-      transcriptContainer.style.display = tab === tabTranscript ? 'flex' : 'none';
+      const activeTabId = tab && tab.dataset ? tab.dataset.tabId : SETTINGS_TABS.records;
+      settingsContainer.dataset.activeTab = activeTabId;
+      recordsContainer.style.display = activeTabId === SETTINGS_TABS.records ? 'flex' : 'none';
+      prefsContainer.style.display = activeTabId === SETTINGS_TABS.storage ? 'flex' : 'none';
+      transcriptContainer.style.display = activeTabId === SETTINGS_TABS.transcript ? 'flex' : 'none';
+      displayContainer.style.display = activeTabId === SETTINGS_TABS.display ? 'flex' : 'none';
     }
 
     // Body root
@@ -1835,7 +2218,7 @@
         setRefreshIndicatorActive(true);
         while (videosList.firstChild) videosList.removeChild(videosList.firstChild);
         const all = getSavedVideoList();
-        settingsContainerHeaderTitle.textContent = `Saved Videos - (${all.length})`;
+        renderSavedVideosTitle(all.length);
 
         const currentVideoId = getVideoId();
         lastRenderedVideoId = currentVideoId || null;
@@ -1936,8 +2319,8 @@
           const latestAvailability = dearrowAvailabilityCache.get(videoId);
           let confirmedNoDeArrow = Boolean(latestAvailability && latestAvailability.status === 'missing');
           let showingOriginalTitle = !dearrowTitle;
-          const loadingOriginalPlaceholder = '正在获取原标题…';
-          const missingOriginalPlaceholder = '未找到原标题';
+          const loadingOriginalPlaceholder = localizeText('Loading original title…', '正在获取原标题…');
+          const missingOriginalPlaceholder = localizeText('Original title unavailable', '未找到原标题');
           let dearrowToggleButton = null;
 
           if (!confirmedNoDeArrow) {
@@ -1964,10 +2347,12 @@
           function updateToggleTooltip() {
             if (!dearrowToggleButton) return;
             if (dearrowToggleButton.dataset.state === 'pending') {
-              dearrowToggleButton.title = '正在检测 DeArrow 标题…';
+              dearrowToggleButton.title = localizeText('Checking DeArrow title…', '正在检测 DeArrow 标题…');
               return;
             }
-            dearrowToggleButton.title = showingOriginalTitle ? '恢复DeArrow标题' : '显示原标题';
+            dearrowToggleButton.title = showingOriginalTitle
+              ? localizeText('Show DeArrow title', '恢复 DeArrow 标题')
+              : localizeText('Show original title', '显示原标题');
           }
 
           function setButtonPending() {
@@ -2089,7 +2474,7 @@
           urlButton.style.width = '2rem';
           urlButton.style.height = '2rem';
           urlButton.style.borderRadius = '0.5rem';
-          urlButton.title = '显示/隐藏 URL';
+          urlButton.title = localizeText('Show / hide URL', '显示/隐藏 URL');
           const linkIcon = createIcon('link', styles.linkButtonColor);
           urlButton.appendChild(linkIcon);
 
@@ -2104,7 +2489,7 @@
           noteButton.style.width = '2rem';
           noteButton.style.height = '2rem';
           noteButton.style.borderRadius = '0.5rem';
-          noteButton.title = '显示笔记';
+          noteButton.title = localizeText('Show notes', '显示笔记');
           const noteIcon = createIcon('note', styles.editButtonColor);
           noteButton.appendChild(noteIcon);
 
@@ -2119,7 +2504,7 @@
           transcriptButton.style.width = '2rem';
           transcriptButton.style.height = '2rem';
           transcriptButton.style.borderRadius = '0.5rem';
-          transcriptButton.title = '获取字幕';
+          transcriptButton.title = localizeText('Show transcript', '获取字幕');
           const transcriptIcon = createIcon('captions', styles.tabActive);
           transcriptButton.appendChild(transcriptIcon);
 
@@ -2150,7 +2535,7 @@
           deleteButton.style.justifyContent = 'center';
           deleteButton.style.width = '2rem';
           deleteButton.style.height = '2rem';
-          deleteButton.title = '删除保存记录';
+          deleteButton.title = localizeText('Delete record', '删除保存记录');
           const trashIcon = createIcon('trash', styles.deleteButtonColor);
           deleteButton.appendChild(trashIcon);
 
@@ -2167,7 +2552,7 @@
 
           const urlDisplay = document.createElement('div');
           const videoURL = `https://www.youtube.com/watch?v=${videoId}`;
-          urlDisplay.textContent = `URL: ${videoURL}`;
+          urlDisplay.textContent = localizeText('URL: {url}', '链接：{url}', { url: videoURL });
           Object.assign(urlDisplay.style, {
             marginTop: '0.5rem',
             padding: '0.5rem',
@@ -2182,7 +2567,7 @@
           });
 
           const copySuccessTip = document.createElement('span');
-          copySuccessTip.textContent = '已复制';
+          copySuccessTip.textContent = localizeText('Copied', '已复制');
           Object.assign(copySuccessTip.style, {
             position: 'absolute',
             top: '50%',
@@ -2210,7 +2595,7 @@
           copyButton.style.width = '1.5rem';
           copyButton.style.height = '1.5rem';
           copyButton.style.borderRadius = '0.3rem';
-          copyButton.title = '复制 URL';
+          copyButton.title = localizeText('Copy URL', '复制 URL');
           const copyIcon = createIcon('copy', styles.copyButtonColor);
           copyButton.appendChild(copyIcon);
 
@@ -2225,7 +2610,7 @@
           openButton.style.width = '1.5rem';
           openButton.style.height = '1.5rem';
           openButton.style.borderRadius = '0.3rem';
-          openButton.title = '在新标签页中打开 URL';
+          openButton.title = localizeText('Open in new tab', '在新标签页中打开 URL');
           const openIcon = createIcon('open', styles.openButtonColor);
           openButton.appendChild(openIcon);
 
@@ -2264,7 +2649,7 @@
             minWidth: 0
           });
           const transcriptLabel = document.createElement('strong');
-          transcriptLabel.textContent = '字幕';
+          transcriptLabel.textContent = localizeText('Transcript', '字幕');
           transcriptLabel.style.fontSize = '1rem';
           transcriptLabel.style.fontWeight = '600';
           transcriptLabel.style.color = styles.subtleText;
@@ -2304,8 +2689,16 @@
             return btn;
           }
 
-          const transcriptRefreshButton = makeTranscriptActionButton('刷新字幕', 'refresh', styles.tabInactive);
-          const transcriptCopyButton = makeTranscriptActionButton('复制字幕', 'copy', styles.copyButtonColor);
+          const transcriptRefreshButton = makeTranscriptActionButton(
+            localizeText('Refresh transcript', '刷新字幕'),
+            'refresh',
+            styles.tabInactive
+          );
+          const transcriptCopyButton = makeTranscriptActionButton(
+            localizeText('Copy transcript', '复制字幕'),
+            'copy',
+            styles.copyButtonColor
+          );
           transcriptCopyButton.disabled = true;
           transcriptHeaderRight.appendChild(transcriptRefreshButton);
           transcriptHeaderRight.appendChild(transcriptCopyButton);
@@ -2321,15 +2714,16 @@
       borderRadius: '0.3rem',
       padding: '0.4rem',
       fontFamily: 'monospace',
-      fontSize: '1rem',
+      fontSize: '1.05rem',
       lineHeight: '1.4',
       color: styles.color,
       resize: 'vertical',
       boxSizing: 'border-box'
     });
     transcriptOutput.readOnly = true;
-    transcriptOutput.placeholder = '字幕内容加载后会显示在这里…';
+    transcriptOutput.placeholder = localizeText('Transcript will appear here…', '字幕内容加载后会显示在这里…');
     const transcriptPlaceholderDefault = transcriptOutput.placeholder;
+    applyFocusRing(transcriptOutput);
 
           transcriptContainer.appendChild(transcriptHeader);
           transcriptContainer.appendChild(transcriptOutput);
@@ -2346,13 +2740,13 @@
             transcriptOutput.value = transcriptValue;
             transcriptCopyButton.disabled = false;
             transcriptContainer.dataset.loaded = 'true';
-            setTranscriptStatus('字幕来自缓存。');
+            setTranscriptStatus(localizeText('Transcript loaded from cache.', '字幕来自缓存。'));
           }
 
           function normalizeTranscriptStatusMessage(rawText) {
             if (!rawText) return '';
             return rawText
-              .replace(/^\s*字幕(?:[:：]\s*)?/, '')
+              .replace(/^\s*(?:字幕|transcript)(?:[:：]\s*)?/i, '')
               .trim();
           }
 
@@ -2399,7 +2793,9 @@
             const nextVisible = Boolean(visible);
             transcriptVisible = nextVisible;
             transcriptContainer.style.display = nextVisible ? 'flex' : 'none';
-            transcriptButton.title = nextVisible ? '隐藏字幕' : '获取字幕';
+            transcriptButton.title = nextVisible
+              ? localizeText('Hide transcript', '隐藏字幕')
+              : localizeText('Show transcript', '获取字幕');
             if (opts.silent || !videoId) return;
             if (nextVisible) {
               transcriptVisibilityState.set(videoId, true);
@@ -2411,12 +2807,15 @@
           function triggerTranscriptFetch(options) {
             if (transcriptLoading) return;
             if (typeof fetchTranscriptForVideo !== 'function') {
-              setTranscriptStatus('字幕模块未初始化。', styles.deleteButtonColor);
+              setTranscriptStatus(
+                localizeText('Transcript module is not ready.', '字幕模块未初始化。'),
+                styles.deleteButtonColor
+              );
               return;
             }
             const force = options && options.force;
             setTranscriptButtonsLoading(true);
-            setTranscriptStatus('正在重新获取…', styles.subtleText);
+            setTranscriptStatus(localizeText('Refreshing…', '正在重新获取…'), styles.subtleText);
             fetchTranscriptForVideo(videoId, {
               force: Boolean(force),
               videoTitle: resolvedTitleInfo && resolvedTitleInfo.title,
@@ -2425,11 +2824,19 @@
               .then(text => {
                 syncTranscriptOutput(text);
                 transcriptContainer.dataset.loaded = 'true';
-                setTranscriptStatus(`字幕已更新（${new Date().toLocaleTimeString()}）`, styles.tabActive);
+                setTranscriptStatus(
+                  localizeText('Transcript updated ({time})', '字幕已更新（{time}）', {
+                    time: new Date().toLocaleTimeString()
+                  }),
+                  styles.tabActive
+                );
               })
               .catch(err => {
                 const message = err && err.message ? err.message : String(err);
-                setTranscriptStatus(`字幕获取失败：${message}`, styles.deleteButtonColor);
+                setTranscriptStatus(
+                  localizeText('Transcript failed: {message}', '字幕获取失败：{message}', { message }),
+                  styles.deleteButtonColor
+                );
               })
               .finally(() => {
                 setTranscriptButtonsLoading(false);
@@ -2459,17 +2866,23 @@
           transcriptCopyButton.addEventListener('click', async () => {
             const text = transcriptOutput.value.trim();
             if (!text) {
-              setTranscriptStatus('暂无字幕内容可复制。', styles.subtleText);
+              setTranscriptStatus(
+                localizeText('No transcript content to copy.', '暂无字幕内容可复制。'),
+                styles.subtleText
+              );
               return;
             }
             try {
               await navigator.clipboard.writeText(text);
               transcriptCopyButton.style.opacity = '0.6';
               setTimeout(() => { transcriptCopyButton.style.opacity = '1'; }, 250);
-              setTranscriptStatus('字幕内容已复制。', styles.tabActive);
+              setTranscriptStatus(localizeText('Transcript copied.', '字幕内容已复制。'), styles.tabActive);
             } catch (err) {
               const message = err && err.message ? err.message : String(err);
-              setTranscriptStatus(`复制失败：${message}`, styles.deleteButtonColor);
+              setTranscriptStatus(
+                localizeText('Copy failed: {message}', '复制失败：{message}', { message }),
+                styles.deleteButtonColor
+              );
             }
           });
 
@@ -2495,7 +2908,7 @@
           });
 
           const noteLabel = document.createElement('strong');
-          noteLabel.textContent = '笔记';
+          noteLabel.textContent = localizeText('Notes', '笔记');
           Object.assign(noteLabel.style, {
             fontSize: '0.85rem',
             color: styles.subtleText
@@ -2536,7 +2949,7 @@
 
           function syncNotePreview(value) {
             const hasNote = Boolean(value);
-            noteContent.textContent = hasNote ? value : NOTE_EMPTY_PLACEHOLDER;
+            noteContent.textContent = hasNote ? value : getNoteEmptyPlaceholder();
             noteContent.style.color = hasNote ? styles.color : styles.subtleText;
             noteContent.style.fontStyle = hasNote ? 'normal' : 'italic';
             noteContent.style.opacity = hasNote ? '1' : '0.9';
@@ -2553,7 +2966,9 @@
             const iconName = isEditingNote ? 'save' : 'edit';
             const iconColor = isEditingNote ? styles.openButtonColor : styles.linkButtonColor;
             noteEditButton.appendChild(createIcon(iconName, iconColor));
-            noteEditButton.title = isEditingNote ? '保存笔记' : '编辑笔记';
+            noteEditButton.title = isEditingNote
+              ? localizeText('Save note', '保存笔记')
+              : localizeText('Edit note', '编辑笔记');
           }
 
           function hasNoteContent() {
@@ -2565,10 +2980,12 @@
             noteButton.disabled = false;
             noteButton.style.opacity = '1';
             noteButton.title = isEditingNote
-              ? '保存并折叠笔记'
+              ? localizeText('Save & collapse note', '保存并折叠笔记')
               : notePresent
-                ? (noteVisible ? '隐藏笔记' : '显示笔记')
-                : '添加笔记';
+                ? (noteVisible
+                  ? localizeText('Hide notes', '隐藏笔记')
+                  : localizeText('Show notes', '显示笔记'))
+                : localizeText('Add note', '添加笔记');
           }
 
           function setNoteVisibility(visible) {
@@ -2626,7 +3043,7 @@
               transcriptVisibilityState.delete(videoId);
             }
             videosList.removeChild(videoEl);
-            settingsContainerHeaderTitle.textContent = `Saved Videos - (${videosList.children.length})`;
+            renderSavedVideosTitle(videosList.children.length);
           });
 
           // Video notes
@@ -2649,8 +3066,10 @@
               lineHeight: '1.4',
               color: styles.color,
               resize: 'vertical',
-              boxSizing: 'border-box'
+              boxSizing: 'border-box',
+              outline: 'none'
             });
+            applyFocusRing(noteTextarea);
             noteTextarea.addEventListener('input', () => {
               noteTextarea.style.height = 'auto';
               noteTextarea.style.height = `${noteTextarea.scrollHeight}px`;
@@ -2800,209 +3219,429 @@
       WebkitOverflowScrolling: 'touch'
     });
 
-    // Storage selection
-    const storageCard = document.createElement('div');
-    Object.assign(storageCard.style, {
+    // Language/display tab container
+    displayContainer = document.createElement('div');
+    Object.assign(displayContainer.style, {
+      display: 'none',
+      flexDirection: 'column',
+      gap: '1rem',
+      minHeight: 0,
+      overflow: 'auto',
+      paddingRight: '0.25rem',
+      WebkitOverflowScrolling: 'touch'
+    });
+
+    const isDarkTheme = typeof currentTheme === 'string' && currentTheme.toLowerCase() === 'dark';
+    const storageAccentColor = isDarkTheme ? '#ffb347' : '#ff8c39';
+    const storageAccentBg = isDarkTheme ? 'rgba(255, 179, 71, 0.2)' : 'rgba(255, 140, 57, 0.15)';
+    const storageAccentBorder = isDarkTheme ? 'rgba(255, 179, 71, 0.65)' : 'rgba(255, 140, 57, 0.55)';
+    const storageOptionShadowActive = `0 0 0 1px ${isDarkTheme ? 'rgba(255, 179, 71, 0.45)' : 'rgba(255, 140, 57, 0.35)'}`;
+    const displayAccentColor = isDarkTheme ? '#ffc2ec' : '#ff4db8';
+    const displayAccentBg = isDarkTheme ? 'rgba(255, 194, 236, 0.28)' : 'rgba(255, 77, 184, 0.16)';
+    const displayAccentBorder = isDarkTheme ? 'rgba(255, 194, 236, 0.7)' : 'rgba(255, 77, 184, 0.55)';
+    const displayAccentShadow = `0 0 0 1px ${isDarkTheme ? 'rgba(255, 194, 236, 0.45)' : 'rgba(255, 77, 184, 0.35)'}`;
+    const displayBadgeBg = isDarkTheme ? 'rgba(255, 194, 236, 0.42)' : 'rgba(255, 77, 184, 0.22)';
+    const displayBadgeText = isDarkTheme ? '#2f0f1f' : '#6d1a46';
+    const displaySoftBg = isDarkTheme ? 'rgba(255, 194, 236, 0.16)' : 'rgba(255, 77, 184, 0.1)';
+    const transcriptAccentColor = '#ff2f45';
+    const settingsCardBaseStyles = {
       background: styles.recordBackground,
-      borderRadius: '0.5rem',
-      padding: '0.75rem',
+      borderRadius: '0.9rem',
+      padding: '1.1rem 1.35rem 1.05rem',
       display: 'flex',
       flexDirection: 'column',
-      gap: '0.5rem'
+      gap: '0.85rem',
+      border: `1px solid ${styles.inputBorder}`,
+      boxShadow: 'none',
+      fontSize: '1.3125rem',
+      lineHeight: '1.6'
+    };
+    const settingsActionHoverBg = isDarkTheme ? 'rgba(255, 255, 255, 0.08)' : 'rgba(11, 87, 208, 0.12)';
+    const settingsCardSubtleBg = isDarkTheme ? 'rgba(255, 255, 255, 0.04)' : 'rgba(11, 87, 208, 0.04)';
+
+    function decorateSettingsActionButton(button, accentColor, options) {
+      if (!button || button.dataset.ysrpDecorated === 'true') return;
+      const accent = accentColor || styles.tabActive;
+      const hoverBg = (options && options.hoverBg) || settingsActionHoverBg;
+      Object.assign(button.style, {
+        background: styles.buttonBackground,
+        border: `1px solid ${accent}`,
+        borderRadius: '0.65rem',
+        cursor: 'pointer',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: '0.5rem',
+        padding: '0.45rem 0.95rem',
+        color: accent,
+        fontWeight: '600',
+        fontSize: '1.3125rem',
+        minHeight: '2.5rem',
+        transition: 'background 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease'
+      });
+      button.dataset.ysrpDecorated = 'true';
+      const onEnter = () => {
+        button.style.background = hoverBg;
+      };
+      const onLeave = () => {
+        button.style.background = styles.buttonBackground;
+      };
+      button.addEventListener('pointerenter', onEnter);
+      button.addEventListener('pointerleave', onLeave);
+      button.addEventListener('focus', () => {
+        button.style.boxShadow = `0 0 0 3px ${hoverBg}`;
+      });
+      button.addEventListener('blur', () => {
+        button.style.boxShadow = 'none';
+      });
+    }
+
+    function applyFocusRing(inputEl, options) {
+      if (!inputEl || inputEl.dataset.ysrpFocusDecorated === 'true') return;
+      const focusColor = (options && options.color) || styles.tabActive || '#0b57d0';
+      inputEl.style.outline = 'none';
+      inputEl.style.boxShadow = '0 0 0 2px transparent';
+      const handleFocus = () => { inputEl.style.boxShadow = `0 0 0 2px ${focusColor}`; };
+      const handleBlur = () => { inputEl.style.boxShadow = '0 0 0 2px transparent'; };
+      inputEl.addEventListener('focus', handleFocus);
+      inputEl.addEventListener('blur', handleBlur);
+      inputEl.dataset.ysrpFocusDecorated = 'true';
+    }
+
+    function updateActionStatus(statusEl, message, color) {
+      if (!statusEl) return;
+      const hasMessage = Boolean(message && String(message).trim());
+      statusEl.textContent = hasMessage ? String(message).trim() : '';
+      statusEl.style.display = hasMessage ? 'block' : 'none';
+      if (hasMessage && color) {
+        statusEl.style.color = color;
+      } else if (!hasMessage) {
+        statusEl.style.color = styles.subtleText;
+      }
+    }
+
+    // Storage selection
+    const storageCard = document.createElement('div');
+    Object.assign(storageCard.style, settingsCardBaseStyles, {
+      fontSize: '1.3125rem',
+      lineHeight: '1.5'
     });
 
     const storageTitle = document.createElement('div');
-    storageTitle.style.display = 'flex';
-    storageTitle.style.alignItems = 'center';
-    storageTitle.style.gap = '0.5rem';
-    const storageIcon = createIcon('database', styles.color);
+    Object.assign(storageTitle.style, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '0.6rem'
+    });
+    const storageIcon = createIcon('database', storageAccentColor);
+    if (storageIcon) {
+      storageIcon.style.fontSize = '1.5rem';
+      storageIcon.style.color = storageAccentColor;
+    }
     const storageTitleText = document.createElement('strong');
-    storageTitleText.textContent = 'Storage Backend';
+    storageTitleText.textContent = localizeText('Storage Backend', '存储后端');
+    storageTitleText.style.fontSize = '1.5625rem';
+    storageTitleText.style.fontWeight = '700';
     storageTitle.appendChild(storageIcon);
     storageTitle.appendChild(storageTitleText);
 
     const storageNote = document.createElement('div');
-    storageNote.textContent = 'Choose where to store your progress data.';
+    storageNote.textContent = localizeText('Choose where to store your progress data.', '选择保存进度的存储方式。');
     storageNote.style.color = styles.subtleText;
-    storageNote.style.fontSize = '0.9rem';
+    storageNote.style.fontSize = '1.3125rem';
+    storageNote.style.marginTop = '-0.65rem';
 
     const storageOptions = document.createElement('div');
-    storageOptions.style.display = 'flex';
-    storageOptions.style.gap = '1rem';
-    storageOptions.style.alignItems = 'center';
-    storageOptions.style.flexWrap = 'wrap';
+    Object.assign(storageOptions.style, {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '0.65rem',
+      alignItems: 'stretch',
+      width: '100%',
+      margin: '0'
+    });
 
-    function makeRadio(id, label) {
+    const storageOptionInstances = [];
+
+    function makeRadio(id, label, detail, badgeText) {
       const wrap = document.createElement('label');
-      wrap.style.display = 'flex';
-      wrap.style.alignItems = 'center';
-      wrap.style.gap = '0.4rem';
+      Object.assign(wrap.style, {
+        display: 'flex',
+        alignItems: 'center',
+        gap: '0.75rem',
+        borderRadius: '0.85rem',
+        border: `1px solid ${styles.inputBorder}`,
+        padding: '0.7rem 0.85rem',
+        width: '100%',
+        boxSizing: 'border-box',
+        cursor: 'pointer',
+        background: styles.buttonBackground,
+        transition: 'border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease'
+      });
       const input = document.createElement('input');
       input.type = 'radio';
       input.name = 'ysrp-storage-mode';
       input.value = id;
-      const span = document.createElement('span');
-      span.textContent = label;
+      input.style.display = 'none';
+
+      const badge = document.createElement('span');
+      badge.textContent = badgeText || id.toUpperCase();
+      Object.assign(badge.style, {
+        fontSize: '0.9rem',
+        fontWeight: '600',
+        padding: '0.2rem 0.55rem',
+        borderRadius: '0.6rem',
+        background: storageAccentBg,
+        color: storageAccentColor,
+        flexShrink: '0'
+      });
+
+      const textGroup = document.createElement('div');
+      Object.assign(textGroup.style, {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '0.2rem',
+        minWidth: 0
+      });
+
+      const labelSpan = document.createElement('span');
+      labelSpan.textContent = label;
+      labelSpan.style.fontWeight = '600';
+      labelSpan.style.fontSize = '1.25rem';
+      labelSpan.style.color = styles.color;
+      textGroup.appendChild(labelSpan);
+
+      let detailSpan = null;
+      if (detail) {
+        detailSpan = document.createElement('span');
+        detailSpan.textContent = detail;
+        detailSpan.style.fontSize = '1.15rem';
+        detailSpan.style.color = styles.subtleText;
+        detailSpan.style.lineHeight = '1.35';
+        detailSpan.style.opacity = '0.95';
+        textGroup.appendChild(detailSpan);
+      }
+
       wrap.appendChild(input);
-      wrap.appendChild(span);
+      wrap.appendChild(badge);
+      wrap.appendChild(textGroup);
+
+      storageOptionInstances.push({ input, wrap, badge, labelSpan, detailSpan });
       return { wrap, input };
     }
 
-    const radioLocal = makeRadio('local', 'localStorage (default)');
-    const radioGM = makeRadio('gm', 'GM storage');
+    function refreshStorageChoiceStyles() {
+      storageOptionInstances.forEach(({ input, wrap, badge, labelSpan, detailSpan }) => {
+        const selected = Boolean(input.checked);
+        wrap.style.borderColor = selected ? storageAccentBorder : styles.inputBorder;
+        wrap.style.background = selected ? storageAccentBg : styles.buttonBackground;
+        wrap.style.boxShadow = selected ? storageOptionShadowActive : 'none';
+        badge.style.background = selected ? storageAccentColor : storageAccentBg;
+        badge.style.color = selected ? styles.background : storageAccentColor;
+        labelSpan.style.color = selected ? storageAccentColor : styles.color;
+        if (detailSpan) {
+          detailSpan.style.color = selected ? storageAccentColor : styles.subtleText;
+        }
+      });
+    }
+
+    const radioLocal = makeRadio(
+      'local',
+      localizeText('localStorage (default)', 'localStorage（默认）'),
+      localizeText('Fast storage scoped to this browser profile.', '快速、本地浏览器可用的存储。'),
+      localizeText('LOCAL', '本地')
+    );
+    const radioGM = makeRadio(
+      'gm',
+      localizeText('GM storage', 'GM 存储'),
+      localizeText('Tampermonkey-backed storage that can sync across profiles.', '由 Tampermonkey 提供、可在配置间同步的存储。'),
+      'GM'
+    );
     const currentMode = Storage.getMode();
     radioLocal.input.checked = currentMode === 'local';
     radioGM.input.checked = currentMode === 'gm';
     storageOptions.appendChild(radioLocal.wrap);
     storageOptions.appendChild(radioGM.wrap);
+    refreshStorageChoiceStyles();
+    [radioLocal.input, radioGM.input].forEach(input => {
+      input.addEventListener('change', refreshStorageChoiceStyles);
+    });
 
     const storageActions = document.createElement('div');
-    storageActions.style.display = 'flex';
-    storageActions.style.gap = '0.5rem';
-    storageActions.style.flexWrap = 'wrap';
+    Object.assign(storageActions.style, {
+      display: 'flex',
+      alignItems: 'center',
+      flexWrap: 'wrap',
+      gap: '0.75rem'
+    });
 
     const applyBtn = document.createElement('button');
     Object.assign(applyBtn.style, {
       background: styles.buttonBackground,
-      border: styles.buttonBorder,
-      borderRadius: '0.5rem',
+      border: `1.333px solid ${storageAccentColor}`,
+      borderRadius: '0.7rem',
       cursor: 'pointer',
-      display: 'flex',
+      display: 'inline-flex',
       alignItems: 'center',
       justifyContent: 'center',
-      gap: '0.5rem',
-      padding: '0.35rem 0.6rem',
-      color: styles.color
+      gap: '0.4rem',
+      padding: '0.5rem 1.1rem',
+      color: storageAccentColor,
+      fontWeight: '700',
+      fontSize: '1.25rem',
+      minHeight: '2.75rem',
+      transition: 'background 0.2s ease, color 0.2s ease, opacity 0.2s ease'
     });
-    applyBtn.title = 'Switch storage backend and migrate data';
-    const arrowsIcon = createIcon('arrows', styles.color);
+    applyBtn.title = localizeText('Switch storage backend and migrate data.', '切换存储方式并迁移数据。');
+    const arrowsIcon = createIcon('arrows', storageAccentColor);
     const applySpan = document.createElement('span');
-    applySpan.textContent = 'Apply & Migrate';
+    applySpan.textContent = localizeText('Apply & Migrate', '应用并迁移');
     applyBtn.appendChild(arrowsIcon);
     applyBtn.appendChild(applySpan);
+    applyBtn.addEventListener('pointerenter', () => {
+      applyBtn.style.background = storageAccentBg;
+    });
+    applyBtn.addEventListener('pointerleave', () => {
+      applyBtn.style.background = styles.buttonBackground;
+    });
 
     const applyInfo = document.createElement('div');
     applyInfo.style.color = styles.subtleText;
-    applyInfo.style.fontSize = '0.85rem';
-    applyInfo.textContent = 'Migrates all saved records to the selected backend (moves data).';
+    applyInfo.style.fontSize = '1.25rem';
+    applyInfo.style.lineHeight = '1.4';
+    applyInfo.style.flex = '1 1 220px';
+    applyInfo.textContent = localizeText('Migrates all saved records to the selected backend (moves data).', '将所有记录迁移至所选存储后端（移动数据）。');
 
     storageActions.appendChild(applyBtn);
+    storageActions.appendChild(applyInfo);
+
     storageCard.appendChild(storageTitle);
     storageCard.appendChild(storageNote);
     storageCard.appendChild(storageOptions);
     storageCard.appendChild(storageActions);
-    storageCard.appendChild(applyInfo);
 
     // Export card
     const exportCard = document.createElement('div');
-    Object.assign(exportCard.style, {
-      background: styles.recordBackground,
-      borderRadius: '0.5rem',
-      padding: '0.75rem',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '0.5rem'
+    Object.assign(exportCard.style, settingsCardBaseStyles, {
+      gap: '0.9rem'
     });
     const exportTitle = document.createElement('div');
-    exportTitle.style.display = 'flex';
-    exportTitle.style.alignItems = 'center';
-    exportTitle.style.gap = '0.5rem';
-    exportTitle.appendChild(createIcon('download', styles.color));
+    Object.assign(exportTitle.style, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '0.6rem'
+    });
+    const exportIcon = createIcon('download', styles.openButtonColor);
+    if (exportIcon) exportIcon.style.fontSize = '1.5rem';
     const exportTitleSpan = document.createElement('strong');
-    exportTitleSpan.textContent = 'Export Data';
+    exportTitleSpan.textContent = localizeText('Export Data', '导出数据');
+    exportTitleSpan.style.fontSize = '1.625rem';
+    exportTitleSpan.style.fontWeight = '700';
+    exportTitle.appendChild(exportIcon);
     exportTitle.appendChild(exportTitleSpan);
 
+    const exportSubtitle = document.createElement('div');
+    exportSubtitle.textContent = localizeText('Back up your saved progress as JSON.', '将保存的进度备份为 JSON。');
+    exportSubtitle.style.color = styles.subtleText;
+    exportSubtitle.style.fontSize = '1.3125rem';
+    exportSubtitle.style.marginTop = '-0.65rem';
+
     const exportActions = document.createElement('div');
-    exportActions.style.display = 'flex';
-    exportActions.style.gap = '0.5rem';
-    exportActions.style.flexWrap = 'wrap';
+    Object.assign(exportActions.style, {
+      display: 'flex',
+      flexWrap: 'wrap',
+      gap: '0.75rem',
+      alignItems: 'stretch'
+    });
 
     const btnCopyExport = document.createElement('button');
-    Object.assign(btnCopyExport.style, {
-      background: styles.buttonBackground,
-      border: styles.buttonBorder,
-      borderRadius: '0.5rem',
-      cursor: 'pointer',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: '0.5rem',
-      padding: '0.35rem 0.6rem',
-      color: styles.color
-    });
-    btnCopyExport.title = 'Copy export JSON to clipboard';
-    btnCopyExport.appendChild(createIcon('copy', styles.copyButtonColor));
-    btnCopyExport.appendChild(document.createTextNode('Copy JSON'));
+    btnCopyExport.title = localizeText('Copy export JSON to clipboard', '复制导出的 JSON 到剪贴板');
+    btnCopyExport.appendChild(createIcon('copy', 'currentColor'));
+    btnCopyExport.appendChild(document.createTextNode(localizeText('Copy JSON', '复制 JSON')));
+    decorateSettingsActionButton(btnCopyExport, styles.openButtonColor);
+    btnCopyExport.style.flex = '1 1 12rem';
 
     const btnDownloadExport = document.createElement('button');
-    Object.assign(btnDownloadExport.style, {
-      background: styles.buttonBackground,
-      border: styles.buttonBorder,
-      borderRadius: '0.5rem',
-      cursor: 'pointer',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: '0.5rem',
-      padding: '0.35rem 0.6rem',
-      color: styles.color
-    });
-    btnDownloadExport.title = 'Download export JSON as file';
-    btnDownloadExport.appendChild(createIcon('download', styles.openButtonColor));
-    btnDownloadExport.appendChild(document.createTextNode('Download JSON'));
+    btnDownloadExport.title = localizeText('Download export JSON as file', '下载导出的 JSON 文件');
+    btnDownloadExport.appendChild(createIcon('download', 'currentColor'));
+    btnDownloadExport.appendChild(document.createTextNode(localizeText('Download JSON', '下载 JSON')));
+    decorateSettingsActionButton(btnDownloadExport, styles.openButtonColor);
+    btnDownloadExport.style.flex = '1 1 12rem';
 
     const exportHint = document.createElement('div');
     exportHint.style.color = styles.subtleText;
-    exportHint.style.fontSize = '0.85rem';
-    exportHint.textContent = 'Exports all saved records from the current backend';
+    exportHint.style.fontSize = '1.25rem';
+    exportHint.textContent = localizeText('Exports all saved records from the currently selected backend.', '导出当前存储后端中的所有记录。');
+
+    const exportStatus = document.createElement('div');
+    Object.assign(exportStatus.style, {
+      color: styles.subtleText,
+      fontSize: '1.1875rem',
+      display: 'none'
+    });
 
     exportActions.appendChild(btnCopyExport);
     exportActions.appendChild(btnDownloadExport);
     exportCard.appendChild(exportTitle);
+    exportCard.appendChild(exportTitle);
+    exportCard.appendChild(exportSubtitle);
     exportCard.appendChild(exportActions);
     exportCard.appendChild(exportHint);
+    exportCard.appendChild(exportStatus);
 
     // Import card
     const importCard = document.createElement('div');
-    Object.assign(importCard.style, {
-      background: styles.recordBackground,
-      borderRadius: '0.5rem',
-      padding: '0.75rem',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '0.5rem'
+    Object.assign(importCard.style, settingsCardBaseStyles, {
+      gap: '0.9rem'
     });
 
     const importTitle = document.createElement('div');
-    importTitle.style.display = 'flex';
-    importTitle.style.alignItems = 'center';
-    importTitle.style.gap = '0.5rem';
-    importTitle.appendChild(createIcon('upload', styles.color));
+    Object.assign(importTitle.style, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '0.6rem'
+    });
+    const importIcon = createIcon('upload', styles.tabActive);
+    if (importIcon) importIcon.style.fontSize = '1.5rem';
     const importTitleSpan = document.createElement('strong');
-    importTitleSpan.textContent = 'Import Data';
+    importTitleSpan.textContent = localizeText('Import Data', '导入数据');
+    importTitleSpan.style.fontSize = '1.625rem';
+    importTitleSpan.style.fontWeight = '700';
+    importTitle.appendChild(importIcon);
     importTitle.appendChild(importTitleSpan);
 
+    const importSubtitle = document.createElement('div');
+    importSubtitle.textContent = localizeText('Restore a previous export to merge or replace your saved records.', '导入之前的导出文件，用于合并或替换记录。');
+    importSubtitle.style.color = styles.subtleText;
+    importSubtitle.style.fontSize = '1.3125rem';
+    importSubtitle.style.marginTop = '-0.65rem';
+
     const importTextarea = document.createElement('textarea');
+    importTextarea.rows = 2;
     Object.assign(importTextarea.style, {
       width: '100%',
       maxWidth: LARGE_FORM_CONTROL_MAX_WIDTH,
-      minHeight: '7.5rem',
+      minHeight: '4rem',
+      height: '4rem',
       background: styles.inputBg,
       color: styles.color,
       border: `1px solid ${styles.inputBorder}`,
-      borderRadius: '0.6rem',
-      padding: '0.65rem 0.9rem',
+      borderRadius: '0.7rem',
+      padding: '0.75rem 1rem',
       boxSizing: 'border-box',
       fontFamily: 'inherit',
-      fontSize: '1.05rem',
-      lineHeight: '1.5'
+      fontSize: '1.3125rem',
+      lineHeight: '1.6',
+      boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.08)',
+      resize: 'vertical'
     });
-    importTextarea.placeholder = 'Paste exported JSON here...';
+    importTextarea.placeholder = localizeText('Paste exported JSON here...', '在此粘贴导出的 JSON...');
+    applyFocusRing(importTextarea);
 
     const importActions = document.createElement('div');
     Object.assign(importActions.style, {
       display: 'flex',
-      gap: '0.5rem',
+      gap: '0.75rem',
       flexWrap: 'wrap',
       alignItems: 'stretch',
       width: '100%',
@@ -3010,55 +3649,45 @@
     });
 
     const btnImportText = document.createElement('button');
-    Object.assign(btnImportText.style, {
-      background: styles.buttonBackground,
-      border: styles.buttonBorder,
-      borderRadius: '0.5rem',
-      cursor: 'pointer',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: '0.5rem',
-      padding: '0.35rem 0.9rem',
-      color: styles.color,
-      minHeight: '3rem',
-      flex: '0 0 auto'
-    });
-    btnImportText.title = 'Import from pasted JSON';
-    btnImportText.appendChild(createIcon('upload', styles.openButtonColor));
-    btnImportText.appendChild(document.createTextNode('Import from Text'));
+    btnImportText.title = localizeText('Import from pasted JSON', '从粘贴的 JSON 导入');
+    btnImportText.appendChild(createIcon('upload', 'currentColor'));
+    btnImportText.appendChild(document.createTextNode(localizeText('Import from Text', '从文本导入')));
+    decorateSettingsActionButton(btnImportText, styles.tabActive);
+    btnImportText.style.flex = '1 1 12rem';
 
     const fileInputWrapper = document.createElement('label');
     Object.assign(fileInputWrapper.style, {
-      background: styles.buttonBackground,
-      border: styles.buttonBorder,
-      borderRadius: '0.5rem',
+      border: `1px dashed ${styles.inputBorder}`,
+      borderRadius: '0.7rem',
       cursor: 'pointer',
       display: 'flex',
       alignItems: 'center',
       gap: '0.65rem',
-      padding: '0.35rem 0.9rem',
+      padding: '0.6rem 1rem',
       color: styles.color,
-      flex: '1',
-      minHeight: '3rem',
-      boxSizing: 'border-box'
+      flex: '1 1 14rem',
+      minHeight: '3.25rem',
+      boxSizing: 'border-box',
+      background: settingsCardSubtleBg,
+      transition: 'border-color 0.2s ease, color 0.2s ease, background 0.2s ease'
     });
-    fileInputWrapper.title = 'Select an export JSON file';
+    fileInputWrapper.tabIndex = 0;
+    fileInputWrapper.title = localizeText('Select an export JSON file', '选择要导入的 JSON 文件');
 
-    const fileInputIcon = createIcon('upload', styles.openButtonColor);
-    if (fileInputIcon) fileInputIcon.style.fontSize = '1.2rem';
+    const fileInputIcon = createIcon('upload', styles.tabActive);
+    if (fileInputIcon) fileInputIcon.style.fontSize = '1.5rem';
     const fileInputLabelText = document.createElement('span');
-    fileInputLabelText.textContent = 'Choose File';
-    fileInputLabelText.style.fontSize = '1rem';
+    fileInputLabelText.textContent = localizeText('Choose File', '选择文件');
+    fileInputLabelText.style.fontSize = '1.3125rem';
     fileInputLabelText.style.fontWeight = '700';
 
-    const fileInputDefaultLabel = 'No file chosen';
+    const fileInputDefaultLabel = localizeText('No file chosen', '未选择文件');
     const fileNameDisplay = document.createElement('span');
     fileNameDisplay.textContent = fileInputDefaultLabel;
     Object.assign(fileNameDisplay.style, {
       flex: '1',
       color: styles.subtleText,
-      fontSize: '0.95rem',
+      fontSize: '1.3125rem',
       overflow: 'hidden',
       textOverflow: 'ellipsis',
       whiteSpace: 'nowrap'
@@ -3071,6 +3700,16 @@
       display: 'none'
     });
 
+    const toggleFileHover = hovered => {
+      fileInputWrapper.style.borderColor = hovered ? styles.tabActive : styles.inputBorder;
+      fileInputWrapper.style.color = hovered ? styles.tabActive : styles.color;
+      fileInputWrapper.style.background = hovered ? settingsActionHoverBg : settingsCardSubtleBg;
+    };
+    fileInputWrapper.addEventListener('pointerenter', () => toggleFileHover(true));
+    fileInputWrapper.addEventListener('pointerleave', () => toggleFileHover(false));
+    fileInputWrapper.addEventListener('focusin', () => toggleFileHover(true));
+    fileInputWrapper.addEventListener('focusout', () => toggleFileHover(false));
+
     fileInputWrapper.appendChild(fileInputIcon);
     fileInputWrapper.appendChild(fileInputLabelText);
     fileInputWrapper.appendChild(fileNameDisplay);
@@ -3080,74 +3719,141 @@
     Object.assign(overwriteRow.style, {
       display: 'flex',
       alignItems: 'center',
-      gap: '0.55rem',
-      fontSize: '1.1rem',
-      marginTop: '0.6rem'
+      gap: '0.65rem',
+      fontSize: '1.3125rem',
+      marginTop: '0.4rem',
+      background: settingsCardSubtleBg,
+      padding: '0.5rem 0.75rem',
+      borderRadius: '0.65rem',
+      flexWrap: 'wrap'
+    });
+    const overwriteLabelGroup = document.createElement('label');
+    Object.assign(overwriteLabelGroup.style, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '0.5rem',
+      flex: '0 0 auto',
+      cursor: 'pointer',
+      position: 'relative'
     });
     const chk = document.createElement('input');
     chk.type = 'checkbox';
-    chk.style.width = '1.25rem';
-    chk.style.height = '1.25rem';
-    chk.style.borderRadius = '0.35rem';
-    chk.style.accentColor = styles.tabActive;
+    Object.assign(chk.style, {
+      position: 'absolute',
+      left: '0',
+      top: '0',
+      width: '1.25rem',
+      height: '1.25rem',
+      margin: '0',
+      opacity: '0',
+      pointerEvents: 'none'
+    });
+    const checkboxVisual = document.createElement('span');
+    Object.assign(checkboxVisual.style, {
+      width: '1.25rem',
+      height: '1.25rem',
+      borderRadius: '0.35rem',
+      border: `2px solid ${styles.inputBorder}`,
+      background: styles.inputBg,
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      transition: 'background 0.18s ease, border-color 0.18s ease, color 0.18s ease',
+      boxShadow: isDarkTheme ? 'inset 0 0 0 1px rgba(255,255,255,0.05)' : 'none'
+    });
+    const checkboxTick = createIcon('check', styles.background);
+    if (checkboxTick) {
+      checkboxTick.style.fontSize = '1.0625rem';
+      checkboxTick.style.opacity = '0';
+    }
+    checkboxVisual.appendChild(checkboxTick);
     const chkSpan = document.createElement('span');
-    chkSpan.textContent = 'Overwrite';
-    chkSpan.style.fontSize = '1.2rem';
+    chkSpan.textContent = localizeText('Overwrite', '覆盖');
+    chkSpan.style.fontSize = '1.5rem';
     chkSpan.style.fontWeight = '600';
-    overwriteRow.appendChild(chk);
-    overwriteRow.appendChild(chkSpan);
+    overwriteLabelGroup.appendChild(chk);
+    overwriteLabelGroup.appendChild(checkboxVisual);
+    overwriteLabelGroup.appendChild(chkSpan);
+    const refreshCheckboxVisual = () => {
+      const checked = chk.checked;
+      checkboxVisual.style.background = checked ? styles.tabActive : styles.inputBg;
+      checkboxVisual.style.borderColor = checked ? styles.tabActive : styles.inputBorder;
+      if (checkboxTick) {
+        checkboxTick.style.opacity = checked ? '1' : '0';
+        checkboxTick.style.color = checked ? styles.background : styles.subtleText;
+      }
+    };
+    chk.addEventListener('change', refreshCheckboxVisual);
+    refreshCheckboxVisual();
 
-    const importHint = document.createElement('div');
-    importHint.style.color = styles.subtleText;
-    importHint.style.fontSize = '0.85rem';
-    importHint.textContent = 'Imports records into the currently selected backend';
+    const overwriteHint = document.createElement('span');
+    overwriteHint.textContent = localizeText('Imports records into the currently selected backend.', '将记录导入到当前选择的存储后端。');
+    Object.assign(overwriteHint.style, {
+      color: styles.subtleText,
+      fontSize: '1.3125rem',
+      flex: '1 1 auto',
+      minWidth: '0',
+      lineHeight: '1.4',
+      textAlign: 'left',
+      whiteSpace: 'normal'
+    });
+    overwriteRow.appendChild(overwriteLabelGroup);
+    overwriteRow.appendChild(overwriteHint);
 
     const importStatus = document.createElement('div');
-    importStatus.style.color = styles.subtleText;
-    importStatus.style.fontSize = '0.85rem';
+    Object.assign(importStatus.style, {
+      color: styles.subtleText,
+      fontSize: '1.1875rem',
+      display: 'none'
+    });
 
     importActions.appendChild(btnImportText);
     importActions.appendChild(fileInputWrapper);
 
     importCard.appendChild(importTitle);
+    importCard.appendChild(importSubtitle);
+    importCard.appendChild(overwriteRow);
     importCard.appendChild(importTextarea);
     importCard.appendChild(importActions);
-    importCard.appendChild(overwriteRow);
-    importCard.appendChild(importHint);
     importCard.appendChild(importStatus);
 
     // Transcript card
     const transcriptCard = document.createElement('div');
-    Object.assign(transcriptCard.style, {
-      background: styles.recordBackground,
-      borderRadius: '0.5rem',
-      padding: '0.75rem',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '0.6rem'
+    Object.assign(transcriptCard.style, settingsCardBaseStyles, {
+      gap: '0.75rem'
     });
 
     const transcriptTitle = document.createElement('div');
-    transcriptTitle.style.display = 'flex';
-    transcriptTitle.style.alignItems = 'center';
-    transcriptTitle.style.gap = '0.5rem';
-    transcriptTitle.appendChild(createIcon('captions', styles.color));
+    Object.assign(transcriptTitle.style, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '0.6rem'
+    });
+    const transcriptIcon = createIcon('captions', transcriptAccentColor);
+    if (transcriptIcon) transcriptIcon.style.fontSize = '1.5rem';
     const transcriptTitleSpan = document.createElement('strong');
-    transcriptTitleSpan.textContent = 'Subtitles · Transcript';
-    transcriptTitleSpan.style.fontSize = '1.25rem';
+    transcriptTitleSpan.textContent = localizeText('Subtitles · Transcript', '字幕与接口设置');
+    transcriptTitleSpan.style.fontSize = '1.5625rem';
     transcriptTitleSpan.style.fontWeight = '700';
+    transcriptTitleSpan.style.color = styles.color;
+    transcriptTitle.appendChild(transcriptIcon);
     transcriptTitle.appendChild(transcriptTitleSpan);
 
     const transcriptDesc = document.createElement('div');
-    transcriptDesc.textContent = 'Configure the OpenAI-compatible endpoint used for subtitles. Actual fetching now lives inside the Records tab.';
+    transcriptDesc.textContent = localizeText(
+      'Configure the OpenAI-compatible endpoint used for subtitles. Actual fetching now lives inside the Records tab.',
+      '配置字幕接口（兼容 OpenAI）。字幕获取功能位于“记录”标签。'
+    );
     transcriptDesc.style.color = styles.subtleText;
-    transcriptDesc.style.fontSize = '1rem';
+    transcriptDesc.style.fontSize = '1.3125rem';
+    transcriptDesc.style.marginTop = '-0.65rem';
 
     const transcriptFields = document.createElement('div');
     Object.assign(transcriptFields.style, {
       display: 'flex',
       flexDirection: 'column',
-      gap: '0.5rem'
+      gap: '0.75rem',
+      width: '100%'
     });
 
     const transcriptSettings = getTranscriptSettings();
@@ -3191,6 +3897,7 @@
       });
       input.autocomplete = 'off';
       input.spellcheck = false;
+      applyFocusRing(input);
       return input;
     }
 
@@ -3210,27 +3917,18 @@
     apiKeyInput.value = transcriptSettings.apiKey || '';
     apiKeyInput.autocomplete = 'new-password';
     const apiKeyToggle = document.createElement('button');
-    Object.assign(apiKeyToggle.style, {
-      background: styles.buttonBackground,
-      border: styles.buttonBorder,
-      borderRadius: '0.6rem',
-      cursor: 'pointer',
-      padding: '0 1rem',
-      color: styles.color,
-      fontSize: '1.05rem',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      minHeight: '3rem',
-      whiteSpace: 'nowrap'
-    });
     apiKeyToggle.type = 'button';
-    apiKeyToggle.textContent = '显示';
+    apiKeyToggle.textContent = localizeText('Show', '显示');
+    decorateSettingsActionButton(apiKeyToggle, transcriptAccentColor);
+    apiKeyToggle.style.minHeight = '3rem';
+    apiKeyToggle.style.padding = '0 1.1rem';
     apiKeyToggle.addEventListener('click', (event) => {
       event.preventDefault();
       const isHidden = apiKeyInput.type === 'password';
       apiKeyInput.type = isHidden ? 'text' : 'password';
-      apiKeyToggle.textContent = isHidden ? '隐藏' : '显示';
+      apiKeyToggle.textContent = isHidden
+        ? localizeText('Hide', '隐藏')
+        : localizeText('Show', '显示');
     });
     const apiKeyInputRow = document.createElement('div');
     Object.assign(apiKeyInputRow.style, {
@@ -3242,7 +3940,7 @@
     apiKeyInput.style.flex = '1';
     apiKeyInputRow.appendChild(apiKeyInput);
     apiKeyInputRow.appendChild(apiKeyToggle);
-    const apiKeyField = makeTranscriptInput('API Key', apiKeyInputRow);
+    const apiKeyField = makeTranscriptInput(localizeText('API Key', 'API 密钥'), apiKeyInputRow);
 
     const timeoutInput = decorateTextInput(document.createElement('input'));
     timeoutInput.type = 'number';
@@ -3263,23 +3961,76 @@
       )
     );
 
-    transcriptFields.appendChild(makeTranscriptInput('API Endpoint', endpointInput));
-    transcriptFields.appendChild(makeTranscriptInput('Model', modelInput));
+    transcriptFields.appendChild(makeTranscriptInput(localizeText('API Endpoint', 'API 接口路径'), endpointInput));
+    transcriptFields.appendChild(makeTranscriptInput(localizeText('Model', '模型名称'), modelInput));
     transcriptFields.appendChild(apiKeyField);
-    transcriptFields.appendChild(makeTranscriptInput('Timeout (minutes)', timeoutInput));
+    transcriptFields.appendChild(makeTranscriptInput(localizeText('Timeout (minutes)', '超时时长（分钟）'), timeoutInput));
 
     const transcriptVideoInfo = document.createElement('div');
-    transcriptVideoInfo.style.color = styles.subtleText;
-    transcriptVideoInfo.style.fontSize = '1rem';
+    Object.assign(transcriptVideoInfo.style, {
+      background: settingsCardSubtleBg,
+      borderRadius: '0.7rem',
+      padding: '0.7rem 0.95rem',
+      color: styles.subtleText,
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '0.45rem'
+    });
+
+    function makeInfoRow(labelText) {
+      const row = document.createElement('div');
+      Object.assign(row.style, {
+        display: 'flex',
+        alignItems: 'center',
+        gap: '0.5rem',
+        flexWrap: 'wrap'
+      });
+      const label = document.createElement('span');
+      label.textContent = labelText;
+      Object.assign(label.style, {
+        fontWeight: '600',
+        fontSize: '1.15rem',
+        color: styles.subtleText,
+        whiteSpace: 'nowrap'
+      });
+      const value = document.createElement('span');
+      Object.assign(value.style, {
+        fontSize: '1.25rem',
+        color: styles.color,
+        lineHeight: '1.45'
+      });
+      row.appendChild(label);
+      row.appendChild(value);
+      return { row, value };
+    }
+
+    const videoTitleRow = makeInfoRow(localizeText('Active video', '当前视频'));
+    const videoIdRow = makeInfoRow(localizeText('Video ID', '视频 ID'));
+    Object.assign(videoIdRow.value.style, {
+      fontFamily: 'monospace',
+      fontSize: '1.15rem',
+      background: isDarkTheme ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)',
+      padding: '0.15rem 0.4rem',
+      borderRadius: '0.35rem'
+    });
+    transcriptVideoInfo.appendChild(videoTitleRow.row);
+    transcriptVideoInfo.appendChild(videoIdRow.row);
 
     function setTranscriptVideoInfo(detail) {
       if (!detail) {
-        transcriptVideoInfo.textContent = '当前视频：未检测到可用的影片。';
+        videoTitleRow.value.textContent = localizeText('No active video detected', '未检测到可用的影片');
+        videoIdRow.row.style.display = 'none';
         return;
       }
       const vid = detail.videoId || getVideoId();
       const title = detail.title || detail.value || getVideoName() || DEFAULT_VIDEO_NAME;
-      transcriptVideoInfo.textContent = `当前视频：${title}${vid ? ` · ${vid}` : ''}`;
+      videoTitleRow.value.textContent = title;
+      if (vid) {
+        videoIdRow.value.textContent = vid;
+        videoIdRow.row.style.display = 'flex';
+      } else {
+        videoIdRow.row.style.display = 'none';
+      }
     }
     setTranscriptVideoInfo(configData.cachedVideoTitle);
     const transcriptVideoEventName = (typeof CURRENT_VIDEO_STATUS_EVENT === 'string' && CURRENT_VIDEO_STATUS_EVENT) || 'ysrp-current-video-status';
@@ -3312,12 +4063,246 @@
     transcriptCard.appendChild(transcriptTitle);
     transcriptCard.appendChild(transcriptDesc);
     transcriptCard.appendChild(transcriptFields);
-    transcriptCard.appendChild(transcriptVideoInfo);
+
+    const transcriptInfoCard = document.createElement('div');
+    Object.assign(transcriptInfoCard.style, settingsCardBaseStyles, {
+      gap: '0.65rem'
+    });
+    const transcriptInfoTitle = document.createElement('div');
+    Object.assign(transcriptInfoTitle.style, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '0.6rem'
+    });
+    const transcriptInfoIcon = createIcon('note', styles.color);
+    if (transcriptInfoIcon) transcriptInfoIcon.style.fontSize = '1.4rem';
+    const transcriptInfoTitleSpan = document.createElement('strong');
+    transcriptInfoTitleSpan.textContent = localizeText('Status & Tips', '状态与提示');
+    transcriptInfoTitleSpan.style.fontSize = '1.4rem';
+    transcriptInfoTitleSpan.style.fontWeight = '700';
+    transcriptInfoTitle.appendChild(transcriptInfoIcon);
+    transcriptInfoTitle.appendChild(transcriptInfoTitleSpan);
+    const transcriptInfoHint = document.createElement('div');
+    transcriptInfoHint.textContent = localizeText(
+      'These settings apply instantly. Use the Records tab to fetch transcripts for specific videos.',
+      '设置立即生效，具体字幕获取请在“记录”标签中触发。'
+    );
+    transcriptInfoHint.style.color = styles.subtleText;
+    transcriptInfoHint.style.fontSize = '1.1875rem';
+    transcriptInfoHint.style.lineHeight = '1.5';
+    transcriptInfoCard.appendChild(transcriptInfoTitle);
+    transcriptInfoCard.appendChild(transcriptInfoHint);
+    transcriptInfoCard.appendChild(transcriptVideoInfo);
+
+    const languageCard = document.createElement('div');
+    Object.assign(languageCard.style, settingsCardBaseStyles, {
+      gap: '0.75rem'
+    });
+
+    const languageTitleRow = document.createElement('div');
+    Object.assign(languageTitleRow.style, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '0.6rem'
+    });
+    const languageIcon = createIcon('globe', displayAccentColor);
+    if (languageIcon) languageIcon.style.fontSize = '1.5rem';
+    const languageTitleText = document.createElement('strong');
+    languageTitleText.textContent = localizeText('Interface Language', '界面语言');
+    languageTitleText.style.fontSize = '1.5625rem';
+    languageTitleText.style.fontWeight = '700';
+    languageTitleRow.appendChild(languageIcon);
+    languageTitleRow.appendChild(languageTitleText);
+
+    const languageDesc = document.createElement('div');
+    languageDesc.textContent = localizeText(
+      'Choose how the script UI should appear.',
+      '为脚本界面选择显示语言。'
+    );
+    languageDesc.style.color = styles.subtleText;
+    languageDesc.style.fontSize = '1.3125rem';
+    languageDesc.style.marginTop = '-0.65rem';
+
+    const languageOptionsWrapper = document.createElement('div');
+    Object.assign(languageOptionsWrapper.style, {
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '0.65rem',
+      width: '100%'
+    });
+
+    const languageStatus = document.createElement('div');
+    Object.assign(languageStatus.style, {
+      fontSize: '1.25rem',
+      color: styles.subtleText,
+      display: 'none'
+    });
+
+    const languageOptions = (typeof I18n !== 'undefined' && I18n && typeof I18n.getOptions === 'function')
+      ? I18n.getOptions()
+      : ['auto', 'zh', 'en'];
+    let languageState = getLanguageStateSnapshot();
+    const optionInputs = new Map();
+    const languageOptionWidgets = new Map();
+
+    function setLanguageStatus(message, color) {
+      if (!message) {
+        languageStatus.style.display = 'none';
+        languageStatus.textContent = '';
+        languageStatus.style.color = styles.subtleText;
+        return;
+      }
+      languageStatus.textContent = message;
+      languageStatus.style.display = 'block';
+      languageStatus.style.color = color || styles.tabActive;
+    }
+
+    function refreshLanguageOptionStyles(selectedValue) {
+      languageOptionWidgets.forEach(({ row, badge, labelLine, hintLine }, optionValue) => {
+        const selected = optionValue === selectedValue;
+        row.style.borderColor = selected ? displayAccentBorder : styles.inputBorder;
+        row.style.background = selected ? displayAccentBg : styles.buttonBackground;
+        row.style.boxShadow = selected ? displayAccentShadow : 'none';
+        badge.style.background = selected ? displayAccentColor : displayBadgeBg;
+        badge.style.color = selected ? styles.background : displayBadgeText;
+        labelLine.style.color = selected ? displayAccentColor : styles.color;
+        hintLine.style.color = selected ? displayAccentColor : styles.subtleText;
+      });
+    }
+
+    function syncOptionSelection(value) {
+      optionInputs.forEach((input, key) => {
+        input.checked = key === value;
+      });
+      refreshLanguageOptionStyles(value);
+    }
+
+    const languageMetaBox = document.createElement('div');
+    Object.assign(languageMetaBox.style, {
+      background: settingsCardSubtleBg,
+      borderRadius: '0.7rem',
+      padding: '0.7rem 0.95rem',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: '0.45rem'
+    });
+    const activeRow = makeInfoRow(localizeText('Active language', '当前语言'));
+    const browserRow = makeInfoRow(localizeText('Browser language', '浏览器语言'));
+    languageMetaBox.appendChild(activeRow.row);
+    languageMetaBox.appendChild(browserRow.row);
+
+    function updateLanguageMeta(state) {
+      activeRow.value.textContent = getLanguageDisplayName(state.resolved);
+      browserRow.value.textContent = getLanguageDisplayName(state.browser);
+    }
+
+    function handleLanguageOptionChange(value) {
+      if (!value || !I18n || typeof I18n.setPreference !== 'function') return;
+      if (value === (configData.language && configData.language.preference)) {
+        setLanguageStatus(localizeText('Already using this language.', '当前已使用该语言。'), styles.subtleText);
+        return;
+      }
+      I18n.setPreference(value);
+      languageState = getLanguageStateSnapshot();
+      updateLanguageMeta(languageState);
+      syncOptionSelection(languageState.preference);
+      setLanguageStatus(localizeText('Language preference updated.', '语言偏好已更新。'), styles.tabActive);
+    }
+
+    languageOptions.forEach(optionValue => {
+      const optionRow = document.createElement('label');
+      Object.assign(optionRow.style, {
+        display: 'flex',
+        alignItems: 'center',
+        gap: '0.75rem',
+        padding: '0.7rem 0.85rem',
+        borderRadius: '0.85rem',
+        border: `1px solid ${styles.inputBorder}`,
+        cursor: 'pointer',
+        background: styles.buttonBackground
+      });
+
+      const input = document.createElement('input');
+      input.type = 'radio';
+      input.name = 'ysrp-language-preference';
+      input.value = optionValue;
+      input.style.display = 'none';
+      input.checked = optionValue === languageState.preference;
+      optionInputs.set(optionValue, input);
+
+      const badge = document.createElement('span');
+      badge.textContent = getLanguageBadgeLabel(optionValue);
+      Object.assign(badge.style, {
+        fontSize: '0.85rem',
+        fontWeight: '600',
+        padding: '0.2rem 0.5rem',
+        borderRadius: '0.6rem',
+        background: displayBadgeBg,
+        color: displayBadgeText,
+        flexShrink: '0'
+      });
+
+      const textGroup = document.createElement('div');
+      Object.assign(textGroup.style, {
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '0.2rem',
+        minWidth: 0
+      });
+      const labelLine = document.createElement('span');
+      labelLine.textContent = getLanguageOptionLabel(optionValue);
+      Object.assign(labelLine.style, {
+        fontWeight: '600',
+        fontSize: '1.25rem',
+        color: styles.color
+      });
+      const hintLine = document.createElement('span');
+      hintLine.textContent = getLanguageOptionHint(optionValue);
+      Object.assign(hintLine.style, {
+        fontSize: '1.15rem',
+        color: styles.subtleText
+      });
+      textGroup.appendChild(labelLine);
+      textGroup.appendChild(hintLine);
+
+      optionRow.appendChild(input);
+      optionRow.appendChild(badge);
+      optionRow.appendChild(textGroup);
+
+      languageOptionWidgets.set(optionValue, {
+        row: optionRow,
+        badge,
+        labelLine,
+        hintLine
+      });
+
+      input.addEventListener('change', () => handleLanguageOptionChange(optionValue));
+      optionRow.addEventListener('click', event => {
+        event.preventDefault();
+        if (!input.checked) {
+          input.checked = true;
+          handleLanguageOptionChange(optionValue);
+        }
+      });
+
+      languageOptionsWrapper.appendChild(optionRow);
+    });
+
+    updateLanguageMeta(languageState);
+    syncOptionSelection(languageState.preference);
+
+    languageCard.appendChild(languageTitleRow);
+    languageCard.appendChild(languageDesc);
+    languageCard.appendChild(languageOptionsWrapper);
+    languageCard.appendChild(languageMetaBox);
+    languageCard.appendChild(languageStatus);
 
     prefsContainer.appendChild(storageCard);
     prefsContainer.appendChild(exportCard);
     prefsContainer.appendChild(importCard);
     transcriptContainer.appendChild(transcriptCard);
+    transcriptContainer.appendChild(transcriptInfoCard);
+    displayContainer.appendChild(languageCard);
 
     // Compose settings container (centered by default)
     settingsContainer.appendChild(settingsContainerHeader);
@@ -3326,6 +4311,7 @@
     settingsContainerBody.appendChild(recordsContainer);
     settingsContainerBody.appendChild(prefsContainer);
     settingsContainerBody.appendChild(transcriptContainer);
+    settingsContainerBody.appendChild(displayContainer);
 
     Object.assign(settingsContainer.style, {
       all: 'initial',
@@ -3356,10 +4342,13 @@
       setActiveTab(tab);
       injectSettingsScrollbarsCSS();
     }
-    setActiveAndLock(tabRecords);
+    const availableTabs = [tabRecords, tabPrefs, tabTranscript, tabDisplay];
+    const defaultTabButton = availableTabs.find(btn => btn.dataset.tabId === opts.defaultTab) || tabRecords;
+    setActiveAndLock(defaultTabButton);
     tabRecords.addEventListener('click', () => setActiveAndLock(tabRecords));
     tabPrefs.addEventListener('click', () => setActiveAndLock(tabPrefs));
     tabTranscript.addEventListener('click', () => setActiveAndLock(tabTranscript));
+    tabDisplay.addEventListener('click', () => setActiveAndLock(tabDisplay));
 
     // Build initial list
     rebuildRecords();
@@ -3370,12 +4359,17 @@
       const current = Storage.getMode();
       if (selected === current) return;
       const prevText = applySpan.textContent;
-      applySpan.textContent = 'Migrating...';
+      applySpan.textContent = localizeText('Migrating...', '正在迁移...');
       applyBtn.style.opacity = '0.6';
       applyBtn.style.pointerEvents = 'none';
       try {
         Storage.setMode(selected, { migrate: true, clearSource: true });
-        modeBadge.textContent = selected === 'gm' ? 'GM Storage' : 'localStorage';
+        radioLocal.input.checked = selected === 'local';
+        radioGM.input.checked = selected === 'gm';
+        refreshStorageChoiceStyles();
+        modeBadge.textContent = selected === 'gm'
+          ? localizeText('GM Storage', 'GM 存储')
+          : localizeText('localStorage', '浏览器本地存储');
         rebuildRecords();
       } catch (e) {
         console.error('Failed to switch storage:', e);
@@ -3396,8 +4390,18 @@
         await navigator.clipboard.writeText(json);
         btnCopyExport.style.opacity = '0.7';
         setTimeout(() => { btnCopyExport.style.opacity = '1'; }, 300);
+        updateActionStatus(
+          exportStatus,
+          localizeText('JSON copied to clipboard.', 'JSON 已复制到剪贴板。'),
+          styles.copyButtonColor
+        );
       } catch (e) {
         console.error('Copy export failed:', e);
+        updateActionStatus(
+          exportStatus,
+          localizeText('Copy export failed: {message}', '复制导出失败：{message}', { message: (e && e.message) || e || '' }),
+          styles.deleteButtonColor
+        );
       }
     });
 
@@ -3417,8 +4421,18 @@
           document.body.removeChild(a);
           URL.revokeObjectURL(url);
         }, 0);
+        updateActionStatus(
+          exportStatus,
+          localizeText('Export download started.', '导出下载已开始。'),
+          styles.openButtonColor
+        );
       } catch (e) {
         console.error('Download export failed:', e);
+        updateActionStatus(
+          exportStatus,
+          localizeText('Download failed: {message}', '下载失败：{message}', { message: (e && e.message) || e || '' }),
+          styles.deleteButtonColor
+        );
       }
     });
 
@@ -3427,10 +4441,18 @@
       try {
         const payload = JSON.parse(jsonText);
         const count = Storage.importPayload(payload, { clearExisting: !!chk.checked });
-        importStatus.textContent = `Imported ${count} record(s).`;
+        updateActionStatus(
+          importStatus,
+          localizeText('Imported {count} record(s).', '已导入 {count} 条记录。', { count }),
+          styles.openButtonColor
+        );
         rebuildRecords();
       } catch (e) {
-        importStatus.textContent = `Import failed: ${e.message || e}`;
+        updateActionStatus(
+          importStatus,
+          localizeText('Import failed: {message}', '导入失败：{message}', { message: e.message || e }),
+          styles.deleteButtonColor
+        );
         console.error('Import failed:', e);
       }
     }
@@ -3438,7 +4460,7 @@
     btnImportText.addEventListener('click', () => {
       const text = importTextarea.value.trim();
       if (!text) {
-        importStatus.textContent = 'Nothing to import.';
+        updateActionStatus(importStatus, localizeText('Nothing to import.', '没有可导入的内容。'), styles.subtleText);
         return;
       }
       doImport(text);
@@ -3470,7 +4492,7 @@
     infoEl.classList.add('last-save-info');
 
     const infoElText = document.createElement('span');
-    infoElText.textContent = "Loading...";
+    infoElText.textContent = localizeText('Loading...', '加载中...');
     infoElText.classList.add('last-save-info-text');
 
     const settingsButton = document.createElement('button');
@@ -3485,7 +4507,7 @@
     settingsButton.style.width = '2rem';
     settingsButton.style.height = '2rem';
     settingsButton.style.borderRadius = '0.5rem';
-    settingsButton.title = '打开设置';
+    settingsButton.title = localizeText('Open settings', '打开设置');
 
     const gearIcon = createIcon('gear', styles.color);
     settingsButton.appendChild(gearIcon);
@@ -3519,6 +4541,54 @@
   async function onChaptersReadyToMount(callback) {
     await waitForElm('.ytp-chapter-container[style=""]');
     callback();
+  }
+
+  function recreateInfoContainer() {
+    const existing = document.querySelector(SELECTORS.infoContainer);
+    if (existing && existing.parentNode) {
+      existing.parentNode.removeChild(existing);
+    }
+    const infoEl = createInfoUI();
+    insertInfoElement(infoEl);
+    insertInfoElementInChaptersContainer(infoEl);
+  }
+
+  function refreshLanguageDependentUI() {
+    const settingsContainer = document.querySelector(SELECTORS.settingsContainer);
+    const wasOpen = settingsContainer && settingsContainer.style.display !== 'none';
+    const activeTabId = settingsContainer && settingsContainer.dataset ? settingsContainer.dataset.activeTab : null;
+    if (settingsContainer) {
+      if (typeof settingsContainer._ysrpClose === 'function') {
+        settingsContainer._ysrpClose();
+      }
+      settingsContainer.remove();
+    }
+    recreateInfoContainer();
+    createSettingsUI({ defaultTab: activeTabId || SETTINGS_TABS.records });
+    bindSettingsToggle();
+    if (wasOpen) {
+      const freshContainer = document.querySelector(SELECTORS.settingsContainer);
+      if (freshContainer && typeof freshContainer._ysrpOpen === 'function') {
+        freshContainer._ysrpOpen();
+      }
+      if (activeTabId) {
+        const targetTab = freshContainer && freshContainer.querySelector(`[data-tab-id="${activeTabId}"]`);
+        if (targetTab) targetTab.click();
+      }
+    }
+  }
+
+  if (LANGUAGE_EVENT_NAME) {
+    let pendingLanguageRefresh = null;
+    document.addEventListener(LANGUAGE_EVENT_NAME, () => {
+      if (pendingLanguageRefresh) {
+        clearTimeout(pendingLanguageRefresh);
+      }
+      pendingLanguageRefresh = setTimeout(() => {
+        pendingLanguageRefresh = null;
+        refreshLanguageDependentUI();
+      }, 50);
+    });
   }
 
 /* -------------------------------------------------------------------------- *
