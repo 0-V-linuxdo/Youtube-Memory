@@ -1,2 +1,2 @@
-# Youtube-Save-Resume-Progress
-[Youtube] Save &amp; Resume Progress
+# Youtube Memory
+[Youtube] Memory
