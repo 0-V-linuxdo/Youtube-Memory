@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         [Youtube] Video Memory [20251111] v1.2.0
+// @name         [Youtube] Video Memory [20251112] v1.0.0
 // @namespace    0_V userscripts/Youtube Save & Resume Progress
 // @description  Save & resume YouTube playback progress. Storage backend selection (localStorage or GM storage) with migration, import/export under a settings sub-tab. Fix: On YouTube new UI, the settings popup opens reliably on the page (not on the player), without causing player zoom/jitter, even right after page load.
-// @version      [20251111] v1.2.0
-// @update-log   [20251111] v1.2.0 · Added bilingual UI with language selector tab and refreshed transcript/records labels
+// @version      [20251112] v1.0.0
+// @update-log   [20251112] v1.0.0 · Added bilingual UI with language selector tab and refreshed transcript/records labels
 // @license      MIT
 //
 // @match        *://*.youtube.com/*
