@@ -13,7 +13,7 @@
 // @grant        GM_deleteValue
 // @grant        GM_listValues
 //
-// @icon         https://www.google.com/s2/favicons?sz=64&domain=youtube.com
+// @icon         https://github.com/0-V-linuxdo/Youtube-Memory/raw/refs/heads/main/main_icon/main_icon.svg
 // ==/UserScript==
 
 // ================================================
