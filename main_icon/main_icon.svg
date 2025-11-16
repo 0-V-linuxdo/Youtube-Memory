@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" height="40" width="60" viewBox="-35.20005 -41.33325 305.0671 247.9995">
+  <defs>
+    <linearGradient id="scan" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="white" stop-opacity="0"/>
+      <stop offset="50%" stop-color="white" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="white" stop-opacity="0"/>
+      <animate attributeName="x1" from="-1" to="2" dur="2s" repeatCount="indefinite"/>
+      <animate attributeName="x2" from="0" to="3" dur="2s" repeatCount="indefinite"/>
+    </linearGradient>
+    <mask id="scan-mask">
+      <rect x="-36" y="-42" width="306" height="248" fill="url(#scan)"/>
+    </mask>
+  </defs>
+  <path d="M229.763 25.817c-2.699-10.162-10.65-18.165-20.748-20.881C190.716 0 117.333 0 117.333 0S43.951 0 25.651 4.936C15.553 7.652 7.6 15.655 4.903 25.817 0 44.236 0 82.667 0 82.667s0 38.429 4.903 56.85C7.6 149.68 15.553 157.681 25.65 160.4c18.3 4.934 91.682 4.934 91.682 4.934s73.383 0 91.682-4.934c10.098-2.718 18.049-10.72 20.748-20.882 4.904-18.421 4.904-56.85 4.904-56.85s0-38.431-4.904-56.85" fill="red"/>
+  <path d="M93.333 117.559l61.333-34.89-61.333-34.894z" fill="#fff"/>
+  <rect x="-36" y="-42" width="306" height="248" fill="red" mask="url(#scan-mask)"/>
+</svg>
