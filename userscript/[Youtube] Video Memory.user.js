@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         [Youtube] Video Memory [20251112] v1.0.0
+// @name         [Youtube] Video Memory [20251116] v1.0.1
 // @namespace    0_V userscripts/Youtube Save & Resume Progress
 // @description  Save & resume YouTube playback progress. Storage backend selection (localStorage or GM storage) with migration, import/export under a settings sub-tab. Fix: On YouTube new UI, the settings popup opens reliably on the page (not on the player), without causing player zoom/jitter, even right after page load.
-// @version      [20251112] v1.0.0
-// @update-log   [20251112] v1.0.0 · Added bilingual UI with language selector tab and refreshed transcript/records labels
+// @version      [20251116] v1.0.1
+// @update-log   [20251116] v1.0.1 · Export JSON uses localized filename format [Youtube] Video Memory「YYYY MM DD」「HH:MM:SS」.json
 // @license      MIT
 //
 // @match        *://*.youtube.com/*
@@ -1706,6 +1706,37 @@
     transcript: 'transcript',
     display: 'display'
   });
+
+  const runtimeBrowserInfo = (() => {
+    if (typeof navigator === 'undefined') {
+      return { isIOS: false, isOrion: false };
+    }
+    const ua = String(navigator.userAgent || navigator.vendor || '').toLowerCase();
+    const isIOS = /\b(ipad|iphone|ipod)\b/.test(ua) ||
+      (ua.includes('mac') && typeof navigator.maxTouchPoints === 'number' && navigator.maxTouchPoints > 1);
+    const isOrion = /\borion\//.test(ua);
+    return { isIOS, isOrion };
+  })();
+
+  const iosShareCapabilities = (() => {
+    if (!runtimeBrowserInfo.isIOS) {
+      return { canShareFile: false };
+    }
+    if (typeof navigator === 'undefined' || typeof File !== 'function' || typeof navigator.share !== 'function') {
+      return { canShareFile: false };
+    }
+    if (typeof navigator.canShare === 'function') {
+      try {
+        const probe = new File(['{}'], 'probe.json', { type: 'application/json' });
+        if (!navigator.canShare({ files: [probe] })) {
+          return { canShareFile: false };
+        }
+      } catch {
+        return { canShareFile: false };
+      }
+    }
+    return { canShareFile: true };
+  })();
 
   function localizeText(enValue, zhValue, params) {
     if (typeof I18n !== 'undefined' && I18n && typeof I18n.pick === 'function') {
@@ -3696,17 +3727,43 @@
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
     fileInput.accept = 'application/json';
-    Object.assign(fileInput.style, {
-      display: 'none'
-    });
+    const needsIOSFilePickerWorkaround = runtimeBrowserInfo.isIOS;
+    if (needsIOSFilePickerWorkaround) {
+      Object.assign(fileInputWrapper.style, {
+        position: 'relative',
+        overflow: 'hidden',
+        touchAction: 'manipulation'
+      });
+      Object.assign(fileInput.style, {
+        position: 'absolute',
+        inset: '0',
+        width: '100%',
+        height: '100%',
+        opacity: '0.01',
+        cursor: 'pointer',
+        margin: '0',
+        border: '0',
+        padding: '0'
+      });
+      fileInput.tabIndex = -1;
+    } else {
+      Object.assign(fileInput.style, {
+        display: 'none'
+      });
+    }
 
     const toggleFileHover = hovered => {
       fileInputWrapper.style.borderColor = hovered ? styles.tabActive : styles.inputBorder;
       fileInputWrapper.style.color = hovered ? styles.tabActive : styles.color;
       fileInputWrapper.style.background = hovered ? settingsActionHoverBg : settingsCardSubtleBg;
     };
-    fileInputWrapper.addEventListener('pointerenter', () => toggleFileHover(true));
-    fileInputWrapper.addEventListener('pointerleave', () => toggleFileHover(false));
+    const pointerHoverTargets = needsIOSFilePickerWorkaround
+      ? [fileInputWrapper, fileInput]
+      : [fileInputWrapper];
+    pointerHoverTargets.forEach(target => {
+      target.addEventListener('pointerenter', () => toggleFileHover(true));
+      target.addEventListener('pointerleave', () => toggleFileHover(false));
+    });
     fileInputWrapper.addEventListener('focusin', () => toggleFileHover(true));
     fileInputWrapper.addEventListener('focusout', () => toggleFileHover(false));
 
@@ -3714,6 +3771,29 @@
     fileInputWrapper.appendChild(fileInputLabelText);
     fileInputWrapper.appendChild(fileNameDisplay);
     fileInputWrapper.appendChild(fileInput);
+    const openFilePicker = () => {
+      if (typeof fileInput.showPicker === 'function') {
+        try {
+          fileInput.showPicker();
+          return;
+        } catch (err) {
+          console.warn('fileInput.showPicker() failed; falling back to click.', err);
+        }
+      }
+      fileInput.click();
+    };
+    if (!needsIOSFilePickerWorkaround) {
+      fileInputWrapper.addEventListener('click', event => {
+        event.preventDefault();
+        openFilePicker();
+      });
+    }
+    fileInputWrapper.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+        event.preventDefault();
+        openFilePicker();
+      }
+    });
 
     const overwriteRow = document.createElement('div');
     Object.assign(overwriteRow.style, {
@@ -4383,6 +4463,72 @@
     });
 
     // Export actions
+    function triggerJsonDownload(json, fileName) {
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      requestAnimationFrame(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      });
+    }
+
+    function openJsonDataInNewTab(json) {
+      if (typeof window === 'undefined' || typeof window.open !== 'function') return false;
+      try {
+        const dataUrl = `data:application/json;charset=utf-8,${encodeURIComponent(json)}`;
+        const win = window.open(dataUrl, '_blank', 'noopener');
+        return !!win;
+      } catch (err) {
+        console.warn('Opening data URL in new tab failed:', err);
+        return false;
+      }
+    }
+
+    async function tryShareJsonExport(json, fileName) {
+      if (!iosShareCapabilities.canShareFile || typeof navigator === 'undefined' || typeof File !== 'function') {
+        return { status: 'unsupported' };
+      }
+      if (typeof navigator.share !== 'function') {
+        return { status: 'unsupported' };
+      }
+      let shareFile;
+      try {
+        shareFile = new File([json], fileName, { type: 'application/json' });
+      } catch (err) {
+        console.warn('Failed to create shareable file:', err);
+        return { status: 'unsupported' };
+      }
+      if (typeof navigator.canShare === 'function') {
+        try {
+          if (!navigator.canShare({ files: [shareFile] })) {
+            return { status: 'unsupported' };
+          }
+        } catch (err) {
+          console.warn('navigator.canShare check failed:', err);
+          return { status: 'unsupported' };
+        }
+      }
+      try {
+        await navigator.share({
+          files: [shareFile],
+          title: localizeText('Video Memory Export', '视频记忆导出'),
+          text: localizeText('Choose “Save to Files” to store your backup.', '请选择“存储到文件”以保存备份。')
+        });
+        return { status: 'shared' };
+      } catch (err) {
+        if (err && (err.name === 'AbortError' || err.name === 'NotAllowedError')) {
+          return { status: 'cancelled' };
+        }
+        console.warn('navigator.share failed:', err);
+        return { status: 'failed' };
+      }
+    }
+
     btnCopyExport.addEventListener('click', async () => {
       try {
         const payload = Storage.exportAll();
@@ -4405,22 +4551,48 @@
       }
     });
 
-    btnDownloadExport.addEventListener('click', () => {
+    btnDownloadExport.addEventListener('click', async () => {
       try {
         const payload = Storage.exportAll();
         const json = JSON.stringify(payload, null, 2);
-        const blob = new Blob([json], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        a.href = url;
-        a.download = `ysrp-export-${Storage.getMode()}-${ts}.json`;
-        document.body.appendChild(a);
-        a.click();
-        setTimeout(() => {
-          document.body.removeChild(a);
-          URL.revokeObjectURL(url);
-        }, 0);
+        const now = new Date();
+        const pad = value => String(value).padStart(2, '0');
+        const formattedDate = `${now.getFullYear()} ${pad(now.getMonth() + 1)} ${pad(now.getDate())}`;
+        const formattedTime = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+        const fileName = `[Youtube] Video Memory「${formattedDate}」「${formattedTime}」.json`;
+        if (runtimeBrowserInfo.isIOS) {
+          if (iosShareCapabilities.canShareFile) {
+            const shareResult = await tryShareJsonExport(json, fileName);
+            if (shareResult.status === 'shared') {
+              updateActionStatus(
+                exportStatus,
+                localizeText('Share sheet opened. Choose “Save to Files”.', '已打开系统分享面板，请选择“存储到文件”。'),
+                styles.openButtonColor
+              );
+              return;
+            }
+            if (shareResult.status === 'cancelled') {
+              updateActionStatus(
+                exportStatus,
+                localizeText('Share cancelled.', '已取消分享。'),
+                styles.subtleText
+              );
+              return;
+            }
+            // For failed shares fall through to default download attempt.
+          } else {
+            const opened = openJsonDataInNewTab(json);
+            if (opened) {
+              updateActionStatus(
+                exportStatus,
+                localizeText('Export opened in a new tab. Use the share menu to save it.', '已在新标签页打开导出，请通过分享菜单保存。'),
+                styles.openButtonColor
+              );
+              return;
+            }
+          }
+        }
+        triggerJsonDownload(json, fileName);
         updateActionStatus(
           exportStatus,
           localizeText('Export download started.', '导出下载已开始。'),
@@ -4480,6 +4652,7 @@
       fileInput.value = '';
       fileNameDisplay.textContent = fileInputDefaultLabel;
     });
+
   }
 
   function createInfoUI() {
