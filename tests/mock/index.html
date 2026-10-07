@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Mock YouTube watch page</title>
+  <style>
+    body { margin: 0; font-family: sans-serif; }
+    #movie_player { position: relative; width: 640px; height: 360px; background: #000; color: #fff; }
+    .ytp-chrome-bottom { position: absolute; bottom: 0; left: 0; right: 0; height: 48px; display: flex; align-items: center; }
+    .ytp-left-controls { display: flex; align-items: center; height: 100%; }
+    video { width: 1px; height: 1px; }
+  </style>
+</head>
+<body>
+  <ytd-app>
+    <div id="content">
+      <div id="page-manager">
+        <div id="player-host"></div>
+        <h1 id="title">Mock</h1>
+      </div>
+    </div>
+  </ytd-app>
+  <script src="/mock-player.js"></script>
+</body>
+</html>
