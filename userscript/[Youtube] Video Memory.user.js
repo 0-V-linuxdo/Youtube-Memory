@@ -551,6 +551,17 @@
     return /(?:^|[#&])t=/.test(location.hash.replace(/^#/, '&'));
   }
 
+  // Seconds requested by a timestamp link (`t=90`, `t=1m30s`, `start=90`, `#t=90`), or null.
+  function urlStartTime() {
+    const params = new URLSearchParams(location.search);
+    const hash = new URLSearchParams(location.hash.replace(/^#/, ''));
+    const raw = params.get('t') || params.get('start') || hash.get('t');
+    if (!raw) return null;
+    if (/^\d+(?:\.\d+)?s?$/.test(raw)) return parseFloat(raw);
+    const m = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/.exec(raw);
+    return m ? (Number(m[1] || 0) * 3600 + Number(m[2] || 0) * 60 + Number(m[3] || 0)) : null;
+  }
+
   function playerVideoData(player) {
     try {
       const data = player.getVideoData && player.getVideoData();
@@ -581,7 +592,7 @@
     function newSession(id) {
       return {
         id,
-        phase: 'waiting', // waiting -> restoring -> tracking
+        phase: 'waiting', // waiting -> (choosing) -> restoring -> tracking
         isLive: false,
         duration: 0,
         lastTime: null,
@@ -647,15 +658,37 @@
       s.isLive = Boolean(data.isLive);
       if (data.title) Titles.rememberOriginal(s.id, data.title);
       if (s.isLive) return enterTracking(s, { kind: 'live' }); // D-3
-      if (urlHasStartTime()) return enterTracking(s); // D-1
       const rec = Store.get(s.id);
       const target = rec ? Number(rec.videoProgress) : NaN;
       if (!Number.isFinite(target) || target <= MIN_RESTORE_POSITION) return enterTracking(s);
       if (target >= s.duration - END_GUARD_SECONDS) return enterTracking(s); // D-2
       s.restoreTarget = target;
+      if (urlHasStartTime()) return askForChoice(s, player); // D-1
+      startRestoring(s, player);
+    }
+
+    function startRestoring(s, player) {
       s.phase = 'restoring';
       s.restoreStartedAt = Date.now();
+      s.seekAttempts = 0;
       seek(s, player);
+    }
+
+    // D-1: a timestamp link and a saved position disagree; the user picks one (F-2.6).
+    function askForChoice(s, player) {
+      const linkTime = urlStartTime() ?? (Number(player.getCurrentTime()) || 0);
+      if (Math.abs(linkTime - s.restoreTarget) <= RESTORE_TOLERANCE) return enterTracking(s);
+      s.phase = 'choosing';
+      let wasPlaying = false;
+      try { wasPlaying = player.getPlayerState() === 1; player.pauseVideo(); } catch (_) { /* keep going */ }
+      Badge.show({ kind: 'choosing' });
+      ResumePrompt.open({ saved: s.restoreTarget, link: linkTime }, choice => {
+        if (session !== s || s.phase !== 'choosing') return;
+        const current = getPlayer();
+        if (choice === 'saved' && current) startRestoring(s, current);
+        else enterTracking(s);
+        if (wasPlaying && current) { try { current.playVideo(); } catch (_) { /* ignore */ } }
+      });
     }
 
     function seek(s, player) {
@@ -686,6 +719,7 @@
     }
 
     function startSession(id) {
+      ResumePrompt.close();
       session = id ? newSession(id) : null;
       Badge.show({ kind: 'loading' });
       if (id) {
@@ -909,6 +943,16 @@
 .ysrp-msg { color: var(--ysrp-sub); font-size: 12px; }
 .ysrp-msg.is-ok { color: var(--ysrp-ok); }
 .ysrp-msg.is-error { color: var(--ysrp-danger); }
+.ysrp-resume { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 1000; box-sizing: border-box;
+  display: flex; flex-direction: column; gap: 10px; width: 360px; max-width: calc(100% - 32px); padding: 16px; border-radius: 10px;
+  border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); color: var(--ysrp-fg); box-shadow: rgba(0,0,0,.4) 0 4px 16px;
+  font-family: Roboto, Arial, sans-serif; font-size: 13px; line-height: 1.45; text-align: left; text-shadow: none; }
+.ysrp-resume * { box-sizing: border-box; }
+.ysrp-resume button { font: inherit; }
+.ysrp-resume-title { font-size: 16px; font-weight: 700; }
+.ysrp-resume-sub { color: var(--ysrp-sub); }
+.ysrp-resume .ysrp-btn { font-variant-numeric: tabular-nums; }
+.ysrp-resume-saved { --ysrp-btn-accent: var(--ysrp-ok); }
 `;
 
   function injectStyles() {
@@ -959,6 +1003,9 @@
           break;
         case 'live':
           textNode.textContent = t('Live · not saved', '直播 · 不保存');
+          break;
+        case 'choosing':
+          textNode.textContent = t('Choose a position…', '请选择播放位置…');
           break;
         case 'idle':
           textNode.textContent = formatTime(0);
@@ -1013,6 +1060,54 @@
     }
 
     return { show, ensure, rebuild };
+  })();
+
+  /* ======================================================================
+   * Resume choice dialog (F-2.6)
+   * ==================================================================== */
+
+  const ResumePrompt = (() => {
+    let node = null;
+
+    function close() {
+      if (node) node.remove();
+      node = null;
+    }
+
+    function open(times, onChoose) {
+      close();
+      const host = document.getElementById('movie_player');
+      if (!host) { onChoose('link'); return; }
+      const choose = choice => { close(); onChoose(choice); };
+      const option = (choice, iconName, label, seconds) => {
+        const button = h('button', { type: 'button', class: `ysrp-btn ysrp-resume-${choice}`, dataset: { choice } },
+          icon(iconName), h('span', { text: `${label} ${formatTime(seconds)}` }));
+        shieldFromPlayer(button, () => choose(choice));
+        button.addEventListener('keydown', event => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          event.stopPropagation();
+          choose(choice);
+        });
+        return button;
+      };
+      const saved = option('saved', 'clock-rotate-left', t('Saved progress', '上次进度'), times.saved);
+      node = h('div', { class: 'ysrp-theme ysrp-resume', role: 'dialog', 'aria-modal': 'false',
+        'aria-label': t('Where to continue?', '从哪里继续播放？') },
+      h('div', { class: 'ysrp-resume-title', text: t('Where to continue?', '从哪里继续播放？') }),
+      h('div', { class: 'ysrp-resume-sub', text: t('This link starts at a different time than your saved progress.', '这个链接指定的时间与你上次的进度不同。') }),
+      h('div', { class: 'ysrp-row-actions' }, saved, option('link', 'link', t('Link time', '链接时间'), times.link)));
+      // Clicks on the card must not toggle playback underneath it.
+      ['click', 'mousedown', 'pointerdown', 'touchstart', 'dblclick'].forEach(type =>
+        node.addEventListener(type, event => event.stopPropagation()));
+      node.addEventListener('keydown', event => {
+        if (event.key === 'Escape') { event.stopPropagation(); choose('link'); }
+      });
+      host.appendChild(node);
+      saved.focus({ preventScroll: true });
+    }
+
+    return { open, close, isOpen: () => Boolean(node) };
   })();
 
   /* ======================================================================

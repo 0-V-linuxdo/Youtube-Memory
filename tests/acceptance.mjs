@@ -164,15 +164,54 @@ const tests = {
   },
 
   async 'A-6'() {
+    // Link time and saved progress disagree: a dialog asks, nothing is saved meanwhile; "link time" keeps the link.
     const ctx = await newContext();
     const page = await seeded(ctx, { a6link: { videoProgress: 100, saveDate: 1, videoName: 'Link' } });
     await goto(page, 'v=a6link&t=5');
-    await sleep(4000);
+    await sleep(3000);
+    const dialog = await page.locator('.ysrp-resume').count();
+    const paused = await page.evaluate(() => window.__mock.player.getPlayerState() === 2);
+    const waiting = await record(page, 'a6link');
+    await page.locator('.ysrp-resume-link').dispatchEvent('pointerdown');
+    await sleep(3000);
     const time = await playerTime(page);
     const rec = await record(page, 'a6link');
-    check('A-6', 'timestamp link (&t=) wins over the saved position, then saving continues',
+    const gone = await page.locator('.ysrp-resume').count();
+    check('A-6', '&t= with different saved progress: dialog asks; "link time" plays from the link, then saves',
+      dialog === 1 && paused && waiting.videoProgress === 100 && gone === 0 &&
       time >= 5 && time < 10 && rec.videoProgress >= 5 && rec.videoProgress < 10,
-      `plays at ${time.toFixed(1)}s, record ${rec.videoProgress.toFixed(1)}s`);
+      `dialog ${dialog}, paused ${paused}, record while asking ${waiting.videoProgress}s, ` +
+      `then plays at ${time.toFixed(1)}s, record ${rec.videoProgress.toFixed(1)}s`);
+    await ctx.close();
+  },
+
+  async 'A-6b'() {
+    const ctx = await newContext();
+    const page = await seeded(ctx, { a6saved: { videoProgress: 100, saveDate: 1, videoName: 'Saved' } });
+    await goto(page, 'v=a6saved&t=5');
+    await sleep(3000);
+    await page.locator('.ysrp-resume-saved').dispatchEvent('pointerdown');
+    await sleep(3000);
+    const time = await playerTime(page);
+    const playing = await page.evaluate(() => window.__mock.player.getPlayerState() === 1);
+    check('A-6b', '"saved progress" in the dialog resumes from the saved position and keeps playing',
+      time >= 100 && time < 106 && playing, `plays at ${time.toFixed(1)}s, playing ${playing}`);
+    await ctx.close();
+  },
+
+  async 'A-6c'() {
+    const ctx = await newContext();
+    const page = await seeded(ctx, { a6same: { videoProgress: 31, saveDate: 1, videoName: 'Same' },
+      a6none: { videoProgress: 0, saveDate: 1, videoName: 'None' } });
+    await goto(page, 'v=a6same&t=30');
+    await sleep(3000);
+    const same = await page.locator('.ysrp-resume').count();
+    await goto(page, 'v=a6none&t=30');
+    await sleep(3000);
+    const none = await page.locator('.ysrp-resume').count();
+    const time = await playerTime(page);
+    check('A-6c', 'no dialog when the link time matches the saved position or there is nothing to resume',
+      same === 0 && none === 0 && time >= 30 && time < 35, `dialogs ${same}/${none}, plays at ${time.toFixed(1)}s`);
     await ctx.close();
   },
 

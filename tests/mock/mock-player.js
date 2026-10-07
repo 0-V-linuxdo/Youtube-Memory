@@ -40,6 +40,7 @@
     state.time = Math.max(0, Math.min(state.duration, Number(seconds) || 0));
     fire('seeked');
   };
+  player.getPlayerState = () => (state.playing ? 1 : 2);
   player.pauseVideo = () => { state.playing = false; fire('pause'); };
   player.playVideo = () => { state.playing = true; fire('playing'); };
 
