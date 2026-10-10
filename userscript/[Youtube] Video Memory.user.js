@@ -33,6 +33,8 @@
 (() => {
   // src/utils/constants.ts
   var VERSION = "[20261010] v2.2.0";
+  var COMMIT = "860ad2f";
+  var IS_DEV_BUILD = false;
   var VERSION_SHORT = (VERSION.match(/v[\d.]+/) || [VERSION])[0];
   var RECORD_PREFIX = "Youtube_SaveResume_Progress-";
   var KEY_STORAGE_MODE = "YSRP_StorageMode";
@@ -464,34 +466,12 @@
     appendChildren(el, children);
     return el;
   }
-  function icon(name, extraClass = "") {
+  function icon(name, extraClass = "", variant = "solid") {
     const i = document.createElement("i");
     if (name)
-      i.className = `fa-solid fa-${name}${extraClass ? ` ${extraClass}` : ""}`;
+      i.className = `fa-${variant} fa-${name}${extraClass ? ` ${extraClass}` : ""}`;
     i.setAttribute("aria-hidden", "true");
     return i;
-  }
-  var SVG_NS = "http://www.w3.org/2000/svg";
-  var DEARROW_PATHS = [
-    ["#1213BD", "M36 18.302c0 4.981-2.46 9.198-5.655 12.462s-7.323 5.152-12.199 5.152s-9.764-1.112-12.959-4.376S0 23.283 0 18.302s2.574-9.38 5.769-12.644S13.271 0 18.146 0s9.394 2.178 12.589 5.442C33.931 8.706 36 13.322 36 18.302z"],
-    ["#88c9f9", "m 30.394282,18.410186 c 0,3.468849 -1.143025,6.865475 -3.416513,9.137917 -2.273489,2.272442 -5.670115,2.92874 -9.137918,2.92874 -3.467803,0 -6.373515,-1.147212 -8.6470033,-3.419654 -2.2734888,-2.272442 -3.5871299,-5.178154 -3.5871299,-8.647003 0,-3.46885 0.9420533,-6.746149 3.2144954,-9.0196379 2.2724418,-2.2734888 5.5507878,-3.9513905 9.0196378,-3.9513905 3.46885,0 6.492841,1.9322561 8.76633,4.204698 2.273489,2.2724424 3.788101,5.2974804 3.788101,8.7663304 z"],
-    ["#0a62a5", "m 23.95823,17.818306 c 0,3.153748 -2.644888,5.808102 -5.798635,5.808102 -3.153748,0 -5.599825,-2.654354 -5.599825,-5.808102 0,-3.153747 2.446077,-5.721714 5.599825,-5.721714 3.153747,0 5.798635,2.567967 5.798635,5.721714 z"]
-  ];
-  function dearrowIcon(size = 20) {
-    const svg = document.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("viewBox", "0 0 36 36");
-    svg.setAttribute("width", String(size));
-    svg.setAttribute("height", String(size));
-    svg.setAttribute("aria-hidden", "true");
-    svg.setAttribute("focusable", "false");
-    svg.setAttribute("role", "img");
-    for (const [fill, d] of DEARROW_PATHS) {
-      const path = document.createElementNS(SVG_NS, "path");
-      path.setAttribute("fill", fill);
-      path.setAttribute("d", d);
-      svg.appendChild(path);
-    }
-    return svg;
   }
   function clear(el) {
     while (el.firstChild)
@@ -548,18 +528,25 @@
 
   // src/api/pluginSettings.ts
   var cache = null;
+  var nameList = (value) => Array.isArray(value) ? Array.from(new Set(value.filter((v) => typeof v === "string" && v.length > 0))) : [];
   function load() {
     if (cache)
       return cache;
     let parsed = null;
     try {
       const raw = readSetting(KEY_PLUGINS);
-      parsed = raw ? JSON.parse(raw) : null;
+      const value = raw ? JSON.parse(raw) : null;
+      parsed = value && typeof value === "object" && !Array.isArray(value) ? value : null;
     } catch {
       parsed = null;
     }
-    const plugins = parsed && typeof parsed === "object" && parsed.plugins;
-    cache = { plugins: plugins && typeof plugins === "object" ? { ...plugins } : {} };
+    const plugins = parsed && parsed.plugins;
+    cache = {
+      ...parsed || {},
+      plugins: plugins && typeof plugins === "object" ? { ...plugins } : {},
+      starred: nameList(parsed && parsed.starred),
+      pinned: nameList(parsed && parsed.pinned)
+    };
     return cache;
   }
   function save() {
@@ -571,6 +558,20 @@
   function setStoredValue(plugin, key, value) {
     const data = load();
     data.plugins[plugin] = { ...data.plugins[plugin] || {}, [key]: value };
+    save();
+  }
+  function starredPlugins() {
+    return load().starred.slice();
+  }
+  function pinnedPlugins() {
+    return load().pinned.slice();
+  }
+  function setListed(list, name, on) {
+    const data = load();
+    const next = data[list].filter((n) => n !== name);
+    if (on)
+      next.push(name);
+    data[list] = next;
     save();
   }
 
@@ -736,6 +737,10 @@
   var registry = [];
   var running = new Map;
   var contexts = new Map;
+  var failed = new Set;
+  function hasFailed(name) {
+    return failed.has(name);
+  }
   function listPlugins() {
     return registry.slice();
   }
@@ -760,10 +765,12 @@
       return;
     const ctx = new PluginContext(plugin);
     running.set(plugin.name, ctx);
+    failed.delete(plugin.name);
     try {
       plugin.start(ctx);
     } catch (err) {
       console.error(`[Video Memory] Plugin ${plugin.name} failed to start:`, err);
+      failed.add(plugin.name);
     }
   }
   function stopPlugin(plugin) {
@@ -771,6 +778,7 @@
     if (!ctx)
       return;
     running.delete(plugin.name);
+    failed.delete(plugin.name);
     try {
       plugin.stop?.(ctx);
     } catch (err) {
@@ -800,44 +808,417 @@
   }
 
   // src/api/theme.css
-  var theme_default = `/* N-5.3.1 monochrome palette, follows the system light/dark scheme live (fixes C-Q4/U-Q6). */
+  var theme_default = `/* N-5.1 colour tokens: follow the system light/dark scheme live. */
 :root {
-  --ysrp-bg: #ffffff;
-  --ysrp-nav-bg: #f7f7f7;
-  --ysrp-card: #fafafa;
-  --ysrp-layer: #f0f0f0;
-  --ysrp-border: rgba(0, 0, 0, .08);
-  --ysrp-border-strong: rgba(0, 0, 0, .16);
-  --ysrp-text: #0d0d0d;
-  --ysrp-text-2: #5e5e5e;
-  --ysrp-text-3: #8f8f8f;
-  --ysrp-hover: rgba(0, 0, 0, .05);
-  --ysrp-error: #d93025;
-  --ysrp-success: #188038;
-  --ysrp-backdrop: rgba(0, 0, 0, .4);
+  --ysrp-surface-base: #ffffff;
+  --ysrp-surface-l1: #f4f4f5;
+  --ysrp-surface-l2: #e8e8eb;
+  --ysrp-border-l1: rgba(0, 0, 0, .08);
+  --ysrp-border-l2: #c4c4cc;
+  --ysrp-fg-primary: #0d0d0d;
+  --ysrp-fg-secondary: #6b6b75;
+  --ysrp-fg-tertiary: #8a8a94;
+  --ysrp-fg-danger: #dc2626;
+  --ysrp-fg-success: #16a34a;
+  --ysrp-overlay: rgba(0, 0, 0, .4);
+  --ysrp-icon-block: rgba(13, 13, 13, .1);
+  --ysrp-danger-border: rgba(220, 38, 38, .45);
   --ysrp-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --ysrp-bg: #1a1a1a;
-    --ysrp-nav-bg: #161616;
-    --ysrp-card: #212121;
-    --ysrp-layer: #2a2a2a;
-    --ysrp-border: rgba(255, 255, 255, .08);
-    --ysrp-border-strong: rgba(255, 255, 255, .16);
-    --ysrp-text: #fafafa;
-    --ysrp-text-2: #a3a3a3;
-    --ysrp-text-3: #737373;
-    --ysrp-hover: rgba(255, 255, 255, .06);
-    --ysrp-error: #f28b82;
-    --ysrp-success: #81c995;
-    --ysrp-backdrop: rgba(0, 0, 0, .6);
+    --ysrp-surface-base: #0e0e10;
+    --ysrp-surface-l1: #141416;
+    --ysrp-surface-l2: #1f1f23;
+    --ysrp-border-l1: rgba(255, 255, 255, .08);
+    --ysrp-border-l2: #4a4a52;
+    --ysrp-fg-primary: #fafafa;
+    --ysrp-fg-secondary: #a1a1aa;
+    --ysrp-fg-tertiary: #9a9aa3;
+    --ysrp-fg-danger: #f87171;
+    --ysrp-fg-success: #4ade80;
+    --ysrp-overlay: rgba(0, 0, 0, .6);
+    --ysrp-icon-block: rgba(250, 250, 250, .1);
+    --ysrp-danger-border: rgba(248, 113, 113, .45);
   }
 }
 `;
 
+  // src/api/ui.css
+  var ui_default = `/* N-5.2 parts shared by every tab and by the nested dialogs. All sizes in px (YouTube root font is 10px). */
+
+.ysrp-ui,
+.ysrp-ui *,
+.ysrp-ui *::before,
+.ysrp-ui *::after { box-sizing: border-box; }
+.ysrp-ui {
+  font-family: var(--ysrp-font);
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--ysrp-fg-primary);
+  text-align: left;
+  text-shadow: none;
+  -webkit-font-smoothing: antialiased;
+}
+.ysrp-ui,
+.ysrp-ui * {
+  scrollbar-width: thin;
+  scrollbar-color: var(--ysrp-border-l2) transparent;
+}
+.ysrp-ui ::-webkit-scrollbar { width: 6px; height: 6px; }
+.ysrp-ui ::-webkit-scrollbar-track { background: transparent; }
+.ysrp-ui ::-webkit-scrollbar-thumb { background: var(--ysrp-border-l2); border-radius: 6px; }
+.ysrp-ui ::-webkit-scrollbar-corner { background: transparent; }
+.ysrp-ui p { margin: 0; }
+.ysrp-ui a { color: inherit; }
+.ysrp-ui i[class*="fa-"] { color: inherit; }
+
+/* ---------------------------------------------------------------- N-5.2.4 buttons */
+.ysrp-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  margin: 0;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-family: var(--ysrp-font);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  background: transparent;
+  color: var(--ysrp-fg-primary);
+  transition: background-color 150ms, color 150ms, opacity 150ms;
+}
+.ysrp-btn.is-small { height: 28px; }
+.ysrp-btn i { font-size: 13px; }
+.ysrp-btn.is-primary { background: var(--ysrp-fg-primary); color: var(--ysrp-surface-base); }
+.ysrp-btn.is-primary:hover { opacity: .88; }
+.ysrp-btn.is-secondary { background: var(--ysrp-surface-l1); border-color: var(--ysrp-border-l1); color: var(--ysrp-fg-primary); }
+.ysrp-btn.is-secondary:hover { background: var(--ysrp-surface-l2); }
+.ysrp-btn.is-tertiary { background: transparent; color: var(--ysrp-fg-secondary); }
+.ysrp-btn.is-tertiary:hover { background: var(--ysrp-surface-l2); color: var(--ysrp-fg-primary); }
+.ysrp-btn.is-danger { background: var(--ysrp-fg-danger); color: #ffffff; }
+.ysrp-btn.is-danger:hover { opacity: .88; }
+.ysrp-btn:disabled { opacity: .5; cursor: default; pointer-events: none; }
+.ysrp-btn:focus-visible,
+.ysrp-ibtn:focus-visible,
+.ysrp-switch:focus-visible { outline: 2px solid var(--ysrp-border-l2); outline-offset: 1px; }
+.ysrp-btn.is-square { width: 28px; padding: 0; }
+
+/* ---------------------------------------------------------------- N-5.2.3 icon buttons */
+.ysrp-ibtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ysrp-fg-tertiary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color 150ms, color 150ms, opacity 150ms;
+}
+.ysrp-ibtn i { font-size: 14px; }
+.ysrp-ibtn:hover { background: var(--ysrp-surface-l2); color: var(--ysrp-fg-primary); }
+.ysrp-ibtn.is-active { color: var(--ysrp-fg-primary); }
+.ysrp-ibtn:disabled { opacity: .5; cursor: default; }
+.ysrp-ibtn:disabled:hover { background: transparent; color: var(--ysrp-fg-tertiary); }
+.ysrp-ibtn.is-off { opacity: .4; }
+
+/* ---------------------------------------------------------------- N-5.2.5 switch */
+.ysrp-switch {
+  position: relative;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--ysrp-surface-l2);
+  cursor: pointer;
+  transition: background-color 150ms;
+}
+.ysrp-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--ysrp-fg-tertiary);
+  transition: transform 150ms, background-color 150ms;
+}
+.ysrp-switch.is-on { background: var(--ysrp-fg-primary); }
+.ysrp-switch.is-on .ysrp-switch-knob { transform: translateX(16px); background: var(--ysrp-surface-base); }
+.ysrp-switch:disabled { opacity: .5; cursor: default; }
+
+/* ---------------------------------------------------------------- N-5.2.6 inputs */
+.ysrp-input,
+.ysrp-select,
+.ysrp-textarea {
+  display: block;
+  height: 36px;
+  width: 100%;
+  margin: 0;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--ysrp-border-l1);
+  background: var(--ysrp-surface-l1);
+  color: var(--ysrp-fg-primary);
+  font-family: var(--ysrp-font);
+  font-size: 14px;
+  line-height: 20px;
+  outline: none;
+  box-shadow: none;
+  transition: border-color 150ms;
+}
+.ysrp-input::placeholder,
+.ysrp-textarea::placeholder { color: var(--ysrp-fg-tertiary); opacity: 1; }
+.ysrp-input:focus,
+.ysrp-select:focus,
+.ysrp-textarea:focus { border-color: var(--ysrp-border-l2); }
+.ysrp-input.is-number { width: 96px; }
+.ysrp-textarea {
+  height: auto;
+  min-height: 96px;
+  padding: 8px 12px;
+  resize: vertical;
+}
+.ysrp-select-wrap {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.ysrp-select {
+  appearance: none;
+  -webkit-appearance: none;
+  width: auto;
+  padding-right: 32px;
+  cursor: pointer;
+}
+.ysrp-select option { background: var(--ysrp-surface-l1); color: var(--ysrp-fg-primary); }
+.ysrp-select-arrow {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  color: var(--ysrp-fg-tertiary);
+  pointer-events: none;
+}
+.ysrp-secret { display: flex; align-items: center; gap: 8px; }
+.ysrp-secret .ysrp-input { flex: 1 1 auto; min-width: 0; }
+
+/* ---------------------------------------------------------------- N-5.2.1 card, N-5.2.2 grid */
+.ysrp-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+.ysrp-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 120px;
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid var(--ysrp-border-l1);
+  background: var(--ysrp-surface-l1);
+  transition: opacity 150ms;
+}
+.ysrp-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 10px 12px;
+}
+.ysrp-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.ysrp-card-lead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.ysrp-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  background: var(--ysrp-icon-block);
+  color: var(--ysrp-fg-primary);
+  font-size: 14px;
+}
+.ysrp-card-icon i { font-size: 14px; }
+.ysrp-card-title {
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ysrp-card-marks { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.ysrp-card-mark {
+  display: inline-flex;
+  align-items: center;
+  color: var(--ysrp-fg-tertiary);
+  font-size: 14px;
+  cursor: default;
+}
+.ysrp-card-mark.is-danger { color: var(--ysrp-fg-danger); }
+.ysrp-card-controls { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.ysrp-card-desc {
+  margin-top: 4px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ysrp-fg-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.ysrp-card-sep { height: 1px; flex: 0 0 1px; background: var(--ysrp-border-l1); }
+.ysrp-card-footer {
+  padding: 6px 12px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ysrp-fg-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------------------------------------------------------------- N-5.2.7 settings row, N-5.2.8 group */
+.ysrp-group { display: flex; flex-direction: column; gap: 16px; }
+.ysrp-group + .ysrp-group { border-top: 1px solid var(--ysrp-border-l1); margin-top: 16px; padding-top: 16px; }
+.ysrp-group-title { font-size: 12px; font-weight: 500; line-height: 16px; color: var(--ysrp-fg-tertiary); }
+.ysrp-srow { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ysrp-srow-main { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-width: 0; }
+.ysrp-srow-text { display: flex; flex-direction: column; min-width: 0; flex: 1 1 auto; }
+.ysrp-srow-title { font-size: 14px; font-weight: 500; line-height: 20px; color: var(--ysrp-fg-primary); }
+.ysrp-srow-desc { font-size: 12px; line-height: 16px; color: var(--ysrp-fg-secondary); overflow-wrap: anywhere; }
+.ysrp-srow-control { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.ysrp-srow-below { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ysrp-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ysrp-note { font-size: 12px; line-height: 16px; color: var(--ysrp-fg-secondary); overflow-wrap: anywhere; }
+.ysrp-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+/* N-5.7.5 result messages */
+.ysrp-msg { display: none; font-size: 12px; line-height: 16px; color: var(--ysrp-fg-secondary); overflow-wrap: anywhere; }
+.ysrp-msg.is-visible { display: block; }
+.ysrp-msg.is-success { color: var(--ysrp-fg-success); }
+.ysrp-msg.is-error { color: var(--ysrp-fg-danger); }
+
+/* ---------------------------------------------------------------- N-5.2.9 search bar, N-5.2.10 categories */
+.ysrp-searchbar { display: flex; align-items: center; gap: 12px; }
+.ysrp-searchbar .ysrp-search { flex: 1 1 auto; min-width: 0; width: auto; }
+.ysrp-searchbar .ysrp-select-wrap { flex: 0 0 120px; width: 120px; }
+.ysrp-searchbar .ysrp-select { width: 120px; }
+.ysrp-cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  border-bottom: 1px solid var(--ysrp-border-l1);
+}
+.ysrp-cat { position: relative; margin-bottom: -1px; }
+.ysrp-cat.is-active { color: var(--ysrp-fg-primary); }
+.ysrp-cat.is-active::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--ysrp-fg-primary);
+}
+
+/* ---------------------------------------------------------------- N-5.2.14 info hint, N-5.2.15 empty state */
+.ysrp-info-hint {
+  display: inline-flex;
+  align-items: center;
+  color: var(--ysrp-fg-tertiary);
+  font-size: 14px;
+  cursor: help;
+}
+.ysrp-info-hint i { font-size: 14px; }
+.ysrp-empty {
+  padding: 32px 0;
+  text-align: center;
+  color: var(--ysrp-fg-secondary);
+}
+.ysrp-sep { height: 1px; margin: 0; border: none; background: var(--ysrp-border-l1); flex: 0 0 1px; }
+
+/* ---------------------------------------------------------------- N-5.2.11 nested dialog, N-5.2.13 confirm */
+.ysrp-dialog-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+}
+.ysrp-dialog {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 512px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  padding: 24px;
+  border-radius: 16px;
+  border: 1px solid var(--ysrp-border-l1);
+  background: var(--ysrp-surface-l1);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
+}
+.ysrp-dialog.is-sm { width: 448px; }
+.ysrp-dialog.is-lg { width: 600px; min-height: 420px; }
+.ysrp-dialog-close { position: absolute; top: 16px; right: 16px; }
+.ysrp-dialog-head { display: flex; flex-direction: column; gap: 4px; padding-right: 40px; }
+.ysrp-dialog-title { font-size: 16px; font-weight: 600; line-height: 24px; }
+.ysrp-dialog-desc { font-size: 13px; line-height: 1.5; color: var(--ysrp-fg-secondary); overflow-wrap: anywhere; }
+.ysrp-dialog-body { display: flex; flex-direction: column; gap: 16px; flex: 1 1 auto; min-height: 0; }
+.ysrp-dialog-footer { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: auto; }
+.ysrp-field { display: flex; flex-direction: column; gap: 4px; min-height: 0; }
+.ysrp-field-label { font-size: 13px; font-weight: 500; line-height: 20px; }
+.ysrp-field-value { color: var(--ysrp-fg-secondary); }
+
+@media (max-width: 640px) {
+  .ysrp-grid { grid-template-columns: 1fr; }
+}
+`;
+
   // src/utils/i18n.ts
-  var LANGUAGE_OPTIONS = ["auto", "zh", "en"];
   function normalizePreference(value) {
     const s = String(value ?? "").trim().toLowerCase();
     if (s === "auto")
@@ -1692,9 +2073,9 @@
     const result = new Promise((resolve) => {
       settle = resolve;
     });
-    const savedBtn = h("button", { class: "ysrp-resume-btn ysrp-resume-saved", type: "button" }, tr("Saved progress {t}", "上次进度 {t}", { t: formatTime(opts.saved) }));
-    const linkBtn = h("button", { class: "ysrp-resume-btn ysrp-resume-link", type: "button" }, tr("Link time {t}", "链接时间 {t}", { t: formatTime(opts.link) }));
-    const root = h("div", { class: "ysrp-resume", attrs: { role: "dialog", "aria-modal": "true" } }, h("div", { class: "ysrp-resume-title", text: tr("Where to continue?", "从哪里继续播放？") }), h("div", { class: "ysrp-resume-text", text: tr("This link starts at a different time than your saved progress.", "这个链接指定的时间与你上次的进度不同。") }), h("div", { class: "ysrp-resume-actions" }, savedBtn, linkBtn));
+    const savedBtn = h("button", { class: "ysrp-btn is-primary ysrp-resume-btn ysrp-resume-saved", type: "button" }, tr("Saved progress {t}", "上次进度 {t}", { t: formatTime(opts.saved) }));
+    const linkBtn = h("button", { class: "ysrp-btn is-secondary ysrp-resume-btn ysrp-resume-link", type: "button" }, tr("Link time {t}", "链接时间 {t}", { t: formatTime(opts.link) }));
+    const root = h("div", { class: "ysrp-ui ysrp-resume", attrs: { role: "dialog", "aria-modal": "true" } }, h("div", { class: "ysrp-resume-head" }, h("div", { class: "ysrp-resume-title", text: tr("Where to continue?", "从哪里继续播放？") }), h("div", { class: "ysrp-resume-text", text: tr("This link starts at a different time than your saved progress.", "这个链接指定的时间与你上次的进度不同。") })), h("div", { class: "ysrp-resume-actions" }, linkBtn, savedBtn));
     const onDocKey = (ev) => {
       if (ev.key !== "Escape")
         return;
@@ -1731,7 +2112,7 @@
       finish("link");
       return { result, cancel() {} };
     }
-    const width = Math.max(200, Math.min(360, player.clientWidth - 32 || 360));
+    const width = Math.max(200, Math.min(448, (player.clientWidth || 480) - 32));
     root.style.width = `${width}px`;
     player.appendChild(root);
     try {
@@ -1752,8 +2133,8 @@
 }
 .last-save-info-container .last-save-info {
   text-shadow: none;
-  background: var(--ysrp-bg);
-  color: var(--ysrp-text);
+  background: var(--ysrp-surface-base);
+  color: var(--ysrp-fg-primary);
   padding: 5px;
   border-radius: 5px;
   display: flex;
@@ -1761,11 +2142,11 @@
   line-height: 1.2;
 }
 .last-save-info-container .last-save-info-text.is-error {
-  color: var(--ysrp-error);
+  color: var(--ysrp-fg-danger);
 }
 .last-save-info-container .ysrp-settings-button {
-  background: var(--ysrp-layer);
-  color: var(--ysrp-text);
+  background: var(--ysrp-surface-l2);
+  color: var(--ysrp-fg-primary);
   border: none;
   margin: 0 0 0 5px;
   padding: 0;
@@ -1779,6 +2160,7 @@
   font-size: 12px;
 }
 
+/* N-5.8: small nested-dialog look (N-5.2.11); buttons are the shared .ysrp-btn parts. */
 .ysrp-resume {
   position: absolute;
   left: 50%;
@@ -1786,52 +2168,22 @@
   transform: translate(-50%, -50%);
   z-index: 70;
   box-sizing: border-box;
-  padding: 20px;
-  border-radius: 16px;
-  background: var(--ysrp-bg);
-  color: var(--ysrp-text);
-  border: 1px solid var(--ysrp-border);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
-  font-family: var(--ysrp-font);
-  font-size: 14px;
-  line-height: 1.5;
-  text-align: left;
-  text-shadow: none;
-}
-.ysrp-resume-title {
-  font-size: 18px;
-  font-weight: 600;
-  margin: 0 0 6px;
-}
-.ysrp-resume-text {
-  color: var(--ysrp-text-2);
-  margin: 0 0 16px;
-}
-.ysrp-resume-actions {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 16px;
+  max-height: calc(100% - 32px);
+  overflow: auto;
+  padding: 24px;
+  border-radius: 16px;
+  background: var(--ysrp-surface-l1);
+  color: var(--ysrp-fg-primary);
+  border: 1px solid var(--ysrp-border-l1);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
 }
-.ysrp-resume-btn {
-  flex: 1 1 0;
-  height: 36px;
-  padding: 0 12px;
-  border-radius: 999px;
-  border: 1px solid var(--ysrp-border-strong);
-  background: transparent;
-  color: var(--ysrp-text);
-  font: inherit;
-  font-weight: 500;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.ysrp-resume-btn:hover { background: var(--ysrp-hover); }
-.ysrp-resume-btn:focus-visible { outline: 2px solid var(--ysrp-border-strong); outline-offset: 2px; }
-.ysrp-resume-saved {
-  background: var(--ysrp-text);
-  border-color: var(--ysrp-text);
-  color: var(--ysrp-bg);
-}
-.ysrp-resume-saved:hover { background: var(--ysrp-text); opacity: .88; }
+.ysrp-resume-head { display: flex; flex-direction: column; gap: 4px; }
+.ysrp-resume-title { font-size: 16px; font-weight: 600; line-height: 24px; }
+.ysrp-resume-text { font-size: 13px; line-height: 1.5; color: var(--ysrp-fg-secondary); }
+.ysrp-resume-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 `;
 
   // src/plugins/_core/playerBadge/index.ts
@@ -1923,18 +2275,18 @@
     }
   });
 
-  // src/plugins/_core/settings/ui.ts
-  function card(opts, ...children) {
-    return h("div", { class: `ysrp-card${opts.cls ? ` ${opts.cls}` : ""}` }, h("div", { class: "ysrp-card-head" }, h("span", { class: "ysrp-card-icon" }, icon(opts.icon)), h("span", { class: "ysrp-card-title", text: opts.title })), opts.desc ? h("div", { class: "ysrp-card-desc", text: opts.desc }) : null, ...children);
-  }
+  // src/api/ui.ts
   function button(label, opts = {}) {
     const btn = h("button", {
-      class: `ysrp-btn${opts.small ? " is-small" : ""}${opts.cls ? ` ${opts.cls}` : ""}`,
+      class: `ysrp-btn is-${opts.variant || "secondary"}${opts.small ? " is-small" : ""}${opts.cls ? ` ${opts.cls}` : ""}`,
       type: "button",
       title: opts.title
     }, opts.icon ? icon(opts.icon) : null, h("span", { class: "ysrp-btn-label", text: label }));
     if (opts.onClick)
-      btn.addEventListener("click", opts.onClick);
+      btn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        opts.onClick?.(ev);
+      });
     return btn;
   }
   function setButtonLabel(btn, label) {
@@ -1942,67 +2294,207 @@
     if (span)
       span.textContent = label;
   }
-  function iconButton(iconName, title, cls, onClick) {
-    const btn = h("button", { class: `ysrp-ibtn ${cls}`.trim(), type: "button", title, attrs: { "aria-label": title } }, icon(iconName));
+  function iconButton(iconName, label, cls = "", onClick) {
+    const btn = h("button", { class: `ysrp-ibtn${cls ? ` ${cls}` : ""}`, type: "button" }, icon(iconName));
+    setIconButtonLabel(btn, label);
     if (onClick)
-      btn.addEventListener("click", onClick);
+      btn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        onClick(ev);
+      });
     return btn;
   }
-  function setIcon(btn, iconName) {
+  function setIconButtonLabel(btn, label) {
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+  }
+  function setIcon(btn, iconName, variant = "solid") {
     const i = btn.querySelector("i");
     if (i)
-      i.className = `fa-solid fa-${iconName}`;
+      i.className = `fa-${variant} fa-${iconName}`;
   }
   function switchControl(checked, onChange, opts = {}) {
     const el = h("button", {
-      class: "ysrp-switch",
+      class: `ysrp-switch${opts.cls ? ` ${opts.cls}` : ""}`,
       type: "button",
       disabled: Boolean(opts.disabled),
       dataset: opts.dataset,
-      attrs: { role: "switch", "aria-checked": String(checked), "aria-label": opts.label }
+      attrs: { role: "switch", "aria-label": opts.label }
     }, h("span", { class: "ysrp-switch-knob" }));
-    const set = (on) => {
-      el.setAttribute("aria-checked", String(on));
-      el.classList.toggle("is-on", on);
+    let on = checked;
+    const set = (next) => {
+      on = next;
+      el.setAttribute("aria-checked", String(next));
+      el.classList.toggle("is-on", next);
     };
     set(checked);
     el.addEventListener("click", (ev) => {
       ev.preventDefault();
       if (el.disabled)
         return;
-      const next = el.getAttribute("aria-checked") !== "true";
-      set(next);
-      onChange(next);
+      set(!on);
+      onChange(on);
     });
-    return { el, set };
+    return { el, set, value: () => on };
   }
-  function choiceGroup(name, options, selected, onSelect, cls = "") {
-    let current = selected;
-    const items = options.map((opt) => {
-      const radio = h("input", { type: "radio", name, value: opt.value, checked: opt.value === selected, disabled: Boolean(opt.disabled), class: "ysrp-choice-radio" });
-      const label = h("label", { class: `ysrp-choice${opt.disabled ? " is-disabled" : ""}`, dataset: { value: opt.value } }, radio, h("span", { class: "ysrp-choice-tag", text: opt.tag }), h("span", { class: "ysrp-choice-text" }, h("span", { class: "ysrp-choice-label", text: opt.label }), opt.hint ? h("span", { class: "ysrp-choice-hint", text: opt.hint }) : null));
-      label.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        if (opt.disabled || current === opt.value)
-          return;
-        set(opt.value);
-        onSelect(opt.value);
-      });
-      return { opt, radio, label };
+  function textInput(opts = {}) {
+    return h("input", {
+      class: `ysrp-input${opts.cls ? ` ${opts.cls}` : ""}`,
+      type: opts.type || "text",
+      value: opts.value ?? "",
+      placeholder: opts.placeholder,
+      autocomplete: opts.type === "password" ? "new-password" : "off",
+      spellcheck: false,
+      dataset: opts.field ? { field: opts.field } : undefined
     });
-    const set = (value) => {
-      current = value;
-      for (const item of items) {
-        const on = item.opt.value === value;
-        item.radio.checked = on;
-        item.label.classList.toggle("is-selected", on);
+  }
+  function textArea(opts = {}) {
+    return h("textarea", {
+      class: `ysrp-textarea${opts.cls ? ` ${opts.cls}` : ""}`,
+      value: opts.value ?? "",
+      placeholder: opts.placeholder,
+      readOnly: Boolean(opts.readOnly),
+      spellcheck: false
+    });
+  }
+  function selectControl(options, value, onChange, opts = {}) {
+    const select = h("select", {
+      class: `ysrp-select${opts.cls ? ` ${opts.cls}` : ""}`,
+      dataset: opts.dataset,
+      attrs: { "aria-label": opts.label }
+    }, options.map((o) => h("option", { value: o.value, text: o.label, disabled: Boolean(o.disabled), selected: o.value === value })));
+    select.value = value;
+    select.addEventListener("change", () => onChange(select.value));
+    const el = h("span", { class: "ysrp-select-wrap" }, select, h("span", { class: "ysrp-select-arrow" }, icon("chevron-down")));
+    return { el, select, value: () => select.value, set: (v) => {
+      select.value = v;
+    } };
+  }
+  function secretInput(input) {
+    input.type = "password";
+    const toggle = button(tr("Show", "显示"), { variant: "tertiary", small: true, cls: "ysrp-secret-toggle" });
+    toggle.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const reveal = input.type === "password";
+      input.type = reveal ? "text" : "password";
+      setButtonLabel(toggle, reveal ? tr("Hide", "隐藏") : tr("Show", "显示"));
+    });
+    return h("div", { class: "ysrp-secret" }, input, toggle);
+  }
+  var NBSP = " ";
+  function card(opts) {
+    const iconEl = h("span", { class: "ysrp-card-icon" }, icon(opts.icon));
+    const titleEl = h("span", { class: "ysrp-card-title" });
+    const marksEl = h("span", { class: "ysrp-card-marks" }, opts.marks || []);
+    const controlsEl = h("span", { class: "ysrp-card-controls" }, opts.controls || []);
+    const descEl = h("div", { class: "ysrp-card-desc" });
+    const footerEl = h("div", { class: "ysrp-card-footer" });
+    const el = h("div", { class: `ysrp-card${opts.cls ? ` ${opts.cls}` : ""}`, dataset: opts.dataset }, h("div", { class: "ysrp-card-body" }, h("div", { class: "ysrp-card-top" }, h("div", { class: "ysrp-card-lead" }, iconEl, titleEl, marksEl), controlsEl), descEl), h("div", { class: "ysrp-card-sep" }), footerEl);
+    const handle = {
+      el,
+      iconEl,
+      titleEl,
+      marksEl,
+      controlsEl,
+      descEl,
+      footerEl,
+      setIcon(name) {
+        iconEl.replaceChildren(icon(name));
+      },
+      setTitle(text, tip) {
+        titleEl.textContent = text;
+        titleEl.title = tip ?? text;
+      },
+      setDesc(text) {
+        descEl.textContent = text;
+        descEl.title = text;
+      },
+      setFooter(text) {
+        footerEl.textContent = text || NBSP;
       }
     };
-    set(selected);
-    return { el: h("div", { class: `ysrp-choices${cls ? ` ${cls}` : ""}`, attrs: { role: "radiogroup" } }, items.map((i) => i.label)), value: () => current, set };
+    handle.setTitle(opts.title, opts.titleTip);
+    handle.setDesc(opts.desc || "");
+    handle.setFooter(opts.footer || "");
+    return handle;
   }
-  function messageLine() {
-    const el = h("div", { class: "ysrp-msg", attrs: { role: "status", "aria-live": "polite" } });
+  function cardMark(iconName, tip, cls = "") {
+    return h("span", { class: `ysrp-card-mark${cls ? ` ${cls}` : ""}`, title: tip, attrs: { "aria-label": tip, role: "img" } }, icon(iconName));
+  }
+  function grid(cls = "", ...children) {
+    return h("div", { class: `ysrp-grid${cls ? ` ${cls}` : ""}` }, children);
+  }
+  function settingsRow(opts) {
+    const descEl = h("div", { class: "ysrp-srow-desc", text: opts.desc || "" });
+    if (!opts.desc)
+      descEl.style.display = "none";
+    const below = h("div", { class: "ysrp-srow-below" }, opts.below || []);
+    if (!opts.below || !opts.below.length)
+      below.style.display = "none";
+    const el = h("div", { class: `ysrp-srow${opts.cls ? ` ${opts.cls}` : ""}`, dataset: opts.dataset }, h("div", { class: "ysrp-srow-main" }, h("div", { class: "ysrp-srow-text" }, h("div", { class: "ysrp-srow-title", text: opts.title }), descEl), opts.control ? h("div", { class: "ysrp-srow-control" }, opts.control) : null), below);
+    return { el, descEl, below };
+  }
+  function setRowDesc(row, text) {
+    row.descEl.textContent = text;
+    row.descEl.style.display = text ? "" : "none";
+  }
+  function group(title, ...children) {
+    return h("section", { class: "ysrp-group" }, h("div", { class: "ysrp-group-title", text: title }), children);
+  }
+  function actions(...children) {
+    return h("div", { class: "ysrp-actions" }, children);
+  }
+  function searchBar(placeholder, filters, onChange) {
+    const input = h("input", { class: "ysrp-input ysrp-search", type: "search", placeholder, spellcheck: false, autocomplete: "off" });
+    input.addEventListener("input", onChange);
+    const filter = selectControl(filters, filters[0]?.value || "all", onChange, { cls: "ysrp-filter", label: tr("Filter", "筛选") });
+    return {
+      el: h("div", { class: "ysrp-searchbar" }, input, filter.el),
+      input,
+      filter,
+      query: () => input.value.trim().toLowerCase(),
+      setPlaceholder: (text) => {
+        input.placeholder = text;
+      }
+    };
+  }
+  function categoryStrip(cats, active, onSelect) {
+    let current = active;
+    const buttons = cats.map((c) => {
+      const btn = button(c.label, { variant: "tertiary", small: true, cls: "ysrp-cat" });
+      btn.dataset.cat = c.id;
+      btn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        if (current === c.id)
+          return;
+        set(c.id);
+        onSelect(c.id);
+      });
+      return btn;
+    });
+    const set = (id) => {
+      current = id;
+      for (const b of buttons) {
+        const on = b.dataset.cat === id;
+        b.classList.toggle("is-active", on);
+        b.setAttribute("aria-selected", String(on));
+      }
+    };
+    set(active);
+    return { el: h("div", { class: "ysrp-cats", attrs: { role: "tablist" } }, buttons), value: () => current, set };
+  }
+  function infoHint(text) {
+    return h("span", { class: "ysrp-info-hint", title: text, attrs: { "aria-label": text, role: "img", tabindex: "0" } }, icon("circle-info"));
+  }
+  function emptyState(text, cls = "") {
+    return h("p", { class: `ysrp-empty${cls ? ` ${cls}` : ""}`, text });
+  }
+  function field(label, ...content) {
+    return h("div", { class: "ysrp-field" }, h("div", { class: "ysrp-field-label", text: label }), content);
+  }
+  function messageLine(cls = "") {
+    const el = h("div", { class: `ysrp-msg${cls ? ` ${cls}` : ""}`, attrs: { role: "status", "aria-live": "polite" } });
     return {
       el,
       set(text, tone = "neutral") {
@@ -2013,608 +2505,6 @@
         el.classList.toggle("is-error", Boolean(value) && tone === "error");
       }
     };
-  }
-  function field(label, control, hint) {
-    return h("label", { class: "ysrp-field" }, h("span", { class: "ysrp-field-label", text: label }), control, hint ? h("span", { class: "ysrp-field-hint", text: hint }) : null);
-  }
-  function infoRow(label, value) {
-    return h("div", { class: "ysrp-info-row" }, h("span", { class: "ysrp-info-label", text: label }), value);
-  }
-  function secretInput(input, labels) {
-    input.type = "password";
-    const toggle = button(labels.show, { small: true, cls: "ysrp-secret-toggle" });
-    toggle.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      const reveal = input.type === "password";
-      input.type = reveal ? "text" : "password";
-      setButtonLabel(toggle, reveal ? labels.hide : labels.show);
-    });
-    return h("div", { class: "ysrp-secret" }, input, toggle);
-  }
-
-  // src/plugins/_core/settings/displayTab.ts
-  function createDisplayTab() {
-    return {
-      id: "display",
-      group: "main",
-      order: 30,
-      icon: "globe",
-      label: () => t("language.tabLabel", tr("Display", "界面")),
-      render(pane) {
-        const status = messageLine();
-        const active = h("span", { class: "ysrp-info-value" });
-        const browser = h("span", { class: "ysrp-info-value" });
-        const refreshInfo = () => {
-          active.textContent = languageName(getLanguage());
-          browser.textContent = languageName(detectBrowserLanguage());
-        };
-        const group = choiceGroup("ysrp-language-preference", LANGUAGE_OPTIONS.map((code) => ({
-          value: code,
-          tag: t(`language.badges.${code}`),
-          label: t(`language.options.${code}`),
-          hint: t(`language.optionHints.${code}`)
-        })), getPreference(), (value) => {
-          if (value === getPreference()) {
-            status.set(tr("Already using this language.", "当前已使用该语言。"));
-            return;
-          }
-          setPreference(value);
-          refreshInfo();
-          status.set(tr("Language preference updated.", "语言偏好已更新。"), "success");
-        }, "ysrp-language-options");
-        refreshInfo();
-        pane.appendChild(card({ icon: "globe", title: tr("Interface Language", "界面语言"), desc: t("language.description") }, group.el, h("div", { class: "ysrp-info" }, infoRow(tr("Active language", "当前语言"), active), infoRow(tr("Browser language", "浏览器语言"), browser)), status.el));
-      }
-    };
-  }
-
-  // src/plugins/_core/settings/pluginsTab.ts
-  function visibleSettings(plugin) {
-    return Object.entries(plugin.settings || {}).filter(([, def]) => !def.hidden);
-  }
-  function settingControl(plugin, key, def) {
-    const ctx = settingsContext(plugin);
-    const value = getSetting(plugin, key);
-    switch (def.type) {
-      case "switch":
-        return switchControl(Boolean(value), (on) => ctx.settings.set(key, on), { dataset: { setting: key }, label: pick(def.label) }).el;
-      case "select": {
-        const select = h("select", { class: "ysrp-select", dataset: { setting: key } }, (def.options || []).map((o) => h("option", { value: o.value, text: pick(o.label), selected: String(value) === o.value })));
-        select.addEventListener("change", () => ctx.settings.set(key, select.value));
-        return select;
-      }
-      case "number": {
-        const input = h("input", { class: "ysrp-input", type: "number", value: String(value ?? ""), min: def.min, max: def.max, step: def.step, placeholder: def.placeholder, dataset: { setting: key } });
-        input.addEventListener("change", () => {
-          const n = Number(input.value);
-          if (input.value.trim() !== "" && Number.isFinite(n))
-            ctx.settings.set(key, n);
-        });
-        return input;
-      }
-      default: {
-        const input = h("input", { class: "ysrp-input", type: "text", value: String(value ?? ""), placeholder: def.placeholder, dataset: { setting: key } });
-        input.addEventListener("input", () => ctx.settings.set(key, input.value));
-        return input;
-      }
-    }
-  }
-  function openPluginDialog(plugin, openDialog) {
-    const list = h("div", { class: "ysrp-setting-list" });
-    const settings = visibleSettings(plugin);
-    const renderList = () => {
-      clear(list);
-      for (const [key, def] of settings) {
-        const stacked = def.type === "text" || def.type === "number";
-        list.appendChild(h("div", { class: `ysrp-setting-row${stacked ? " is-stacked" : ""}` }, h("div", { class: "ysrp-setting-text" }, h("div", { class: "ysrp-setting-label", text: pick(def.label) }), def.description ? h("div", { class: "ysrp-setting-desc", text: pick(def.description) }) : null), settingControl(plugin, key, def)));
-      }
-    };
-    renderList();
-    let resetArmed = false;
-    let resetTimer = 0;
-    const resetLabel = tr("Reset", "重置");
-    const reset = button(resetLabel, { small: true });
-    reset.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      if (!resetArmed) {
-        resetArmed = true;
-        reset.classList.add("is-danger");
-        setButtonLabel(reset, tr("Click again to reset", "再点一次确认重置"));
-        resetTimer = window.setTimeout(() => {
-          resetArmed = false;
-          reset.classList.remove("is-danger");
-          setButtonLabel(reset, resetLabel);
-        }, 3000);
-        return;
-      }
-      clearTimeout(resetTimer);
-      resetArmed = false;
-      reset.classList.remove("is-danger");
-      setButtonLabel(reset, resetLabel);
-      settingsContext(plugin).settings.reset();
-      renderList();
-    });
-    const closeBtn = h("button", { class: "ysrp-close ysrp-dialog-close", type: "button", title: tr("Close", "关闭"), attrs: { "aria-label": tr("Close", "关闭") } }, icon("xmark"));
-    const dialog = h("div", { class: "ysrp-dialog", attrs: { role: "dialog", "aria-modal": "true" } }, closeBtn, h("div", { class: "ysrp-dialog-title", text: pick(plugin.displayName) }), h("div", { class: "ysrp-dialog-desc", text: pick(plugin.description) }), h("hr", { class: "ysrp-sep" }), h("div", { class: "ysrp-dialog-subtitle", text: tr("Authors", "作者") }), h("div", { class: "ysrp-dialog-authors", text: plugin.authors.join(", ") }), h("div", { class: "ysrp-dialog-subtitle", text: tr("Settings", "设置") }), settings.length ? list : h("div", { class: "ysrp-empty", text: tr("No configurable settings.", "没有可配置的设置项。") }), settings.length ? h("div", { class: "ysrp-dialog-footer" }, reset) : null);
-    const close = openDialog(dialog, () => clearTimeout(resetTimer));
-    closeBtn.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      close();
-    });
-  }
-  function createPluginsTab(openDialog) {
-    return {
-      id: "plugins",
-      group: "plugins",
-      order: 10,
-      icon: "puzzle-piece",
-      label: () => tr("Plugins", "插件"),
-      render(pane) {
-        const plugins = listPlugins();
-        const search = h("input", { class: "ysrp-input ysrp-search", type: "search", placeholder: tr("Search {n} plugins...", "搜索 {n} 个插件...", { n: plugins.length }) });
-        const filter = h("select", { class: "ysrp-select ysrp-filter" }, h("option", { value: "all", text: tr("All", "全部") }), h("option", { value: "enabled", text: tr("Enabled", "已开启") }), h("option", { value: "disabled", text: tr("Disabled", "已关闭") }));
-        const normalGrid = h("div", { class: "ysrp-plugin-grid" });
-        const divider = h("hr", { class: "ysrp-sep ysrp-core-sep" });
-        const coreGrid = h("div", { class: "ysrp-plugin-grid is-core" });
-        const empty = h("div", { class: "ysrp-empty", text: tr("No plugins match your search.", "没有符合条件的插件。") });
-        const container = h("div", { class: "ysrp-plugins" }, normalGrid, divider, coreGrid, empty);
-        const cards = new Map;
-        const build = () => {
-          clear(normalGrid);
-          clear(coreGrid);
-          cards.clear();
-          const byName = (a, b) => a.name.localeCompare(b.name);
-          const ordered = [...plugins.filter((p) => !p.required).sort(byName), ...plugins.filter((p) => p.required).sort(byName)];
-          for (const plugin of ordered) {
-            const enabled = isEnabled(plugin);
-            const toggle = switchControl(enabled, (on) => setPluginEnabled(plugin.name, on), {
-              disabled: plugin.required,
-              dataset: { plugin: plugin.name },
-              label: pick(plugin.displayName)
-            });
-            const config = visibleSettings(plugin).length ? h("button", { class: "ysrp-ibtn ysrp-plugin-config", type: "button", title: tr("Configure", "配置"), attrs: { "aria-label": tr("Configure", "配置") } }, icon("sliders")) : null;
-            config?.addEventListener("click", (ev) => {
-              ev.preventDefault();
-              openPluginDialog(plugin, openDialog);
-            });
-            const name = h("span", { class: "ysrp-plugin-name", text: pick(plugin.displayName), title: pick(plugin.displayName) });
-            const cardEl = h("div", { class: `ysrp-plugin${plugin.required ? " is-core" : ""}`, dataset: { plugin: plugin.name } }, h("div", { class: "ysrp-plugin-head" }, h("span", { class: "ysrp-card-icon" }, icon(plugin.icon)), name, plugin.required ? h("span", { class: "ysrp-core-mark", title: tr("Core plugin, always on", "核心插件，始终开启") }, icon("circle-exclamation")) : null, h("span", { class: "ysrp-plugin-tools" }, config, toggle.el)), h("div", { class: "ysrp-plugin-desc", text: pick(plugin.description) }), h("hr", { class: "ysrp-sep" }), h("div", { class: "ysrp-plugin-authors", text: plugin.authors.join(", ") }));
-            cards.set(plugin.name, cardEl);
-            (plugin.required ? coreGrid : normalGrid).appendChild(cardEl);
-          }
-          applyFilter();
-        };
-        const applyFilter = () => {
-          const q = search.value.trim().toLowerCase();
-          const mode = filter.value;
-          let normalShown = 0;
-          let coreShown = 0;
-          for (const plugin of plugins) {
-            const el = cards.get(plugin.name);
-            if (!el)
-              continue;
-            const haystack = [plugin.name, pick(plugin.displayName), pick(plugin.description), ...plugin.authors].join(`
-`).toLowerCase();
-            const enabled = isEnabled(plugin);
-            const ok = (!q || haystack.includes(q)) && (mode === "all" || (mode === "enabled" ? enabled : !enabled));
-            el.style.display = ok ? "" : "none";
-            if (ok) {
-              if (plugin.required)
-                coreShown++;
-              else
-                normalShown++;
-            }
-          }
-          normalGrid.style.display = normalShown ? "" : "none";
-          coreGrid.style.display = coreShown ? "" : "none";
-          divider.style.display = normalShown && coreShown ? "" : "none";
-          empty.style.display = normalShown || coreShown ? "none" : "";
-        };
-        search.addEventListener("input", applyFilter);
-        filter.addEventListener("change", applyFilter);
-        const off = pluginsChanged.on(build);
-        build();
-        pane.append(h("div", { class: "ysrp-tab-intro", text: tr("Turn features on or off. Changes apply immediately. Click the sliders icon to configure.", "开启或关闭各项功能，立即生效。点滑杆图标进行配置。") }), h("div", { class: "ysrp-searchbar" }, search, filter), container);
-        return off;
-      }
-    };
-  }
-
-  // src/plugins/_core/settings/recordsTab.ts
-  var uiStates = new Map;
-  var availability = new Map;
-  function uiFor(videoId) {
-    let s = uiStates.get(videoId);
-    if (!s) {
-      s = {};
-      uiStates.set(videoId, s);
-    }
-    return s;
-  }
-  function forgetRowUi(videoId) {
-    uiStates.delete(videoId);
-  }
-  var rowCount = 0;
-  function recordsHeading() {
-    return tr("Saved Videos - ({count})", "已保存视频 - ({count})", { count: rowCount });
-  }
-  function progressText(videoId, record, liveProgress) {
-    if (!record)
-      return "0%";
-    const progress = Number(liveProgress ?? record.videoProgress);
-    const seconds = Number.isFinite(progress) && progress > 0 ? progress : 0;
-    let duration = Number(record.videoDuration);
-    if (!(duration > 0) && videoId === urlVideoId())
-      duration = currentDuration();
-    if (duration > 0)
-      return `${Math.min(100, Math.max(0, seconds / duration * 100)).toFixed(1)}%`;
-    return formatTime(seconds);
-  }
-  async function persistDearrow(videoId, title) {
-    try {
-      const rec = readRecord(videoId);
-      if (!rec)
-        return;
-      if (typeof rec.originalTitle !== "string" || !rec.originalTitle.trim())
-        await fetchOriginalTitle(videoId);
-      updateRecord(videoId, (cur) => {
-        if (!cur)
-          return null;
-        if (typeof cur.originalTitle === "string" && sameTitle(cur.originalTitle, title))
-          return null;
-        if (cur.videoName === title)
-          return null;
-        return { ...cur, videoName: title };
-      }, "content");
-    } catch (err) {
-      console.warn("[Video Memory] Failed to persist DeArrow title to storage:", err);
-    }
-  }
-  var LOADING_ORIGINAL = () => tr("Loading original title…", "正在获取原标题…");
-  var ORIGINAL_UNAVAILABLE = () => tr("Original title unavailable", "未找到原标题");
-
-  class RecordRow {
-    entry;
-    onDeleted;
-    li;
-    titleEl;
-    pctEl;
-    daBtn = null;
-    dearrow = null;
-    original = null;
-    originalDone = false;
-    loadingOriginal = false;
-    disposers = [];
-    ui;
-    constructor(entry, isCurrent, onDeleted) {
-      this.entry = entry;
-      this.onDeleted = onDeleted;
-      const { videoId, record } = entry;
-      this.ui = uiFor(videoId);
-      this.pctEl = h("span", { class: "ysrp-pct ysrp-record-progress", text: progressText(videoId, record) });
-      this.titleEl = h("span", { class: "ysrp-title ysrp-record-title" });
-      const top = h("div", { class: "ysrp-row-top" }, this.pctEl, this.titleEl);
-      this.li = h("li", { class: `ysrp-row${isCurrent ? " is-current" : ""}`, dataset: { videoId } }, top);
-      this.initTitles();
-      const ctx = {
-        videoId,
-        record,
-        url: watchUrl(videoId),
-        isCurrent,
-        ui: this.ui,
-        title: () => this.titleEl.textContent || UNKNOWN_TITLE
-      };
-      const panels = [];
-      for (const contribution of listRowButtons()) {
-        try {
-          const parts = contribution.create(ctx);
-          if (!parts)
-            continue;
-          top.appendChild(parts.button);
-          if (parts.panel)
-            panels.push({ order: contribution.panelOrder ?? contribution.order, el: parts.panel });
-          if (parts.dispose)
-            this.disposers.push(parts.dispose);
-        } catch (err) {
-          console.error(`[Video Memory] Row button ${contribution.id} failed:`, err);
-        }
-      }
-      top.appendChild(iconButton("trash-can", tr("Delete record", "删除保存记录"), "is-delete", (ev) => {
-        ev.preventDefault();
-        this.delete();
-      }));
-      panels.sort((a, b) => a.order - b.order);
-      for (const p of panels)
-        this.li.appendChild(p.el);
-    }
-    get videoId() {
-      return this.entry.videoId;
-    }
-    updateProgress(liveProgress) {
-      this.pctEl.textContent = progressText(this.videoId, readRecord(this.videoId), liveProgress);
-    }
-    destroy() {
-      for (const fn of this.disposers.splice(0)) {
-        try {
-          fn();
-        } catch {}
-      }
-    }
-    delete() {
-      removeRecord(this.videoId, "delete");
-      forgetRowUi(this.videoId);
-      this.destroy();
-      this.li.remove();
-      this.onDeleted(this);
-    }
-    initTitles() {
-      const { videoId, record } = this.entry;
-      const storedOriginal = typeof record.originalTitle === "string" ? normalizeTitle(record.originalTitle) : "";
-      this.original = storedOriginal || cachedOriginalTitle(videoId) || getSources(videoId).original || null;
-      this.originalDone = Boolean(this.original);
-      const avail = availability.get(videoId);
-      if (avail && avail.state === "missing") {
-        this.dearrow = null;
-      } else {
-        const fromName = normalizeTitle(record.videoName);
-        const candidates = [
-          getSources(videoId).dearrow,
-          resolveTitle(videoId).source === "dearrow" ? resolveTitle(videoId).title : "",
-          avail && avail.state === "available" ? avail.title : "",
-          cachedDearrow(videoId) || "",
-          !isPlaceholderTitle(fromName) && !sameTitle(fromName, this.original) ? fromName : ""
-        ];
-        this.dearrow = candidates.find((c) => c && !sameTitle(c, this.original)) || null;
-        if (this.dearrow)
-          availability.set(videoId, { state: "available", title: this.dearrow });
-      }
-      if (!(avail && avail.state === "missing")) {
-        this.daBtn = h("button", { class: "ysrp-ibtn ysrp-da", type: "button" }, dearrowIcon(20));
-        this.daBtn.addEventListener("click", (ev) => {
-          ev.preventDefault();
-          this.toggleDearrow();
-        });
-        this.titleEl.after(this.daBtn);
-      }
-      this.renderTitle();
-      if (this.daBtn && !this.dearrow) {
-        fetchDearrowTitle(videoId).then((title) => {
-          const clean = title ? normalizeTitle(title) : "";
-          if (clean && !sameTitle(clean, this.original))
-            this.applyDearrow(clean);
-          else
-            this.markMissing();
-        }).catch((err) => console.warn("[Video Memory] Failed to load DeArrow title for records list:", err));
-      }
-      if (!this.original) {
-        fetchOriginalTitle(videoId).then((title) => {
-          this.originalDone = true;
-          if (title)
-            this.original = normalizeTitle(title);
-          if (this.dearrow && this.original && sameTitle(this.dearrow, this.original)) {
-            this.dearrow = null;
-            this.markMissing();
-            return;
-          }
-          this.renderTitle();
-        });
-      }
-    }
-    applyDearrow(title) {
-      const clean = normalizeTitle(title);
-      if (!clean || isPlaceholderTitle(clean) || sameTitle(clean, this.original))
-        return;
-      availability.set(this.videoId, { state: "available", title: clean });
-      persistDearrow(this.videoId, clean);
-      this.dearrow = clean;
-      if (!this.daBtn) {
-        this.daBtn = h("button", { class: "ysrp-ibtn ysrp-da", type: "button" }, dearrowIcon(20));
-        this.daBtn.addEventListener("click", (ev) => {
-          ev.preventDefault();
-          this.toggleDearrow();
-        });
-        this.titleEl.after(this.daBtn);
-      }
-      this.renderTitle();
-    }
-    markMissing() {
-      if (this.dearrow)
-        return;
-      availability.set(this.videoId, { state: "missing" });
-      this.daBtn?.remove();
-      this.daBtn = null;
-      this.ui.showOriginal = false;
-      this.renderTitle();
-    }
-    showingOriginal() {
-      return !this.dearrow || this.ui.showOriginal === true;
-    }
-    renderTitle() {
-      let text;
-      if (!this.showingOriginal() && this.dearrow)
-        text = this.dearrow;
-      else if (this.loadingOriginal)
-        text = LOADING_ORIGINAL();
-      else if (this.original)
-        text = this.original;
-      else if (this.originalDone)
-        text = ORIGINAL_UNAVAILABLE();
-      else
-        text = LOADING_ORIGINAL();
-      this.titleEl.textContent = text;
-      this.titleEl.title = text;
-      const btn = this.daBtn;
-      if (!btn)
-        return;
-      const ready = Boolean(this.dearrow);
-      btn.dataset.state = ready ? "ready" : "pending";
-      btn.disabled = !ready;
-      btn.dataset.loading = this.loadingOriginal ? "true" : "false";
-      btn.classList.toggle("is-off", ready && this.showingOriginal());
-      const tip = !ready ? tr("Checking DeArrow title…", "正在检测 DeArrow 标题…") : this.showingOriginal() ? tr("Show DeArrow title", "恢复 DeArrow 标题") : tr("Show original title", "显示原标题");
-      btn.title = tip;
-      btn.setAttribute("aria-label", tip);
-    }
-    toggleDearrow() {
-      if (!this.dearrow || this.loadingOriginal)
-        return;
-      if (this.showingOriginal()) {
-        this.ui.showOriginal = false;
-        this.renderTitle();
-        return;
-      }
-      this.ui.showOriginal = true;
-      if (this.original || this.originalDone) {
-        this.renderTitle();
-        return;
-      }
-      this.loadingOriginal = true;
-      this.renderTitle();
-      fetchOriginalTitle(this.videoId).then((title) => {
-        this.originalDone = true;
-        if (title)
-          this.original = normalizeTitle(title);
-      }).finally(() => {
-        this.loadingOriginal = false;
-        this.renderTitle();
-      });
-    }
-  }
-
-  class RecordsList {
-    setBusy;
-    list;
-    rows = new Map;
-    renderedCurrent = null;
-    building = false;
-    disposers = [];
-    constructor(pane, setBusy) {
-      this.setBusy = setBusy;
-      this.list = h("ul", { class: "ysrp-records" });
-      pane.appendChild(this.list);
-      const on = (type, fn) => {
-        const wrapped = (ev) => {
-          if (isSettingsOpen() && this.list.isConnected)
-            fn(ev);
-        };
-        document.addEventListener(type, wrapped);
-        this.disposers.push(() => document.removeEventListener(type, wrapped));
-      };
-      on(EVT_RECORD_UPDATED, (ev) => {
-        const id = ev.detail && ev.detail.videoId;
-        if (!id)
-          return;
-        const row = this.rows.get(id);
-        if (!row)
-          return this.rebuild();
-        const live = typeof ev.detail.videoProgress === "number" ? ev.detail.videoProgress : undefined;
-        row.updateProgress(live);
-      });
-      on(EVT_VIDEO_STATUS, (ev) => {
-        const id = ev.detail ? ev.detail.videoId : undefined;
-        if (id !== undefined && (id || null) !== this.renderedCurrent)
-          this.rebuild();
-      });
-      on(EVT_DEARROW_READY, (ev) => {
-        const { videoId, title } = ev.detail || {};
-        if (!videoId || !title)
-          return;
-        this.rows.get(videoId)?.applyDearrow(title);
-      });
-      this.disposers.push(rowsChanged.on(() => {
-        if (isSettingsOpen())
-          this.rebuild();
-      }));
-      this.disposers.push(recordChanges.on((change) => {
-        if (change.kind === "bulk" && isSettingsOpen())
-          this.rebuild();
-      }));
-    }
-    destroy() {
-      for (const fn of this.disposers.splice(0))
-        fn();
-      for (const row of this.rows.values())
-        row.destroy();
-      this.rows.clear();
-    }
-    rebuild() {
-      if (this.building)
-        return;
-      this.building = true;
-      this.setBusy(true);
-      try {
-        for (const row of this.rows.values())
-          row.destroy();
-        this.rows.clear();
-        clear(this.list);
-        const current = urlVideoId() || null;
-        this.renderedCurrent = current;
-        const entries = listRecords().filter((e) => {
-          if (!e.record)
-            console.warn("[Video Memory] Failed to parse saved video data:", e.key);
-          return Boolean(e.record);
-        });
-        entries.sort((a, b) => {
-          if (a.videoId === current)
-            return -1;
-          if (b.videoId === current)
-            return 1;
-          return (Number(b.record.saveDate) || 0) - (Number(a.record.saveDate) || 0);
-        });
-        for (const entry of entries) {
-          try {
-            const row = new RecordRow(entry, entry.videoId === current, (r) => this.onDeleted(r));
-            this.rows.set(entry.videoId, row);
-            this.list.appendChild(row.li);
-          } catch (err) {
-            console.error("[Video Memory] Failed to render saved video:", err);
-          }
-        }
-        rowCount = this.rows.size;
-        if (!rowCount) {
-          this.list.appendChild(h("li", { class: "ysrp-empty-row", text: tr("No saved videos yet.", "还没有保存的视频。") }));
-        }
-        refreshSettingsHeader();
-      } finally {
-        this.building = false;
-        this.setBusy(false);
-      }
-    }
-    onDeleted(row) {
-      this.rows.delete(row.videoId);
-      rowCount = this.rows.size;
-      if (!rowCount)
-        this.list.appendChild(h("li", { class: "ysrp-empty-row", text: tr("No saved videos yet.", "还没有保存的视频。") }));
-      refreshSettingsHeader();
-    }
-  }
-  function createRecordsTab(setBusy) {
-    let list = null;
-    return {
-      id: "records",
-      group: "main",
-      order: 10,
-      icon: "database",
-      label: () => tr("Records", "记录"),
-      heading: () => recordsHeading(),
-      storageBadge: true,
-      render(pane) {
-        rowCount = countRecords();
-        list = new RecordsList(pane, setBusy);
-        return () => {
-          list?.destroy();
-          list = null;
-        };
-      },
-      onShow() {
-        list?.rebuild();
-      }
-    };
-  }
-
-  // src/plugins/_core/settings/rowParts.ts
-  function showPanel(panel, open) {
-    panel.style.display = open ? "flex" : "none";
   }
   async function copyText(text) {
     try {
@@ -2642,180 +2532,918 @@
       return false;
     }
   }
+
+  // src/plugins/_core/settings/displayTab.ts
+  function optionLabel(code) {
+    if (code === "zh")
+      return "中文";
+    if (code === "en")
+      return "English";
+    return tr("Auto", "自动");
+  }
+  function createDisplayTab() {
+    return {
+      id: "display",
+      group: "main",
+      order: 30,
+      icon: "palette",
+      label: () => t("language.tabLabel", tr("Display", "界面")),
+      info: () => t("language.description"),
+      render(pane) {
+        const status = messageLine("ysrp-language-msg");
+        const describe = () => tr("Current: {active}; browser: {browser}", "当前：{active}；浏览器：{browser}", {
+          active: languageName(getLanguage()),
+          browser: languageName(detectBrowserLanguage())
+        });
+        const options = ["auto", "zh", "en"];
+        const select = selectControl(options.map((code) => ({ value: code, label: optionLabel(code) })), getPreference(), (value) => {
+          if (value === getPreference()) {
+            status.set(tr("Already using this language.", "当前已使用该语言。"));
+            return;
+          }
+          setPreference(value);
+          row.descEl.textContent = describe();
+          status.set(tr("Language preference updated.", "语言偏好已更新。"), "success");
+        }, { cls: "ysrp-language-select", label: tr("Interface language", "界面语言") });
+        const row = settingsRow({ title: tr("Interface language", "界面语言"), desc: describe(), control: select.el, below: [status.el] });
+        pane.appendChild(h("div", { class: "ysrp-groups" }, group(tr("Language", "语言"), row.el)));
+      }
+    };
+  }
+
+  // src/api/dialogs.ts
+  var stack = [];
+  var dialogsChanged = new Emitter;
+  var STOP_KEYS = ["keydown", "keyup", "keypress"];
+  function onEscape(ev) {
+    if (ev.key !== "Escape" || !stack.length)
+      return;
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    ev.stopPropagation();
+    stack[stack.length - 1].close();
+  }
+  function openDialog(opts) {
+    const body = h("div", { class: "ysrp-dialog-body" }, opts.content || []);
+    const footer = h("div", { class: "ysrp-dialog-footer" }, opts.footer || []);
+    if (!opts.footer || !opts.footer.length)
+      footer.style.display = "none";
+    const closeBtn = iconButton("xmark", tr("Close", "关闭"), "ysrp-dialog-close");
+    const el = h("div", {
+      class: `ysrp-dialog is-${opts.size || "md"}${opts.cls ? ` ${opts.cls}` : ""}`,
+      attrs: { role: "dialog", "aria-modal": "true", "aria-label": opts.title }
+    }, closeBtn, h("div", { class: "ysrp-dialog-head" }, h("div", { class: "ysrp-dialog-title", text: opts.title }), opts.desc ? h("div", { class: "ysrp-dialog-desc", text: opts.desc }) : null), body, footer);
+    const layer = h("div", { class: "ysrp-ui ysrp-dialog-layer" }, el);
+    let open = true;
+    const handle = {
+      layer,
+      el,
+      body,
+      footer,
+      isOpen: () => open,
+      close() {
+        if (!open)
+          return;
+        open = false;
+        layer.remove();
+        const idx = stack.indexOf(handle);
+        if (idx >= 0)
+          stack.splice(idx, 1);
+        if (!stack.length)
+          window.removeEventListener("keydown", onEscape, true);
+        try {
+          opts.onClose?.();
+        } catch (err) {
+          console.error("[Video Memory] dialog onClose failed:", err);
+        }
+        dialogsChanged.emit();
+      }
+    };
+    closeBtn.addEventListener("click", () => handle.close());
+    layer.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (ev.target === layer)
+        handle.close();
+    });
+    layer.addEventListener("pointerdown", (ev) => ev.stopPropagation());
+    for (const type of STOP_KEYS)
+      layer.addEventListener(type, (ev) => ev.stopPropagation());
+    if (!stack.length)
+      window.addEventListener("keydown", onEscape, true);
+    stack.push(handle);
+    pageHost().appendChild(layer);
+    dialogsChanged.emit();
+    return handle;
+  }
+  function confirmDialog(opts) {
+    return new Promise((resolve) => {
+      let answer = false;
+      const cancel = button(tr("Cancel", "取消"), { variant: "secondary", cls: "ysrp-confirm-cancel" });
+      const ok = button(opts.confirmLabel, { variant: opts.danger ? "danger" : "primary", cls: "ysrp-confirm-ok" });
+      const dlg = openDialog({
+        title: opts.title,
+        desc: opts.desc,
+        size: "sm",
+        cls: "is-confirm",
+        footer: [cancel, ok],
+        onClose: () => resolve(answer)
+      });
+      cancel.addEventListener("click", () => dlg.close());
+      ok.addEventListener("click", () => {
+        answer = true;
+        dlg.close();
+      });
+      requestAnimationFrame(() => {
+        if (dlg.isOpen())
+          ok.focus({ preventScroll: true });
+      });
+    });
+  }
+  function hasDialogs() {
+    return stack.length > 0;
+  }
+  function closeAllDialogs() {
+    while (stack.length)
+      stack[stack.length - 1].close();
+  }
+  function dialogLayers() {
+    return stack.map((d) => d.layer);
+  }
+
+  // src/plugins/_core/settings/pluginsTab.ts
+  function visibleSettings(plugin) {
+    return Object.entries(plugin.settings || {}).filter(([, def]) => !def.hidden);
+  }
+  function settingRow(plugin, key, def) {
+    const ctx = settingsContext(plugin);
+    const value = getSetting(plugin, key);
+    const title = pick(def.label);
+    const desc = def.description ? pick(def.description) : "";
+    switch (def.type) {
+      case "switch":
+        return settingsRow({ title, desc, control: switchControl(Boolean(value), (on) => ctx.settings.set(key, on), { dataset: { setting: key }, label: title }).el }).el;
+      case "select":
+        return settingsRow({
+          title,
+          desc,
+          control: selectControl((def.options || []).map((o) => ({ value: o.value, label: pick(o.label) })), String(value), (v) => ctx.settings.set(key, v), { dataset: { setting: key }, label: title }).el
+        }).el;
+      case "number": {
+        const input = textInput({ type: "number", value: String(value ?? ""), placeholder: def.placeholder, cls: "is-number" });
+        input.dataset.setting = key;
+        if (def.min !== undefined)
+          input.min = String(def.min);
+        if (def.max !== undefined)
+          input.max = String(def.max);
+        if (def.step !== undefined)
+          input.step = String(def.step);
+        input.addEventListener("change", () => {
+          const n = Number(input.value);
+          if (input.value.trim() !== "" && Number.isFinite(n))
+            ctx.settings.set(key, n);
+        });
+        return settingsRow({ title, desc, below: [input] }).el;
+      }
+      default: {
+        const input = textInput({ value: String(value ?? ""), placeholder: def.placeholder });
+        input.dataset.setting = key;
+        input.addEventListener("input", () => ctx.settings.set(key, input.value));
+        return settingsRow({ title, desc, below: [input] }).el;
+      }
+    }
+  }
+  function openPluginDialog(plugin) {
+    const settings = visibleSettings(plugin);
+    const list = h("div", { class: "ysrp-plugin-settings" });
+    const renderList = () => list.replaceChildren(...settings.map(([key, def]) => settingRow(plugin, key, def)));
+    renderList();
+    const reset = button(tr("Reset", "重置"), { variant: "secondary", cls: "ysrp-plugin-reset" });
+    reset.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      const ok = await confirmDialog({
+        title: tr("Reset settings", "重置设置"),
+        desc: tr("Reset this plugin's settings to defaults? This cannot be undone.", "把这个插件的设置恢复为默认值？此操作无法撤销。"),
+        confirmLabel: tr("Reset", "重置"),
+        danger: true
+      });
+      if (!ok)
+        return;
+      settingsContext(plugin).settings.reset();
+      renderList();
+    });
+    openDialog({
+      title: pick(plugin.displayName),
+      desc: pick(plugin.description),
+      size: "md",
+      cls: "ysrp-plugin-dialog",
+      content: [
+        h("hr", { class: "ysrp-sep" }),
+        field(tr("Authors", "作者"), h("p", { class: "ysrp-field-value ysrp-plugin-authors", text: plugin.authors.join(", ") })),
+        field(tr("Settings", "设置"), settings.length ? list : h("p", { class: "ysrp-field-value", text: tr("No configurable settings.", "没有可配置的设置项。") }))
+      ],
+      footer: settings.length ? [reset] : []
+    });
+  }
+  var lastCategory = "favorites";
+  function createPluginsTab() {
+    return {
+      id: "plugins",
+      group: "plugins",
+      order: 10,
+      icon: "plug",
+      label: () => tr("Plugins", "插件"),
+      info: () => tr("Toggle features. Changes apply immediately. Click the sliders icon to configure.", "开启或关闭功能，立即生效。点击滑杆图标进行配置。"),
+      render(pane) {
+        const plugins = listPlugins();
+        const cats = categoryStrip([
+          { id: "favorites", label: tr("Favorites", "收藏") },
+          { id: "all", label: tr("All", "全部") }
+        ], lastCategory, (id) => {
+          lastCategory = id;
+          build();
+        });
+        const bar = searchBar("", [
+          { value: "all", label: tr("All", "全部") },
+          { value: "enabled", label: tr("Enabled", "已开启") },
+          { value: "disabled", label: tr("Disabled", "已关闭") }
+        ], () => applyFilter());
+        const mainGrid = grid("ysrp-plugin-grid");
+        const divider = h("hr", { class: "ysrp-sep ysrp-core-sep" });
+        const coreGrid = grid("ysrp-plugin-grid is-core");
+        const empty = emptyState("", "ysrp-plugins-empty");
+        const container = h("div", { class: "ysrp-pane-stack ysrp-plugins" }, mainGrid, divider, coreGrid, empty);
+        const cards = new Map;
+        const makeCard = (plugin, starred, pinned) => {
+          const name = pick(plugin.displayName);
+          const marks = [];
+          if (plugin.required)
+            marks.push(cardMark("circle-exclamation", tr("Core plugin, always on", "核心插件，始终开启"), "is-core-mark"));
+          const failed = isEnabled(plugin) && hasFailed(plugin.name);
+          if (failed)
+            marks.push(cardMark("triangle-exclamation", tr("This plugin failed to start", "插件启动失败"), "is-danger"));
+          const star = iconButton("star", "", `is-star${starred ? " is-active" : ""}`, () => {
+            setListed("starred", plugin.name, !starred);
+            build();
+          });
+          setIcon(star, "star", starred ? "solid" : "regular");
+          setIconButtonLabel(star, starred ? tr("Remove from favorites", "取消收藏") : tr("Add to favorites", "收藏"));
+          const controls = [star];
+          if (!plugin.required) {
+            const pin = iconButton("thumbtack", pinned ? tr("Unpin", "取消置顶") : tr("Pin to top", "置顶"), `is-pin${pinned ? " is-active" : ""}`, () => {
+              setListed("pinned", plugin.name, !pinned);
+              build();
+            });
+            controls.push(pin);
+          }
+          if (visibleSettings(plugin).length)
+            controls.push(iconButton("sliders", tr("Settings", "设置"), "ysrp-plugin-config", () => openPluginDialog(plugin)));
+          controls.push(switchControl(isEnabled(plugin), (on) => setPluginEnabled(plugin.name, on), {
+            disabled: plugin.required,
+            dataset: { plugin: plugin.name },
+            label: name
+          }).el);
+          return card({
+            icon: plugin.icon,
+            title: name,
+            marks,
+            controls,
+            desc: pick(plugin.description),
+            footer: plugin.authors.join(", "),
+            cls: `ysrp-plugin${plugin.required ? " is-core" : ""}${failed ? " is-failed" : ""}${starred ? " is-starred" : ""}${pinned ? " is-pinned" : ""}`,
+            dataset: { plugin: plugin.name }
+          }).el;
+        };
+        const build = () => {
+          mainGrid.replaceChildren();
+          coreGrid.replaceChildren();
+          cards.clear();
+          const starred = starredPlugins();
+          const pinned = pinnedPlugins();
+          const byName = (a, b) => a.name.localeCompare(b.name);
+          const pinRank = (p) => {
+            const i = pinned.indexOf(p.name);
+            return i < 0 ? Infinity : i;
+          };
+          const pinnedFirst = (a, b) => {
+            const ra = pinRank(a);
+            const rb = pinRank(b);
+            if (ra !== rb)
+              return ra === Infinity ? 1 : rb === Infinity ? -1 : ra - rb;
+            return byName(a, b);
+          };
+          const favorites = lastCategory === "favorites";
+          const inCategory = favorites ? plugins.filter((p) => starred.includes(p.name)) : plugins;
+          bar.setPlaceholder(tr("Search {n} plugins...", "搜索 {n} 个插件...", { n: inCategory.length }));
+          if (favorites) {
+            for (const p of inCategory.slice().sort(pinnedFirst)) {
+              const el = makeCard(p, true, pinned.includes(p.name));
+              cards.set(p.name, el);
+              mainGrid.appendChild(el);
+            }
+          } else {
+            for (const p of plugins.filter((x) => !x.required).sort(pinnedFirst)) {
+              const el = makeCard(p, starred.includes(p.name), pinned.includes(p.name));
+              cards.set(p.name, el);
+              mainGrid.appendChild(el);
+            }
+            for (const p of plugins.filter((x) => x.required).sort(byName)) {
+              const el = makeCard(p, starred.includes(p.name), false);
+              cards.set(p.name, el);
+              coreGrid.appendChild(el);
+            }
+          }
+          applyFilter();
+        };
+        const applyFilter = () => {
+          const q = bar.query();
+          const mode = bar.filter.value();
+          let mainShown = 0;
+          let coreShown = 0;
+          for (const plugin of plugins) {
+            const el = cards.get(plugin.name);
+            if (!el)
+              continue;
+            const haystack = [plugin.name, pick(plugin.displayName), pick(plugin.description), ...plugin.authors].join(`
+`).toLowerCase();
+            const enabled = isEnabled(plugin);
+            const ok = (!q || haystack.includes(q)) && (mode === "all" || (mode === "enabled" ? enabled : !enabled));
+            el.style.display = ok ? "" : "none";
+            if (ok) {
+              if (el.parentElement === coreGrid)
+                coreShown++;
+              else
+                mainShown++;
+            }
+          }
+          mainGrid.style.display = mainShown ? "" : "none";
+          coreGrid.style.display = coreShown ? "" : "none";
+          divider.style.display = mainShown && coreShown ? "" : "none";
+          const none = !mainShown && !coreShown;
+          empty.textContent = lastCategory === "favorites" && !cards.size ? tr("No favorites yet. Star a plugin to see it here.", "还没有收藏。点星标收藏插件。") : tr("No plugins match your search.", "没有符合条件的插件。");
+          empty.style.display = none ? "" : "none";
+        };
+        const off = pluginsChanged.on(build);
+        build();
+        pane.appendChild(h("div", { class: "ysrp-pane-stack" }, cats.el, bar.el, container));
+        return off;
+      }
+    };
+  }
+
+  // src/plugins/_core/settings/recordsTab.ts
+  var showOriginal = new Map;
+  var availability = new Map;
+  var FINISHED_MARGIN_S2 = 5;
+  var rowCount = 0;
+  function recordsHeading() {
+    return tr("Saved Videos - ({count})", "已保存视频 - ({count})", { count: rowCount });
+  }
+  function progressOf(videoId, record, liveProgress) {
+    const raw = Number(liveProgress ?? (record ? record.videoProgress : 0));
+    const seconds = Number.isFinite(raw) && raw > 0 ? raw : 0;
+    let duration = Number(record ? record.videoDuration : 0);
+    if (!(duration > 0) && videoId === urlVideoId())
+      duration = currentDuration();
+    return { seconds, duration: duration > 0 ? duration : 0 };
+  }
+  function progressText(videoId, record, liveProgress) {
+    const { seconds, duration } = progressOf(videoId, record, liveProgress);
+    if (duration > 0) {
+      const pct = Math.min(100, Math.max(0, seconds / duration * 100)).toFixed(1);
+      return tr("Watched {pct}% · {pos} / {dur}", "已看 {pct}% · {pos} / {dur}", { pct, pos: formatTime(Math.min(seconds, duration)), dur: formatTime(duration) });
+    }
+    return tr("Watched to {pos}", "已看到 {pos}", { pos: formatTime(seconds) });
+  }
+  function isFinished(videoId, record) {
+    const { seconds, duration } = progressOf(videoId, record);
+    if (!(duration > 0))
+      return false;
+    return duration - seconds < FINISHED_MARGIN_S2 || seconds / duration * 100 >= 99;
+  }
+  function savedText(record) {
+    const ms = Number(record ? record.saveDate : NaN);
+    if (!Number.isFinite(ms) || ms <= 0)
+      return "";
+    const d = new Date(ms);
+    const p = (n) => String(n).padStart(2, "0");
+    return tr("Saved {time}", "保存于 {time}", { time: `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}` });
+  }
+  function noteOf(record) {
+    return record && typeof record.videoNote === "string" ? record.videoNote.trim() : "";
+  }
+  async function persistDearrow(videoId, title) {
+    try {
+      const rec = readRecord(videoId);
+      if (!rec)
+        return;
+      if (typeof rec.originalTitle !== "string" || !rec.originalTitle.trim())
+        await fetchOriginalTitle(videoId);
+      updateRecord(videoId, (cur) => {
+        if (!cur)
+          return null;
+        if (typeof cur.originalTitle === "string" && sameTitle(cur.originalTitle, title))
+          return null;
+        if (cur.videoName === title)
+          return null;
+        return { ...cur, videoName: title };
+      }, "content");
+    } catch (err) {
+      console.warn("[Video Memory] Failed to persist DeArrow title to storage:", err);
+    }
+  }
+  var LOADING_ORIGINAL = () => tr("Loading original title…", "正在获取原标题…");
+  var ORIGINAL_UNAVAILABLE = () => tr("Original title unavailable", "未找到原标题");
+
+  class RecordCard {
+    isCurrent;
+    onDeleted;
+    card;
+    daBtn = null;
+    dearrow = null;
+    original = null;
+    originalDone = false;
+    loadingOriginal = false;
+    disposers = [];
+    record;
+    constructor(entry, isCurrent, onDeleted) {
+      this.isCurrent = isCurrent;
+      this.onDeleted = onDeleted;
+      this.videoId = entry.videoId;
+      this.record = entry.record;
+      this.card = card({
+        icon: isCurrent ? "play" : "clock-rotate-left",
+        title: "",
+        cls: `ysrp-record${isCurrent ? " is-current" : ""}`,
+        dataset: { videoId: entry.videoId }
+      });
+      this.card.titleEl.classList.add("ysrp-record-title");
+      this.card.descEl.classList.add("ysrp-record-progress");
+      this.initTitles();
+      const ctx = {
+        videoId: this.videoId,
+        record: entry.record,
+        url: watchUrl(this.videoId),
+        isCurrent,
+        title: () => this.currentTitle(),
+        refresh: () => this.refresh()
+      };
+      for (const contribution of listRowButtons()) {
+        try {
+          const parts = contribution.create(ctx);
+          if (!parts)
+            continue;
+          this.card.controlsEl.appendChild(parts.button);
+          if (parts.dispose)
+            this.disposers.push(parts.dispose);
+        } catch (err) {
+          console.error(`[Video Memory] Record control ${contribution.id} failed:`, err);
+        }
+      }
+      this.card.controlsEl.appendChild(iconButton("trash-can", tr("Delete record", "删除记录"), "is-delete", () => {
+        this.confirmDelete();
+      }));
+      this.refresh();
+    }
+    videoId;
+    get el() {
+      return this.card.el;
+    }
+    currentTitle() {
+      return this.card.titleEl.textContent || UNKNOWN_TITLE;
+    }
+    refresh(liveProgress) {
+      const rec = readRecord(this.videoId);
+      if (rec)
+        this.record = rec;
+      this.updateProgress(liveProgress);
+      const marks = [];
+      if (this.isCurrent)
+        marks.push(cardMark("circle-dot", tr("Now playing", "正在播放"), "is-now"));
+      const note = noteOf(this.record);
+      if (note)
+        marks.push(cardMark("note-sticky", note.length > 80 ? `${note.slice(0, 80)}…` : note, "is-note-mark"));
+      this.card.marksEl.replaceChildren(...marks);
+    }
+    updateProgress(liveProgress) {
+      const rec = readRecord(this.videoId) || this.record;
+      this.card.setDesc(progressText(this.videoId, rec, liveProgress));
+      this.card.setFooter(savedText(rec));
+    }
+    matches(query, filter) {
+      const rec = readRecord(this.videoId) || this.record;
+      if (filter === "notes" && !noteOf(rec))
+        return false;
+      if (filter === "finished" && !isFinished(this.videoId, rec))
+        return false;
+      if (filter === "progress" && isFinished(this.videoId, rec))
+        return false;
+      if (!query)
+        return true;
+      const hay = [this.currentTitle(), this.original || "", this.dearrow || "", String(rec.videoName || ""), String(rec.originalTitle || ""), this.videoId, noteOf(rec)].join(`
+`).toLowerCase();
+      return hay.includes(query);
+    }
+    destroy() {
+      for (const fn of this.disposers.splice(0)) {
+        try {
+          fn();
+        } catch {}
+      }
+    }
+    async confirmDelete() {
+      const ok = await confirmDialog({
+        title: tr("Delete record", "删除记录"),
+        desc: tr("Delete saved progress for “{title}”? This cannot be undone.", "删除“{title}”的保存进度？此操作无法撤销。", { title: this.currentTitle() }),
+        confirmLabel: tr("Delete", "删除"),
+        danger: true
+      });
+      if (!ok)
+        return;
+      removeRecord(this.videoId, "delete");
+      showOriginal.delete(this.videoId);
+      this.destroy();
+      this.card.el.remove();
+      this.onDeleted(this);
+    }
+    initTitles() {
+      const { videoId, record } = this;
+      const storedOriginal = typeof record.originalTitle === "string" ? normalizeTitle(record.originalTitle) : "";
+      this.original = storedOriginal || cachedOriginalTitle(videoId) || getSources(videoId).original || null;
+      this.originalDone = Boolean(this.original);
+      const avail = availability.get(videoId);
+      if (avail && avail.state === "missing") {
+        this.dearrow = null;
+      } else {
+        const fromName = normalizeTitle(record.videoName);
+        const resolved = resolveTitle(videoId);
+        const candidates = [
+          getSources(videoId).dearrow,
+          resolved.source === "dearrow" ? resolved.title : "",
+          avail && avail.state === "available" ? avail.title : "",
+          cachedDearrow(videoId) || "",
+          !isPlaceholderTitle(fromName) && !sameTitle(fromName, this.original) ? fromName : ""
+        ];
+        this.dearrow = candidates.find((c) => c && !sameTitle(c, this.original)) || null;
+        if (this.dearrow)
+          availability.set(videoId, { state: "available", title: this.dearrow });
+      }
+      if (!(avail && avail.state === "missing"))
+        this.ensureDearrowButton();
+      this.renderTitle();
+      if (this.daBtn && !this.dearrow) {
+        fetchDearrowTitle(videoId).then((title) => {
+          const clean = title ? normalizeTitle(title) : "";
+          if (clean && !sameTitle(clean, this.original))
+            this.applyDearrow(clean);
+          else
+            this.markMissing();
+        }).catch((err) => console.warn("[Video Memory] Failed to load DeArrow title for records list:", err));
+      }
+      if (!this.original) {
+        fetchOriginalTitle(videoId).then((title) => {
+          this.originalDone = true;
+          if (title)
+            this.original = normalizeTitle(title);
+          if (this.dearrow && this.original && sameTitle(this.dearrow, this.original)) {
+            this.dearrow = null;
+            this.markMissing();
+            return;
+          }
+          this.renderTitle();
+        });
+      }
+    }
+    ensureDearrowButton() {
+      if (this.daBtn)
+        return;
+      this.daBtn = iconButton("wand-magic-sparkles", "", "is-dearrow ysrp-da", () => this.toggleDearrow());
+      this.card.controlsEl.prepend(this.daBtn);
+    }
+    applyDearrow(title) {
+      const clean = normalizeTitle(title);
+      if (!clean || isPlaceholderTitle(clean) || sameTitle(clean, this.original))
+        return;
+      availability.set(this.videoId, { state: "available", title: clean });
+      persistDearrow(this.videoId, clean);
+      this.dearrow = clean;
+      this.ensureDearrowButton();
+      this.renderTitle();
+    }
+    markMissing() {
+      if (this.dearrow)
+        return;
+      availability.set(this.videoId, { state: "missing" });
+      this.daBtn?.remove();
+      this.daBtn = null;
+      showOriginal.delete(this.videoId);
+      this.renderTitle();
+    }
+    showingOriginal() {
+      return !this.dearrow || showOriginal.get(this.videoId) === true;
+    }
+    renderTitle() {
+      let text;
+      if (!this.showingOriginal() && this.dearrow)
+        text = this.dearrow;
+      else if (this.loadingOriginal)
+        text = LOADING_ORIGINAL();
+      else if (this.original)
+        text = this.original;
+      else if (this.originalDone)
+        text = ORIGINAL_UNAVAILABLE();
+      else
+        text = LOADING_ORIGINAL();
+      this.card.setTitle(text);
+      const btn = this.daBtn;
+      if (!btn)
+        return;
+      const ready = Boolean(this.dearrow);
+      btn.dataset.state = ready ? "ready" : "pending";
+      btn.disabled = !ready;
+      btn.dataset.loading = this.loadingOriginal ? "true" : "false";
+      btn.classList.toggle("is-off", ready && this.showingOriginal());
+      setIconButtonLabel(btn, !ready ? tr("Checking DeArrow title…", "正在检测 DeArrow 标题…") : this.showingOriginal() ? tr("Show DeArrow title", "恢复 DeArrow 标题") : tr("Show original title", "显示原标题"));
+    }
+    toggleDearrow() {
+      if (!this.dearrow || this.loadingOriginal)
+        return;
+      if (this.showingOriginal()) {
+        showOriginal.set(this.videoId, false);
+        this.renderTitle();
+        return;
+      }
+      showOriginal.set(this.videoId, true);
+      if (this.original || this.originalDone) {
+        this.renderTitle();
+        return;
+      }
+      this.loadingOriginal = true;
+      this.renderTitle();
+      fetchOriginalTitle(this.videoId).then((title) => {
+        this.originalDone = true;
+        if (title)
+          this.original = normalizeTitle(title);
+      }).finally(() => {
+        this.loadingOriginal = false;
+        this.renderTitle();
+      });
+    }
+  }
+
+  class RecordsList {
+    setBusy;
+    grid;
+    empty;
+    search;
+    cards = new Map;
+    renderedCurrent = null;
+    building = false;
+    disposers = [];
+    constructor(pane, setBusy) {
+      this.setBusy = setBusy;
+      this.search = searchBar("", [
+        { value: "all", label: tr("All", "全部") },
+        { value: "progress", label: tr("In progress", "未看完") },
+        { value: "finished", label: tr("Finished", "已看完") },
+        { value: "notes", label: tr("With notes", "有笔记") }
+      ], () => this.applyFilter());
+      this.search.input.classList.add("ysrp-records-search");
+      this.search.filter.select.classList.add("ysrp-records-filter");
+      this.grid = grid("ysrp-records");
+      this.empty = emptyState("", "ysrp-records-empty");
+      pane.appendChild(h("div", { class: "ysrp-pane-stack" }, this.search.el, this.grid, this.empty));
+      const on = (type, fn) => {
+        const wrapped = (ev) => {
+          if (isSettingsOpen() && this.grid.isConnected)
+            fn(ev);
+        };
+        document.addEventListener(type, wrapped);
+        this.disposers.push(() => document.removeEventListener(type, wrapped));
+      };
+      on(EVT_RECORD_UPDATED, (ev) => {
+        const id = ev.detail && ev.detail.videoId;
+        if (!id)
+          return;
+        const c = this.cards.get(id);
+        if (!c)
+          return this.rebuild();
+        const live = typeof ev.detail.videoProgress === "number" ? ev.detail.videoProgress : undefined;
+        c.updateProgress(live);
+      });
+      on(EVT_VIDEO_STATUS, (ev) => {
+        const id = ev.detail ? ev.detail.videoId : undefined;
+        if (id !== undefined && (id || null) !== this.renderedCurrent)
+          this.rebuild();
+      });
+      on(EVT_DEARROW_READY, (ev) => {
+        const { videoId, title } = ev.detail || {};
+        if (!videoId || !title)
+          return;
+        this.cards.get(videoId)?.applyDearrow(title);
+      });
+      this.disposers.push(rowsChanged.on(() => {
+        if (isSettingsOpen())
+          this.rebuild();
+      }));
+      this.disposers.push(recordChanges.on((change) => {
+        if (change.kind === "bulk" && isSettingsOpen())
+          this.rebuild();
+      }));
+    }
+    destroy() {
+      for (const fn of this.disposers.splice(0))
+        fn();
+      for (const c of this.cards.values())
+        c.destroy();
+      this.cards.clear();
+    }
+    rebuild() {
+      if (this.building)
+        return;
+      this.building = true;
+      this.setBusy(true);
+      try {
+        for (const c of this.cards.values())
+          c.destroy();
+        this.cards.clear();
+        this.grid.replaceChildren();
+        const current = urlVideoId() || null;
+        this.renderedCurrent = current;
+        const entries = listRecords().filter((e) => {
+          if (!e.record)
+            console.warn("[Video Memory] Failed to parse saved video data:", e.key);
+          return Boolean(e.record);
+        });
+        entries.sort((a, b) => {
+          if (a.videoId === current)
+            return -1;
+          if (b.videoId === current)
+            return 1;
+          return (Number(b.record.saveDate) || 0) - (Number(a.record.saveDate) || 0);
+        });
+        for (const entry of entries) {
+          try {
+            const c = new RecordCard(entry, entry.videoId === current, (removed) => this.onDeleted(removed));
+            this.cards.set(entry.videoId, c);
+            this.grid.appendChild(c.el);
+          } catch (err) {
+            console.error("[Video Memory] Failed to render saved video:", err);
+          }
+        }
+        this.countChanged();
+      } finally {
+        this.building = false;
+        this.setBusy(false);
+      }
+    }
+    countChanged() {
+      rowCount = this.cards.size;
+      this.search.setPlaceholder(tr("Search {n} records...", "搜索 {n} 条记录...", { n: rowCount }));
+      this.applyFilter();
+      refreshSettingsHeader();
+    }
+    applyFilter() {
+      const q = this.search.query();
+      const filter = this.search.filter.value();
+      let shown = 0;
+      for (const c of this.cards.values()) {
+        const ok = c.matches(q, filter);
+        c.el.style.display = ok ? "" : "none";
+        if (ok)
+          shown++;
+      }
+      this.grid.style.display = shown ? "" : "none";
+      this.empty.textContent = this.cards.size ? tr("No records match your search.", "没有符合条件的记录。") : tr("No saved videos yet.", "还没有保存的视频。");
+      this.empty.style.display = shown ? "none" : "";
+    }
+    onDeleted(removed) {
+      this.cards.delete(removed.videoId);
+      this.countChanged();
+    }
+  }
+  function createRecordsTab(setBusy) {
+    let list = null;
+    return {
+      id: "records",
+      group: "main",
+      order: 10,
+      icon: "clock-rotate-left",
+      label: () => tr("Records", "记录"),
+      heading: () => recordsHeading(),
+      info: () => tr("Your saved videos: the one playing now comes first, then the most recently saved. Use the buttons on a card for the link, notes or deletion.", "已保存的视频：正在播放的排在最前，其余按保存时间从新到旧。用卡片上的按钮查看链接、编辑笔记或删除。"),
+      storageBadge: true,
+      render(pane) {
+        rowCount = countRecords();
+        list = new RecordsList(pane, setBusy);
+        return () => {
+          list?.destroy();
+          list = null;
+        };
+      },
+      onShow() {
+        list?.rebuild();
+      }
+    };
+  }
+
+  // src/plugins/_core/settings/rowParts.ts
+  function storedNote(videoId) {
+    const rec = readRecord(videoId);
+    return rec && typeof rec.videoNote === "string" ? rec.videoNote : "";
+  }
+  function openNoteDialog(ctx) {
+    const area = textArea({ value: storedNote(ctx.videoId), placeholder: tr("Write a note…", "写点笔记…"), cls: "ysrp-note-input" });
+    const cancel = button(tr("Cancel", "取消"), { variant: "secondary", cls: "ysrp-note-cancel" });
+    const save = button(tr("Save", "保存"), { variant: "primary", cls: "ysrp-note-save" });
+    const dlg = openDialog({
+      title: tr("Notes", "笔记"),
+      desc: ctx.title(),
+      size: "md",
+      cls: "ysrp-note-dialog",
+      content: [area],
+      footer: [cancel, save]
+    });
+    const doSave = () => {
+      const next = area.value.trim();
+      try {
+        updateRecord(ctx.videoId, (cur) => {
+          if (!cur)
+            return null;
+          const out = { ...cur };
+          if (next)
+            out.videoNote = next;
+          else
+            delete out.videoNote;
+          return out;
+        }, "content");
+      } catch (err) {
+        console.error("[Video Memory] Failed to update video note in storage:", err);
+      }
+      dlg.close();
+      ctx.refresh();
+    };
+    cancel.addEventListener("click", () => dlg.close());
+    save.addEventListener("click", doSave);
+    area.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && (ev.ctrlKey || ev.metaKey)) {
+        ev.preventDefault();
+        doSave();
+      }
+    });
+    requestAnimationFrame(() => {
+      if (!area.isConnected)
+        return;
+      area.focus({ preventScroll: true });
+      area.setSelectionRange(area.value.length, area.value.length);
+    });
+  }
   var noteContribution = {
     id: "note",
     order: 20,
-    panelOrder: 30,
     create(ctx) {
-      const ui = ctx.ui;
-      let note = typeof ctx.record.videoNote === "string" ? ctx.record.videoNote : "";
-      let editor = null;
-      const topBtn = iconButton("pen-to-square", "", "is-note");
-      const editBtn = iconButton("pencil", "", "is-note-edit");
-      const preview = h("div", { class: "ysrp-note-text" });
-      const body = h("div", { class: "ysrp-note-body" }, preview);
-      const panel = h("div", { class: "ysrp-panel ysrp-note-container" }, h("div", { class: "ysrp-panel-head" }, h("span", { class: "ysrp-panel-label", text: tr("Notes", "笔记") }), editBtn), body);
-      const hasNote = () => note.trim().length > 0;
-      const isOpen = () => ui.noteOpen === true;
-      const editing = () => editor !== null;
-      const renderPreview = () => {
-        preview.textContent = hasNote() ? note : tr("No notes yet", "暂无笔记");
-        preview.classList.toggle("is-empty", !hasNote());
-      };
-      const refreshButtons = () => {
-        const topTip = editing() ? tr("Save & collapse note", "保存并折叠笔记") : hasNote() ? isOpen() ? tr("Hide notes", "隐藏笔记") : tr("Show notes", "显示笔记") : tr("Add note", "添加笔记");
-        topBtn.title = topTip;
-        topBtn.setAttribute("aria-label", topTip);
-        topBtn.classList.toggle("has-content", hasNote());
-        setIcon(editBtn, editing() ? "floppy-disk" : "pencil");
-        const editTip = editing() ? tr("Save note", "保存笔记") : tr("Edit note", "编辑笔记");
-        editBtn.title = editTip;
-        editBtn.setAttribute("aria-label", editTip);
-      };
-      const setOpen = (open) => {
-        if (!open && editing())
-          return;
-        ui.noteOpen = open;
-        showPanel(panel, open);
-        refreshButtons();
-      };
-      const autosize = () => {
-        if (!editor)
-          return;
-        editor.style.height = "auto";
-        editor.style.height = `${editor.scrollHeight}px`;
-      };
-      const startEdit = (draft) => {
-        if (editing())
-          return;
-        ui.noteOpen = true;
-        showPanel(panel, true);
-        const area = h("textarea", { class: "ysrp-textarea ysrp-note-input", value: draft ?? note, rows: 3 });
-        area.addEventListener("input", () => {
-          ui.noteDraft = area.value;
-          autosize();
-        });
-        editor = area;
-        ui.editing = true;
-        ui.noteDraft = area.value;
-        preview.replaceWith(area);
-        autosize();
-        requestAnimationFrame(() => {
-          if (!area.isConnected)
-            return;
-          area.focus();
-          area.setSelectionRange(area.value.length, area.value.length);
-        });
-        refreshButtons();
-      };
-      const save = () => {
-        if (!editor)
-          return;
-        const next = editor.value.trim();
-        editor.replaceWith(preview);
-        editor = null;
-        ui.editing = false;
-        delete ui.noteDraft;
-        note = next;
-        renderPreview();
-        try {
-          updateRecord(ctx.videoId, (cur) => {
-            if (!cur)
-              return null;
-            const out = { ...cur };
-            if (next)
-              out.videoNote = next;
-            else
-              delete out.videoNote;
-            return out;
-          }, "content");
-        } catch (err) {
-          console.error("[Video Memory] Failed to update video note in storage:", err);
-        }
-        refreshButtons();
-      };
-      topBtn.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        if (editing()) {
-          save();
-          setOpen(false);
-        } else if (!hasNote()) {
-          startEdit();
-        } else {
-          setOpen(!isOpen());
-        }
-      });
-      editBtn.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        if (editing())
-          save();
-        else
-          startEdit();
-      });
-      renderPreview();
-      showPanel(panel, isOpen());
-      if (ui.editing === true)
-        startEdit(typeof ui.noteDraft === "string" ? ui.noteDraft : undefined);
-      refreshButtons();
-      return { button: topBtn, panel };
+      const label = () => storedNote(ctx.videoId).trim() ? tr("Edit note", "编辑笔记") : tr("Add note", "添加笔记");
+      const btn = iconButton("pen-to-square", label(), "is-note", () => openNoteDialog(ctx));
+      btn.addEventListener("mouseenter", () => setIconButtonLabel(btn, label()));
+      return { button: btn };
     }
   };
+  function openLinkDialog(ctx) {
+    const input = textInput({ value: ctx.url, cls: "ysrp-link-input" });
+    input.readOnly = true;
+    input.addEventListener("focus", () => input.select());
+    const copyLabel = tr("Copy", "复制");
+    const copy = button(copyLabel, { variant: "secondary", cls: "ysrp-link-copy" });
+    const open = button(tr("Open in new tab", "在新标签打开"), { variant: "primary", cls: "ysrp-link-open" });
+    let timer = 0;
+    openDialog({
+      title: tr("Video link", "视频链接"),
+      desc: ctx.title(),
+      size: "sm",
+      cls: "ysrp-link-dialog",
+      content: [input],
+      footer: [copy, open],
+      onClose: () => clearTimeout(timer)
+    });
+    copy.addEventListener("click", () => {
+      copyText(ctx.url).then(() => {
+        setButtonLabel(copy, tr("Copied", "已复制"));
+      }).catch((err) => {
+        console.warn("[Video Memory] Failed to copy text: ", err);
+        setButtonLabel(copy, tr("Copy failed", "复制失败"));
+      }).finally(() => {
+        clearTimeout(timer);
+        timer = window.setTimeout(() => setButtonLabel(copy, copyLabel), 1500);
+      });
+    });
+    open.addEventListener("click", () => {
+      window.open(ctx.url, "_blank", "noopener");
+    });
+  }
   var linkContribution = {
     id: "link",
     order: 30,
-    panelOrder: 10,
     create(ctx) {
-      const ui = ctx.ui;
-      const tip = h("span", { class: "ysrp-copied", text: tr("Copied", "已复制") });
-      let tipTimer = 0;
-      let iconTimer = 0;
-      const copyBtn = iconButton("copy", tr("Copy URL", "复制 URL"), "is-link is-copy");
-      const openBtn = iconButton("arrow-up-right-from-square", tr("Open in new tab", "在新标签页中打开 URL"), "is-open");
-      const panel = h("div", { class: "ysrp-panel ysrp-url" }, h("span", { class: "ysrp-url-text", title: ctx.url }, tr("URL: {url}", "链接：{url}", { url: ctx.url })), tip, copyBtn, openBtn);
-      const flashTip = (text, error = false) => {
-        tip.textContent = text;
-        tip.classList.toggle("is-error", error);
-        tip.classList.add("is-visible");
-        if (tipTimer)
-          clearTimeout(tipTimer);
-        tipTimer = window.setTimeout(() => tip.classList.remove("is-visible"), 2000);
-      };
-      copyBtn.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        copyText(ctx.url).then(() => {
-          setIcon(copyBtn, "check");
-          copyBtn.classList.add("is-success");
-          if (iconTimer)
-            clearTimeout(iconTimer);
-          iconTimer = window.setTimeout(() => {
-            setIcon(copyBtn, "copy");
-            copyBtn.classList.remove("is-success");
-          }, 1000);
-          flashTip(tr("Copied", "已复制"));
-        }).catch((err) => {
-          console.warn("[Video Memory] Failed to copy text: ", err);
-          flashTip(tr("Copy failed", "复制失败"), true);
-        });
-      });
-      openBtn.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        window.open(ctx.url, "_blank", "noopener");
-      });
-      const button = iconButton("link", tr("Show / hide URL", "显示/隐藏 URL"), "is-link");
-      button.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        ui.linkOpen = ui.linkOpen !== true;
-        showPanel(panel, ui.linkOpen === true);
-      });
-      showPanel(panel, ui.linkOpen === true);
-      return {
-        button,
-        panel,
-        dispose() {
-          clearTimeout(tipTimer);
-          clearTimeout(iconTimer);
-        }
-      };
+      return { button: iconButton("link", tr("Video link", "视频链接"), "is-link", () => openLinkDialog(ctx)) };
     }
   };
 
@@ -2855,9 +3483,10 @@
     }
     return false;
   }
-  function scrollerFor(target, root, dx, dy) {
+  function scrollerFor(target, roots, dx, dy) {
     let el = target instanceof Element ? target : null;
-    if (!el || !root.contains(el))
+    const root = el ? roots.find((r) => r.contains(el)) : undefined;
+    if (!el || !root)
       return null;
     while (el) {
       if (canScroll(el, dx, dy))
@@ -2868,15 +3497,12 @@
     }
     return null;
   }
-  function createScrollLock(getRoot, getKeyTarget) {
+  function createScrollLock(getRoots, getKeyTarget) {
     let locked = false;
     let touchX = 0;
     let touchY = 0;
     const onWheel = (ev) => {
-      const root = getRoot();
-      if (!root)
-        return;
-      if (!scrollerFor(ev.target, root, ev.deltaX, ev.deltaY))
+      if (!scrollerFor(ev.target, getRoots(), ev.deltaX, ev.deltaY))
         ev.preventDefault();
     };
     const onTouchStart = (ev) => {
@@ -2887,15 +3513,14 @@
       }
     };
     const onTouchMove = (ev) => {
-      const root = getRoot();
       const t = ev.touches[0];
-      if (!root || !t)
+      if (!t)
         return;
       const dx = touchX - t.clientX;
       const dy = touchY - t.clientY;
       touchX = t.clientX;
       touchY = t.clientY;
-      if (!scrollerFor(ev.target, root, dx, dy))
+      if (!scrollerFor(ev.target, getRoots(), dx, dy))
         ev.preventDefault();
     };
     const onKey = (ev) => {
@@ -2908,8 +3533,7 @@
         return;
       ev.preventDefault();
       const pane = getKeyTarget();
-      const root = getRoot();
-      if (!pane || !root)
+      if (!pane)
         return;
       const page = Math.max(40, pane.clientHeight * 0.9);
       switch (ev.key) {
@@ -2964,24 +3588,33 @@
   function storageModeLabel() {
     return getMode() === "gm" ? tr("GM Storage", "GM 存储") : tr("Browser storage", "浏览器本地存储");
   }
+  function versionFooter() {
+    const link = (href, text) => h("a", { class: "ysrp-version-link", href, target: "_blank", rel: "noopener noreferrer", text });
+    const hash = COMMIT && COMMIT !== "dev" ? link(`${HOMEPAGE_URL}/commit/${COMMIT}`, `(${COMMIT})`) : h("span", { text: `(${COMMIT || "dev"})` });
+    return h("div", { class: "ysrp-nav-footer" }, h("div", { class: "ysrp-version-line" }, link(HOMEPAGE_URL, "Video Memory"), ` • ${VERSION_SHORT} • `, hash), h("div", { class: "ysrp-version-line", text: `${IS_DEV_BUILD ? "Development" : "Production"} • Userscript` }));
+  }
 
   class SettingsModal {
     backdrop = null;
     root = null;
     navGroups = null;
     headingEl = null;
+    infoEl = null;
     badgeEl = null;
     spinnerEl = null;
     panesEl = null;
     panes = new Map;
     active = "records";
     opened = false;
-    dialogs = [];
     spinUntil = 0;
     spinTimer = 0;
     disposers = [];
     languageTimer = 0;
-    scrollLock = createScrollLock(() => this.root, () => this.activePane());
+    scrollLock = createScrollLock(() => [this.root, ...dialogLayers()].filter((el) => Boolean(el)), () => {
+      const layers = dialogLayers();
+      const top = layers.length ? layers[layers.length - 1].querySelector(".ysrp-dialog") : null;
+      return top || this.activePane();
+    });
     start() {
       this.disposers.push(tabsChanged.on(() => this.onTabsChanged()));
       const onLanguage = () => {
@@ -2992,14 +3625,11 @@
       document.addEventListener(EVT_LANGUAGE, onLanguage);
       this.disposers.push(() => document.removeEventListener(EVT_LANGUAGE, onLanguage));
       const onKey = (ev) => {
-        if (!this.opened || ev.key !== "Escape")
+        if (!this.opened || ev.key !== "Escape" || hasDialogs())
           return;
         ev.preventDefault();
         ev.stopPropagation();
-        if (this.dialogs.length)
-          this.dialogs[this.dialogs.length - 1]();
-        else
-          this.close();
+        this.close();
       };
       document.addEventListener("keydown", onKey, true);
       this.disposers.push(() => document.removeEventListener("keydown", onKey, true));
@@ -3012,9 +3642,6 @@
     }
     isOpen() {
       return this.opened;
-    }
-    activeTab() {
-      return this.active;
     }
     activePane() {
       return this.panes.get(this.active)?.el || null;
@@ -3040,33 +3667,11 @@
     close() {
       if (!this.opened)
         return;
-      while (this.dialogs.length)
-        this.dialogs[this.dialogs.length - 1]();
+      closeAllDialogs();
       this.opened = false;
       this.backdrop?.classList.remove("is-open");
       this.root?.classList.remove("is-open");
       this.scrollLock.unlock();
-    }
-    openDialog(content, onClose) {
-      if (!this.root)
-        return () => {};
-      const overlay = h("div", { class: "ysrp-dialog-overlay" }, content);
-      let closed = false;
-      const close = () => {
-        if (closed)
-          return;
-        closed = true;
-        overlay.remove();
-        this.dialogs = this.dialogs.filter((fn) => fn !== close);
-        onClose?.();
-      };
-      overlay.addEventListener("click", (ev) => {
-        if (ev.target === overlay)
-          close();
-      });
-      this.root.appendChild(overlay);
-      this.dialogs.push(close);
-      return close;
     }
     setBusy(busy) {
       if (!this.spinnerEl)
@@ -3083,10 +3688,15 @@
       this.spinTimer = window.setTimeout(() => el.classList.remove("is-active"), wait);
     }
     refreshHeader() {
-      if (!this.headingEl || !this.badgeEl)
+      if (!this.headingEl || !this.badgeEl || !this.infoEl)
         return;
       const tab = getTab(this.active);
-      this.headingEl.textContent = tab ? tab.heading ? tab.heading() : tab.label() : "";
+      const title = tab ? tab.heading ? tab.heading() : tab.label() : "";
+      this.headingEl.textContent = title;
+      this.headingEl.title = title;
+      const info = tab && tab.info ? tab.info() : "";
+      this.infoEl.replaceChildren(info ? infoHint(info) : "");
+      this.infoEl.style.display = info ? "" : "none";
       this.badgeEl.textContent = storageModeLabel();
       this.badgeEl.style.display = tab && tab.storageBadge ? "" : "none";
     }
@@ -3129,20 +3739,22 @@
       });
       this.backdrop = backdrop;
       this.navGroups = h("div", { class: "ysrp-nav-groups" });
-      const footer = h("div", { class: "ysrp-nav-footer" }, h("a", { href: HOMEPAGE_URL, target: "_blank", rel: "noopener noreferrer", text: "Video Memory" }), h("span", { text: ` • ${VERSION_SHORT}` }));
-      const nav = h("nav", { class: "ysrp-nav", attrs: { "aria-label": tr("Settings sections", "设置分区") } }, this.navGroups, footer);
+      const nav = h("nav", { class: "ysrp-nav", attrs: { "aria-label": tr("Settings sections", "设置分区") } }, this.navGroups, versionFooter());
       this.headingEl = h("h3", { class: "ysrp-heading" });
+      this.infoEl = h("span", { class: "ysrp-header-info" });
       this.badgeEl = h("span", { class: "ysrp-badge" });
       this.spinnerEl = h("span", { class: "ysrp-refresh", title: tr("Refreshing…", "正在更新列表…") }, icon("arrows-rotate", "fa-spin"));
-      const closeBtn = h("button", { class: "ysrp-close", type: "button", title: tr("Close", "关闭"), attrs: { "aria-label": tr("Close", "关闭") } }, icon("xmark"));
+      const closeBtn = button("", { variant: "tertiary", cls: "is-square ysrp-close", title: tr("Close", "关闭") });
+      closeBtn.replaceChildren(icon("xmark"));
+      closeBtn.setAttribute("aria-label", tr("Close", "关闭"));
       closeBtn.addEventListener("click", (ev) => {
         ev.preventDefault();
         this.close();
       });
-      const header = h("div", { class: "ysrp-header" }, h("div", { class: "ysrp-header-left" }, this.headingEl, this.badgeEl, this.spinnerEl), closeBtn);
+      const header = h("div", { class: "ysrp-header" }, h("div", { class: "ysrp-header-left" }, this.headingEl, this.infoEl, this.badgeEl, this.spinnerEl), closeBtn);
       this.panesEl = h("div", { class: `ysrp-panes ${CLS_MODAL_BODY}` });
       const main = h("div", { class: "ysrp-main" }, header, this.panesEl);
-      const root = h("div", { class: CLS_MODAL, attrs: { role: "dialog", "aria-modal": "true" } }, nav, main);
+      const root = h("div", { class: `ysrp-ui ${CLS_MODAL}`, attrs: { role: "dialog", "aria-modal": "true" } }, nav, main);
       root.addEventListener("keydown", (ev) => ev.stopPropagation());
       root.addEventListener("keyup", (ev) => ev.stopPropagation());
       root.addEventListener("keypress", (ev) => ev.stopPropagation());
@@ -3264,38 +3876,54 @@
     });
   }
   function modeName(mode) {
-    return mode === "gm" ? tr("GM storage", "GM 存储") : tr("localStorage", "localStorage");
+    return mode === "gm" ? tr("GM storage", "GM 存储") : tr("Browser storage", "浏览器本地存储");
+  }
+  function modeHint(mode) {
+    if (mode === "gm") {
+      return gmAvailable ? tr("Tampermonkey-backed storage that can sync across profiles.", "由 Tampermonkey 提供、可在配置间同步的存储。") : tr("GM storage is not available in this userscript manager.", "当前脚本管理器不提供 GM 存储。");
+    }
+    return tr("Fast storage scoped to this browser profile.", "快速、仅在本浏览器配置中可用的存储。");
   }
   function createStorageTab() {
     return {
       id: "storage",
       group: "main",
       order: 20,
-      icon: "gear",
+      icon: "database",
       label: () => tr("Storage", "存储"),
+      info: () => tr("Choose where progress is stored, and back it up or restore it as JSON.", "选择进度的存储位置，并以 JSON 备份或恢复记录。"),
       storageBadge: true,
       render(pane) {
-        const backendMsg = messageLine();
-        const choices = choiceGroup("ysrp-storage-mode", [
-          { value: "local", tag: tr("LOCAL", "本地"), label: tr("localStorage (default)", "localStorage（默认）"), hint: tr("Fast storage scoped to this browser profile.", "快速、本地浏览器可用的存储。") },
-          {
-            value: "gm",
-            tag: "GM",
-            label: tr("GM storage", "GM 存储"),
-            hint: gmAvailable ? tr("Tampermonkey-backed storage that can sync across profiles.", "由 Tampermonkey 提供、可在配置间同步的存储。") : tr("Not available in this userscript manager.", "当前脚本管理器不提供 GM 存储。"),
-            disabled: !gmAvailable
-          }
-        ], getMode(), () => backendMsg.set(""));
-        const applyLabel = tr("Apply & Migrate", "应用并迁移");
-        const applyBtn = button(applyLabel, { icon: "right-left", title: tr("Switch storage backend and migrate data.", "切换存储方式并迁移数据。") });
-        applyBtn.addEventListener("click", (ev) => {
+        const backendMsg = messageLine("ysrp-backend-msg");
+        const mode = selectControl([
+          { value: "local", label: tr("Browser storage", "浏览器本地存储") },
+          { value: "gm", label: tr("GM storage", "GM 存储"), disabled: !gmAvailable }
+        ], getMode(), (value) => {
+          backendMsg.set("");
+          const desc = modeHint(value === "gm" ? "gm" : "local");
+          setRowDesc(locationRow, gmAvailable ? desc : `${desc} ${modeHint("gm")}`.trim());
+        }, { cls: "ysrp-storage-mode", label: tr("Storage location", "存储位置") });
+        const locationRow = settingsRow({ title: tr("Storage location", "存储位置"), desc: modeHint(getMode()), control: mode.el });
+        if (!gmAvailable)
+          setRowDesc(locationRow, `${modeHint(getMode())} ${modeHint("gm")}`);
+        const applyLabel = tr("Apply & migrate", "应用并迁移");
+        const applyBtn = button(applyLabel, { variant: "primary", cls: "ysrp-apply-migrate", title: tr("Switch storage backend and migrate data.", "切换存储方式并迁移数据。") });
+        applyBtn.addEventListener("click", async (ev) => {
           ev.preventDefault();
-          const target = choices.value() === "gm" ? "gm" : "local";
+          const target = mode.value() === "gm" ? "gm" : "local";
           const from = getMode();
           if (target === from) {
             backendMsg.set(tr("Already using {mode}.", "当前已在使用{mode}。", { mode: modeName(from) }));
             return;
           }
+          const count = countRecords();
+          const ok = await confirmDialog({
+            title: tr("Migrate records", "迁移记录"),
+            desc: tr("Move {count} record(s) from {from} to {to}? They are removed from {from} after every record has been copied and verified.", "将把 {count} 条记录从{from}移动到{to}。全部复制并校验成功后，才会从{from}中删除。", { count, from: modeName(from), to: modeName(target) }),
+            confirmLabel: tr("Migrate", "迁移")
+          });
+          if (!ok)
+            return;
           applyBtn.disabled = true;
           setButtonLabel(applyBtn, tr("Migrating...", "正在迁移..."));
           try {
@@ -3303,24 +3931,26 @@
             if (result.ok) {
               backendMsg.set(tr("Moved {count} record(s) to {mode}.", "已将 {count} 条记录迁移到{mode}。", { count: result.moved, mode: modeName(target) }), "success");
             } else {
-              choices.set(getMode());
+              mode.set(getMode());
               backendMsg.set(tr("Migration failed: {message}", "迁移失败：{message}", { message: result.error || "" }), "error");
             }
           } catch (err) {
             console.error("[Video Memory] Failed to switch storage:", err);
-            choices.set(getMode());
+            mode.set(getMode());
             backendMsg.set(tr("Migration failed: {message}", "迁移失败：{message}", { message: errorMessage(err) }), "error");
           }
+          setRowDesc(locationRow, modeHint(getMode()));
           refreshSettingsHeader();
           window.setTimeout(() => {
             applyBtn.disabled = false;
             setButtonLabel(applyBtn, applyLabel);
           }, 500);
         });
-        const backendCard = card({ icon: "database", title: tr("Storage Backend", "存储后端"), desc: tr("Choose where to store your progress data.", "选择保存进度的存储方式。") }, choices.el, h("div", { class: "ysrp-actions" }, applyBtn, h("span", { class: "ysrp-hint", text: tr("Migrates all saved records to the selected backend (moves data).", "将所有记录迁移至所选存储后端（移动数据）。") })), backendMsg.el);
-        const exportMsg = messageLine();
+        locationRow.below.style.display = "";
+        locationRow.below.append(h("div", { class: "ysrp-note", text: tr("Applying moves every saved record to the selected backend; the old copy is deleted only after all records were verified.", "应用后会把全部记录移动到所选后端；所有记录校验成功后才删除原来的副本。") }), actions(applyBtn), backendMsg.el);
+        const exportMsg = messageLine("ysrp-export-msg");
         const exportJson = () => JSON.stringify(exportData(), null, 2);
-        const copyBtn = button(tr("Copy JSON", "复制 JSON"), { icon: "copy", title: tr("Copy export JSON to clipboard", "复制导出的 JSON 到剪贴板") });
+        const copyBtn = button(tr("Copy JSON", "复制 JSON"), { variant: "secondary", cls: "ysrp-copy-json" });
         copyBtn.addEventListener("click", (ev) => {
           ev.preventDefault();
           let text;
@@ -3337,7 +3967,7 @@
             exportMsg.set(tr("Copy export failed: {message}", "复制导出失败：{message}", { message: errorMessage(err) }), "error");
           });
         });
-        const downloadBtn = button(tr("Download JSON", "下载 JSON"), { icon: "file-arrow-down", title: tr("Download export JSON as file", "下载导出的 JSON 文件") });
+        const downloadBtn = button(tr("Download JSON", "下载 JSON"), { variant: "primary", cls: "ysrp-download-json" });
         downloadBtn.addEventListener("click", async (ev) => {
           ev.preventDefault();
           try {
@@ -3356,8 +3986,8 @@
                   return;
                 }
               } catch (err) {
-                const name2 = err?.name;
-                if (name2 === "AbortError" || name2 === "NotAllowedError") {
+                const errName = err?.name;
+                if (errName === "AbortError" || errName === "NotAllowedError") {
                   exportMsg.set(tr("Share cancelled.", "已取消分享。"));
                   return;
                 }
@@ -3371,16 +4001,34 @@
             exportMsg.set(tr("Download failed: {message}", "下载失败：{message}", { message: errorMessage(err) }), "error");
           }
         });
-        const exportCard = card({ icon: "file-arrow-down", title: tr("Export Data", "导出数据"), desc: tr("Back up your saved progress as JSON.", "将保存的进度备份为 JSON。") }, h("div", { class: "ysrp-actions" }, copyBtn, downloadBtn), h("div", { class: "ysrp-hint", text: tr("Exports all saved records from the currently selected backend.", "导出当前存储后端中的所有记录。") }), exportMsg.el);
-        const importMsg = messageLine();
-        const overwrite = h("input", { type: "checkbox", class: "ysrp-overwrite", id: "ysrp-overwrite" });
-        const overwriteRow = h("div", { class: "ysrp-check-row" }, h("label", { class: "ysrp-check" }, overwrite, h("span", { text: tr("Overwrite", "覆盖") })), h("span", { class: "ysrp-hint", text: tr("Deletes all records of the current backend before importing.", "导入前先删除当前存储后端中的全部记录。") }));
-        const textarea = h("textarea", { class: "ysrp-textarea", rows: 4, placeholder: tr("Paste exported JSON here...", "在此粘贴导出的 JSON...") });
-        const runImport = (text) => {
+        const exportRow = settingsRow({
+          title: tr("Export data", "导出数据"),
+          desc: tr("Exports all saved records from the current backend as JSON.", "把当前存储后端中的所有记录导出为 JSON。"),
+          below: [actions(copyBtn, downloadBtn), exportMsg.el]
+        });
+        const importMsg = messageLine("ysrp-import-msg");
+        const overwrite = switchControl(false, () => importMsg.set(""), { cls: "ysrp-overwrite", label: tr("Overwrite existing records", "覆盖现有记录") });
+        const textarea = textArea({ placeholder: tr("Paste exported JSON here...", "在此粘贴导出的 JSON..."), cls: "ysrp-import-text" });
+        const runImport = async (text) => {
           let payload;
           try {
             payload = JSON.parse(text);
-            const count = importData(payload, { overwrite: overwrite.checked });
+          } catch (err) {
+            importMsg.set(tr("Import failed: {message}", "导入失败：{message}", { message: errorMessage(err) }), "error");
+            return;
+          }
+          if (overwrite.value()) {
+            const ok = await confirmDialog({
+              title: tr("Overwrite records", "覆盖导入"),
+              desc: tr("All {count} record(s) in {mode} are deleted before importing. This cannot be undone.", "导入前会先清空{mode}中的全部 {count} 条记录。此操作无法撤销。", { count: countRecords(), mode: modeName(getMode()) }),
+              confirmLabel: tr("Overwrite", "覆盖导入"),
+              danger: true
+            });
+            if (!ok)
+              return;
+          }
+          try {
+            const count = importData(payload, { overwrite: overwrite.value() });
             importMsg.set(tr("Imported {count} record(s).", "已导入 {count} 条记录。", { count }), "success");
             refreshSettingsHeader();
           } catch (err) {
@@ -3388,7 +4036,7 @@
             importMsg.set(tr("Import failed: {message}", "导入失败：{message}", { message: errorMessage(err) }), "error");
           }
         };
-        const importBtn = button(tr("Import from Text", "从文本导入"), { icon: "file-arrow-up", title: tr("Import from pasted JSON", "从粘贴的 JSON 导入") });
+        const importBtn = button(tr("Import from text", "从文本导入"), { variant: "primary", cls: "ysrp-import-btn" });
         importBtn.addEventListener("click", (ev) => {
           ev.preventDefault();
           const text = textarea.value.trim();
@@ -3400,11 +4048,9 @@
         });
         const noFile = tr("No file chosen", "未选择文件");
         const fileName = h("span", { class: "ysrp-file-name", text: noFile });
-        const fileInput = h("input", { type: "file", accept: "application/json,.json", class: "ysrp-file-input" });
-        const fileBox = h("label", { class: "ysrp-file", tabIndex: 0, title: tr("Select an export JSON file", "选择要导入的 JSON 文件") }, h("span", { class: "ysrp-file-label", text: tr("Choose File", "选择文件") }), fileName, fileInput);
-        fileBox.addEventListener("keydown", (ev) => {
-          if (ev.key !== "Enter" && ev.key !== " " && ev.key !== "Spacebar")
-            return;
+        const fileInput = h("input", { type: "file", accept: "application/json,.json", class: "ysrp-file-input", tabIndex: -1 });
+        const chooseBtn = button(tr("Choose file", "选择文件"), { variant: "secondary", cls: "ysrp-choose-file", title: tr("Select an export JSON file", "选择要导入的 JSON 文件") });
+        chooseBtn.addEventListener("click", (ev) => {
           ev.preventDefault();
           try {
             const picker = fileInput;
@@ -3423,9 +4069,9 @@
             return;
           }
           fileName.textContent = file.name;
-          file.text().then((text) => {
+          file.text().then(async (text) => {
             textarea.value = text || "";
-            runImport(text || "");
+            await runImport(text || "");
           }).catch((err) => {
             importMsg.set(tr("Could not read the file: {message}", "无法读取文件：{message}", { message: errorMessage(err) }), "error");
           }).finally(() => {
@@ -3433,8 +4079,17 @@
             fileName.textContent = noFile;
           });
         });
-        const importCard = card({ icon: "file-arrow-up", title: tr("Import Data", "导入数据"), desc: tr("Restore a previous export to merge or replace your saved records.", "导入之前的导出文件，用于合并或替换记录。") }, overwriteRow, textarea, h("div", { class: "ysrp-actions" }, importBtn, fileBox), h("div", { class: "ysrp-hint", text: tr("Imports records into the currently selected backend.", "将记录导入到当前选择的存储后端。") }), importMsg.el);
-        pane.append(backendCard, exportCard, importCard);
+        const overwriteRow = settingsRow({
+          title: tr("Overwrite existing records", "覆盖现有记录"),
+          desc: tr("Deletes every record of the current backend before importing.", "导入前先删除当前存储后端中的全部记录。"),
+          control: overwrite.el
+        });
+        const importRow = settingsRow({
+          title: tr("Import data", "导入数据"),
+          desc: tr("Imports records into the current backend.", "把记录导入到当前存储后端。"),
+          below: [textarea, actions(importBtn, chooseBtn, fileName, fileInput), importMsg.el]
+        });
+        pane.appendChild(h("div", { class: "ysrp-groups" }, group(tr("Storage backend", "存储后端"), locationRow.el), group(tr("Export", "导出"), exportRow.el), group(tr("Import", "导入"), overwriteRow.el, importRow.el)));
       },
       onShow() {
         refreshSettingsHeader();
@@ -3443,115 +4098,109 @@
   }
 
   // src/plugins/_core/settings/style.css
-  var style_default2 = `/* Settings modal (N-5). All sizes in px: YouTube sets html { font-size: 10px }. */
+  var style_default2 = `/* Settings modal shell (N-5.3) and tab layouts. Parts (cards, rows, dialogs…) are in src/api/ui.css.
+   All sizes in px: YouTube sets html { font-size: 10px }. */
 
 .ysrp-backdrop {
   position: fixed;
   inset: 0;
-  background: var(--ysrp-backdrop);
+  background: var(--ysrp-overlay);
   z-index: 9998;
   display: none;
 }
 .ysrp-backdrop.is-open { display: block; }
 
 .ysrp-settings-container {
-  all: initial;
   position: fixed;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
   margin: 0;
+  padding: 0;
   z-index: 9999;
-  box-sizing: border-box;
-  width: min(896px, 92vw);
-  height: min(640px, 85vh);
+  width: min(896px, calc(100vw - 32px));
+  height: min(640px, calc(100vh - 32px));
   display: none;
   flex-direction: row;
   overflow: hidden;
-  background: var(--ysrp-bg);
-  color: var(--ysrp-text);
-  border: 1px solid var(--ysrp-border);
+  background: var(--ysrp-surface-base);
+  color: var(--ysrp-fg-primary);
+  border: 1px solid var(--ysrp-border-l1);
   border-radius: 16px;
   box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
-  font-family: var(--ysrp-font);
-  font-size: 14px;
-  line-height: 1.5;
-  text-align: left;
-  -webkit-font-smoothing: antialiased;
 }
 .ysrp-settings-container.is-open { display: flex; }
-.ysrp-settings-container *,
-.ysrp-settings-container *::before,
-.ysrp-settings-container *::after { box-sizing: border-box; }
-.ysrp-settings-container,
-.ysrp-settings-container * {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(128, 128, 128, .45) transparent;
-}
-.ysrp-settings-container ::-webkit-scrollbar { width: 8px; height: 8px; }
-.ysrp-settings-container ::-webkit-scrollbar-track { background: transparent; }
-.ysrp-settings-container ::-webkit-scrollbar-thumb { background: rgba(128, 128, 128, .45); border-radius: 8px; }
-.ysrp-settings-container ::-webkit-scrollbar-corner { background: transparent; }
 
-/* ---------------------------------------------------------------- navigation */
+/* ---------------------------------------------------------------- N-5.3.5 navigation */
 .ysrp-nav {
-  flex: 0 0 208px;
-  width: 208px;
+  position: relative;
+  flex: 0 0 224px;
+  width: 224px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  padding: 16px 12px 12px;
-  background: var(--ysrp-nav-bg);
-  border-right: 1px solid var(--ysrp-border);
+  padding: 12px 12px 56px;
+  background: var(--ysrp-surface-base);
+  border-right: 1px solid var(--ysrp-border-l1);
   overflow-y: auto;
-  overscroll-behavior: contain;
 }
-.ysrp-nav-groups { display: flex; flex-direction: column; gap: 16px; }
+.ysrp-nav-groups { display: flex; flex-direction: column; gap: 8px; }
 .ysrp-nav-group { display: flex; flex-direction: column; gap: 2px; }
 .ysrp-nav-title {
+  padding: 8px;
   font-size: 12px;
   font-weight: 500;
-  color: var(--ysrp-text-3);
-  padding: 0 10px 4px;
+  line-height: 16px;
+  color: var(--ysrp-fg-tertiary);
 }
 .ysrp-tab {
-  all: unset;
-  box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+  width: 100%;
   height: 36px;
-  padding: 0 10px;
-  border-radius: 10px;
+  margin: 0;
+  padding: 0 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ysrp-fg-secondary);
   font-family: var(--ysrp-font);
   font-size: 14px;
-  font-weight: 500;
-  color: var(--ysrp-text-2);
+  line-height: 20px;
+  text-align: left;
   cursor: pointer;
-  white-space: nowrap;
+  transition: background-color 150ms, color 150ms;
 }
-.ysrp-tab:hover { background: var(--ysrp-hover); color: var(--ysrp-text); }
-.ysrp-tab.is-active { background: var(--ysrp-layer); color: var(--ysrp-text); }
-.ysrp-tab:focus-visible { outline: 2px solid var(--ysrp-border-strong); outline-offset: -2px; }
-.ysrp-tab-icon { flex: 0 0 16px; width: 16px; text-align: center; font-size: 13px; }
-.ysrp-tab-label { overflow: hidden; text-overflow: ellipsis; }
+.ysrp-tab:hover { background: var(--ysrp-surface-l2); }
+.ysrp-tab.is-active { background: var(--ysrp-surface-l2); color: var(--ysrp-fg-primary); font-weight: 500; }
+.ysrp-tab-icon { display: inline-flex; justify-content: center; flex: 0 0 16px; width: 16px; font-size: 16px; }
+.ysrp-tab-icon i { font-size: 16px; }
+.ysrp-tab-label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ysrp-tab:focus-visible { outline: 2px solid var(--ysrp-border-l2); outline-offset: -2px; }
 .ysrp-nav-footer {
-  margin-top: auto;
-  font-size: 11px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 12px;
   opacity: .3;
-  overflow-wrap: anywhere;
-  padding: 0 10px;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--ysrp-fg-secondary);
+  user-select: text;
+  -webkit-user-select: text;
 }
-.ysrp-nav-footer a { color: inherit; text-decoration: none; }
-.ysrp-nav-footer a:hover { text-decoration: underline; }
+.ysrp-version-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ysrp-version-link { color: inherit; text-decoration: none; }
+.ysrp-version-link:hover { text-decoration: underline; }
 
-/* ---------------------------------------------------------------- right column */
+/* ---------------------------------------------------------------- N-5.3.6 right column */
 .ysrp-main {
   flex: 1 1 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  padding: 20px 24px 16px;
+  padding: 20px 20px 16px;
 }
 .ysrp-header {
   flex: 0 0 32px;
@@ -3565,483 +4214,86 @@
 .ysrp-header-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .ysrp-heading {
   margin: 0;
+  font-family: var(--ysrp-font);
   font-size: 18px;
   font-weight: 600;
-  line-height: 1.3;
-  color: var(--ysrp-text);
+  line-height: 28px;
+  color: var(--ysrp-fg-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
+.ysrp-header-info { display: inline-flex; align-items: center; }
 .ysrp-badge {
   flex: 0 0 auto;
   font-size: 12px;
-  line-height: 18px;
-  color: var(--ysrp-text-2);
-  border: 1px solid var(--ysrp-border-strong);
-  border-radius: 999px;
-  padding: 0 8px;
+  line-height: 16px;
+  color: var(--ysrp-fg-secondary);
+  border: 1px solid var(--ysrp-border-l1);
+  border-radius: 6px;
+  padding: 2px 6px;
   white-space: nowrap;
 }
-.ysrp-refresh { display: none; color: var(--ysrp-text-2); font-size: 13px; }
+.ysrp-refresh { display: none; font-size: 14px; color: var(--ysrp-fg-tertiary); }
 .ysrp-refresh.is-active { display: inline-flex; }
-.ysrp-close {
-  all: unset;
-  box-sizing: border-box;
-  flex: 0 0 32px;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--ysrp-text-2);
-  cursor: pointer;
-  font-size: 16px;
-}
-.ysrp-close:hover { background: var(--ysrp-hover); color: var(--ysrp-text); }
-.ysrp-panes {
-  flex: 1 1 auto;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  margin-right: -24px;
-}
+.ysrp-close { flex: 0 0 auto; width: 32px; height: 32px; }
+.ysrp-close i { font-size: 16px; }
+
+/* N-5.2.16 scroll area: extends 20px to each side with the same padding, scrollbar at the edge */
+.ysrp-panes { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
 .ysrp-pane {
   display: none;
   flex: 1 1 auto;
   min-height: 0;
-  flex-direction: column;
-  gap: 12px;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding-right: 24px;
-  padding-bottom: 4px;
+  margin: 0 -20px;
+  padding: 0 20px 4px;
 }
-.ysrp-pane.is-active { display: flex; }
-.ysrp-pane > * { flex-shrink: 0; }
-.ysrp-tab-intro { color: var(--ysrp-text-2); }
+.ysrp-pane.is-active { display: block; }
+.ysrp-pane-stack { display: flex; flex-direction: column; gap: 16px; }
 
-/* ---------------------------------------------------------------- controls */
-.ysrp-btn {
-  all: unset;
-  box-sizing: border-box;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  height: 36px;
-  padding: 0 16px;
-  border: 1px solid var(--ysrp-border-strong);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--ysrp-text);
-  font-family: var(--ysrp-font);
-  font-size: 14px;
-  font-weight: 500;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: background .15s ease, color .15s ease, border-color .15s ease;
-}
-.ysrp-btn.is-small { height: 30px; padding: 0 12px; font-size: 13px; }
-.ysrp-btn:hover { background: var(--ysrp-hover); }
-.ysrp-btn:focus-visible { box-shadow: 0 0 0 2px var(--ysrp-border-strong); }
-.ysrp-btn:disabled { opacity: .5; cursor: default; }
-.ysrp-btn.is-danger { color: var(--ysrp-error); border-color: var(--ysrp-error); }
+/* ---------------------------------------------------------------- records tab (N-5.4) */
+.ysrp-record .ysrp-card-desc { -webkit-line-clamp: 2; }
+.ysrp-record-title { cursor: default; }
+.ysrp-link-input { cursor: text; }
+.ysrp-transcript-dialog .ysrp-dialog-body { min-height: 0; }
+.ysrp-transcript-text { flex: 1 1 auto; min-height: 200px; }
+.ysrp-transcript-status { font-size: 13px; line-height: 20px; color: var(--ysrp-fg-secondary); }
+.ysrp-transcript-status.is-error { color: var(--ysrp-fg-danger); }
+.ysrp-transcript-status.is-success { color: var(--ysrp-fg-success); }
 
-.ysrp-ibtn {
-  all: unset;
-  box-sizing: border-box;
-  flex: 0 0 30px;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--ysrp-text-2);
-  font-size: 14px;
-  cursor: pointer;
-  transition: background .15s ease, color .15s ease;
-}
-.ysrp-ibtn:hover { background: var(--ysrp-hover); color: var(--ysrp-text); }
-.ysrp-ibtn:focus-visible { box-shadow: 0 0 0 2px var(--ysrp-border-strong); }
-.ysrp-ibtn:disabled { opacity: .5; cursor: default; }
-.ysrp-ibtn.is-delete:hover { color: var(--ysrp-error); }
-.ysrp-ibtn.is-success, .ysrp-ibtn.is-success:hover { color: var(--ysrp-success); }
-.ysrp-ibtn.has-content { color: var(--ysrp-text); }
-.ysrp-da[data-state="pending"] { filter: grayscale(1); opacity: .4; }
-.ysrp-da.is-off { filter: grayscale(1); opacity: .6; }
-
-.ysrp-input,
-.ysrp-select,
-.ysrp-textarea {
-  box-sizing: border-box;
-  width: 100%;
-  height: 36px;
-  margin: 0;
-  padding: 0 12px;
-  border: 1px solid var(--ysrp-border);
-  border-radius: 10px;
-  background: var(--ysrp-bg);
-  color: var(--ysrp-text);
-  font-family: var(--ysrp-font);
-  font-size: 14px;
-  line-height: 1.5;
-  outline: none;
-  transition: border-color .15s ease, box-shadow .15s ease;
-}
-.ysrp-select { width: auto; padding-right: 8px; cursor: pointer; }
-.ysrp-textarea {
-  height: auto;
-  min-height: 72px;
-  padding: 8px 12px;
-  resize: vertical;
-  display: block;
-}
-.ysrp-input::placeholder, .ysrp-textarea::placeholder { color: var(--ysrp-text-3); }
-.ysrp-input:focus, .ysrp-select:focus, .ysrp-textarea:focus {
-  border-color: var(--ysrp-border-strong);
-  box-shadow: 0 0 0 2px var(--ysrp-hover);
-}
-
-.ysrp-switch {
-  all: unset;
-  box-sizing: border-box;
-  position: relative;
-  flex: 0 0 36px;
-  width: 36px;
-  height: 20px;
-  border-radius: 999px;
-  background: var(--ysrp-border-strong);
-  cursor: pointer;
-  transition: background .15s ease;
-}
-.ysrp-switch-knob {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 16px;
-  height: 16px;
-  border-radius: 50%;
-  background: #ffffff;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, .3);
-  transition: left .15s ease, background .15s ease;
-}
-.ysrp-switch.is-on { background: var(--ysrp-text); }
-.ysrp-switch.is-on .ysrp-switch-knob { left: 18px; background: var(--ysrp-bg); }
-.ysrp-switch:disabled { opacity: .5; cursor: not-allowed; }
-.ysrp-switch:focus-visible { box-shadow: 0 0 0 2px var(--ysrp-border-strong); }
-
-.ysrp-sep { border: none; border-top: 1px solid var(--ysrp-border); margin: 0; width: 100%; height: 0; }
-.ysrp-empty { color: var(--ysrp-text-3); text-align: center; padding: 16px; }
-.ysrp-hint { color: var(--ysrp-text-2); font-size: 13px; }
-
-/* ---------------------------------------------------------------- cards */
-.ysrp-card {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 16px;
-  border: 1px solid var(--ysrp-border);
-  border-radius: 16px;
-  background: var(--ysrp-card);
-}
-.ysrp-card-head { display: flex; align-items: center; gap: 10px; }
-.ysrp-card-icon {
-  flex: 0 0 28px;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: var(--ysrp-layer);
-  color: var(--ysrp-text);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 13px;
-}
-.ysrp-card-title { font-size: 15px; font-weight: 600; }
-.ysrp-card-desc { color: var(--ysrp-text-2); margin-top: -6px; }
-.ysrp-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-
-.ysrp-choices { display: flex; flex-direction: column; gap: 8px; }
-.ysrp-choice {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  border: 1px solid var(--ysrp-border);
-  border-radius: 12px;
-  cursor: pointer;
-  transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
-}
-.ysrp-choice:hover { background: var(--ysrp-hover); }
-.ysrp-choice.is-selected { border-color: var(--ysrp-text); box-shadow: 0 0 0 1px var(--ysrp-text); }
-.ysrp-choice.is-disabled { opacity: .5; cursor: not-allowed; }
-.ysrp-choice-radio { display: none; }
-.ysrp-choice-tag {
-  flex: 0 0 auto;
-  font-size: 12px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--ysrp-layer);
-  color: var(--ysrp-text);
-}
-.ysrp-choice.is-selected .ysrp-choice-tag { background: var(--ysrp-text); color: var(--ysrp-bg); }
-.ysrp-choice-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.ysrp-choice-label { font-weight: 600; }
-.ysrp-choice-hint { font-size: 13px; color: var(--ysrp-text-2); }
-
-.ysrp-msg { display: none; font-size: 13px; color: var(--ysrp-text-2); }
-.ysrp-msg.is-visible { display: block; }
-.ysrp-msg.is-success { color: var(--ysrp-success); }
-.ysrp-msg.is-error { color: var(--ysrp-error); }
-
-.ysrp-check-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
-  padding: 8px 12px;
-  border-radius: 12px;
-  background: var(--ysrp-layer);
-}
-.ysrp-check { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
-.ysrp-overwrite { width: 16px; height: 16px; margin: 0; accent-color: var(--ysrp-text); cursor: pointer; }
-
-.ysrp-file {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  flex: 1 1 220px;
-  min-width: 0;
-  height: 36px;
-  padding: 0 14px;
-  border: 1px dashed var(--ysrp-border-strong);
-  border-radius: 999px;
-  cursor: pointer;
-}
-.ysrp-file:hover, .ysrp-file:focus-within { background: var(--ysrp-hover); }
-.ysrp-file-label { font-weight: 600; white-space: nowrap; }
-.ysrp-file-name { flex: 1 1 auto; min-width: 0; color: var(--ysrp-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ysrp-file { position: relative; }
-.ysrp-file:focus-visible { outline: 2px solid var(--ysrp-border-strong); outline-offset: 2px; }
-/* Visually hidden but still activatable through the label (works on iOS Safari too). */
-.ysrp-file-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; left: 0; top: 0; }
-
-.ysrp-field { display: flex; flex-direction: column; gap: 6px; max-width: 560px; }
-.ysrp-field-label { font-size: 13px; font-weight: 500; color: var(--ysrp-text-2); }
-.ysrp-field-hint { font-size: 12px; color: var(--ysrp-text-3); }
-.ysrp-fields { display: flex; flex-direction: column; gap: 12px; }
-.ysrp-secret { display: flex; gap: 8px; align-items: center; }
-.ysrp-secret .ysrp-input { flex: 1 1 auto; min-width: 0; }
-.ysrp-secret .ysrp-btn { height: 36px; }
-
-.ysrp-info {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px 14px;
-  border-radius: 12px;
-  background: var(--ysrp-layer);
-}
-.ysrp-info-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
-.ysrp-info-label { flex: 0 0 140px; font-size: 12px; font-weight: 600; color: var(--ysrp-text-2); }
-.ysrp-info-value { min-width: 0; overflow-wrap: anywhere; }
-.ysrp-mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 12px;
-  padding: 1px 6px;
-  border-radius: 6px;
-  background: var(--ysrp-hover);
-}
-.ysrp-steps { margin: 0; padding-left: 20px; color: var(--ysrp-text-2); display: flex; flex-direction: column; gap: 4px; }
-.ysrp-steps a { color: var(--ysrp-text); }
-
-/* ---------------------------------------------------------------- records */
-.ysrp-records {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  width: 100%;
-}
-.ysrp-row {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 8px 10px 8px 14px;
-  border: 1px solid var(--ysrp-border);
-  border-radius: 14px;
-  background: var(--ysrp-card);
-}
-.ysrp-row.is-current { border-color: var(--ysrp-border-strong); }
-.ysrp-row.is-current::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 10px;
-  bottom: 10px;
-  width: 3px;
-  border-radius: 0 3px 3px 0;
-  background: var(--ysrp-text);
-}
-.ysrp-row-top { display: flex; align-items: center; gap: 2px; min-height: 30px; }
-.ysrp-pct {
-  flex: 0 0 auto;
-  min-width: 52px;
-  margin-right: 8px;
-  text-align: right;
-  font-size: 13px;
-  color: var(--ysrp-text-2);
-  font-variant-numeric: tabular-nums;
-}
-.ysrp-title { flex: 1 1 auto; min-width: 0; word-break: break-word; font-weight: 500; margin-right: 4px; }
-.ysrp-empty-row { color: var(--ysrp-text-3); text-align: center; padding: 24px; }
-.ysrp-panel {
-  display: none;
-  flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
-  border: 1px solid var(--ysrp-border);
-  border-radius: 12px;
-  background: var(--ysrp-bg);
-}
-.ysrp-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-.ysrp-panel-label { font-size: 12px; font-weight: 600; color: var(--ysrp-text-2); }
-.ysrp-panel-tools { display: inline-flex; align-items: center; gap: 2px; }
-.ysrp-panel-status { font-size: 12px; color: var(--ysrp-text-2); }
-.ysrp-panel-status.is-error { color: var(--ysrp-error); }
-.ysrp-panel-status.is-success { color: var(--ysrp-success); }
-.ysrp-url { position: relative; flex-direction: row; align-items: center; gap: 2px; padding: 4px 4px 4px 12px; }
-.ysrp-url-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-size: 13px;
-  color: var(--ysrp-text-2);
-}
-.ysrp-copied {
-  position: absolute;
-  right: 72px;
-  top: 50%;
-  transform: translateY(-50%);
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-size: 12px;
-  background: var(--ysrp-text);
-  color: var(--ysrp-bg);
-  opacity: 0;
-  transition: opacity .3s ease;
-  pointer-events: none;
-}
-.ysrp-copied.is-visible { opacity: 1; }
-.ysrp-copied.is-error { background: var(--ysrp-error); }
-.ysrp-note-text { white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
-.ysrp-note-text.is-empty { color: var(--ysrp-text-3); font-style: italic; }
-.ysrp-note-input { min-height: 60px; overflow: hidden; }
-.ysrp-transcript-text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; min-height: 96px; }
-
-/* ---------------------------------------------------------------- plugins tab */
-.ysrp-searchbar { display: flex; gap: 8px; }
-.ysrp-searchbar .ysrp-search { flex: 1 1 auto; min-width: 0; }
-.ysrp-plugins { display: flex; flex-direction: column; gap: 12px; }
-.ysrp-plugin-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.ysrp-plugin {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px 14px;
-  border: 1px solid var(--ysrp-border);
-  border-radius: 16px;
-  background: var(--ysrp-card);
-  transition: border-color .15s ease, opacity .15s ease;
-}
-.ysrp-plugin:hover { border-color: var(--ysrp-border-strong); }
+/* ---------------------------------------------------------------- plugins tab (N-5.5) */
 .ysrp-plugin.is-core { opacity: .4; }
 .ysrp-plugin.is-core:hover { opacity: .7; }
-.ysrp-plugin-head { display: flex; align-items: center; gap: 10px; min-height: 30px; }
-.ysrp-plugin-name { flex: 0 1 auto; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ysrp-core-mark { color: var(--ysrp-text-3); font-size: 12px; }
-.ysrp-plugin-tools { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
-.ysrp-plugin-desc {
-  font-size: 13px;
-  line-height: 1.4;
-  color: var(--ysrp-text-2);
-  height: 36px;
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-}
-.ysrp-plugin-authors { font-size: 12px; color: var(--ysrp-text-3); }
+.ysrp-plugin.is-failed { opacity: .5; border-color: var(--ysrp-danger-border); }
+.ysrp-core-sep { margin: 4px 0; }
+.ysrp-plugin-settings { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; min-height: 0; }
 
-/* ---------------------------------------------------------------- sub dialog */
-.ysrp-dialog-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 5;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  background: var(--ysrp-backdrop);
-}
-.ysrp-dialog {
-  position: relative;
-  width: min(512px, 100%);
-  max-height: 100%;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 24px;
-  border: 1px solid var(--ysrp-border);
-  border-radius: 16px;
-  background: var(--ysrp-bg);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
-}
-.ysrp-dialog > * { flex-shrink: 0; }
-.ysrp-dialog-close { position: absolute; top: 16px; right: 16px; }
-.ysrp-dialog-title { font-size: 18px; font-weight: 600; padding-right: 40px; }
-.ysrp-dialog-desc { color: var(--ysrp-text-2); }
-.ysrp-dialog-subtitle { font-size: 12px; font-weight: 600; color: var(--ysrp-text-3); margin-top: 4px; }
-.ysrp-setting-list { display: flex; flex-direction: column; border: 1px solid var(--ysrp-border); border-radius: 14px; }
-.ysrp-setting-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; }
-.ysrp-setting-row + .ysrp-setting-row { border-top: 1px solid var(--ysrp-border); }
-.ysrp-setting-row.is-stacked { flex-direction: column; align-items: stretch; }
-.ysrp-setting-label { font-weight: 500; }
-.ysrp-setting-desc { font-size: 12px; color: var(--ysrp-text-2); }
-.ysrp-dialog-footer { display: flex; justify-content: flex-end; }
+/* ---------------------------------------------------------------- storage tab (N-5.7.1) */
+.ysrp-file-name { font-size: 12px; color: var(--ysrp-fg-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
+.ysrp-file-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.ysrp-steps { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; line-height: 1.5; color: var(--ysrp-fg-secondary); }
+.ysrp-steps a { color: var(--ysrp-fg-primary); }
+.ysrp-info-lines { display: flex; flex-direction: column; gap: 4px; font-size: 12px; line-height: 16px; color: var(--ysrp-fg-secondary); }
 
-/* ---------------------------------------------------------------- narrow screens (N-5.2.3) */
+/* ---------------------------------------------------------------- N-5.3.7 narrow screens */
 @media (max-width: 640px) {
-  .ysrp-settings-container { width: 94vw; height: 88vh; flex-direction: column; }
+  .ysrp-settings-container.is-open { flex-direction: column; }
   .ysrp-nav {
     flex: 0 0 auto;
     width: auto;
-    flex-direction: row;
-    padding: 8px;
+    padding: 8px 12px;
+    border-right: none;
+    border-bottom: 1px solid var(--ysrp-border-l1);
     overflow-x: auto;
     overflow-y: hidden;
-    border-right: none;
-    border-bottom: 1px solid var(--ysrp-border);
   }
-  .ysrp-nav-groups, .ysrp-nav-group { flex-direction: row; gap: 2px; }
+  .ysrp-nav-groups, .ysrp-nav-group { flex-direction: row; }
   .ysrp-nav-title, .ysrp-nav-footer { display: none; }
-  .ysrp-tab { flex: 0 0 auto; }
-  .ysrp-main { padding: 16px; }
-  .ysrp-panes { margin-right: -16px; }
-  .ysrp-pane { padding-right: 16px; }
-  .ysrp-plugin-grid { grid-template-columns: minmax(0, 1fr); }
-  .ysrp-info-label { flex-basis: auto; }
+  .ysrp-tab { width: auto; flex: 0 0 auto; }
+  .ysrp-main { padding: 16px 16px 12px; }
+  .ysrp-pane { margin: 0 -16px; padding: 0 16px 4px; }
 }
 `;
 
@@ -4071,7 +4323,7 @@
       ctx.addTab(createRecordsTab((busy) => modal.setBusy(busy)));
       ctx.addTab(createStorageTab());
       ctx.addTab(createDisplayTab());
-      ctx.addTab(createPluginsTab((content, onClose) => modal.openDialog(content, onClose)));
+      ctx.addTab(createPluginsTab());
       ctx.addRowButton(noteContribution);
       ctx.addRowButton(linkContribution);
     }
@@ -4720,21 +4972,23 @@
         order: 30,
         icon: "cloud",
         label: () => tr("Drive sync", "云同步"),
+        info: () => tr("Sync every video record to a folder in your own Google Drive.", "把每个视频的记录同步到你自己的 Google Drive 文件夹。"),
         render(pane) {
           const creds = readCredentials();
-          const clientId = h("input", { class: "ysrp-input", type: "text", value: creds.clientId, placeholder: "xxxx.apps.googleusercontent.com", autocomplete: "off", spellcheck: false });
-          const clientSecret = h("input", { class: "ysrp-input", type: "password", value: creds.clientSecret, autocomplete: "new-password", spellcheck: false });
-          const refreshToken = h("input", { class: "ysrp-input", type: "password", value: creds.refreshToken, autocomplete: "new-password", spellcheck: false });
-          const labels = { show: tr("Show", "显示"), hide: tr("Hide", "隐藏") };
-          const status = messageLine();
-          const result = messageLine();
+          const clientId = textInput({ value: creds.clientId, placeholder: "xxxx.apps.googleusercontent.com", field: "clientId" });
+          const clientSecret = textInput({ type: "password", value: creds.clientSecret, field: "clientSecret" });
+          const refreshToken = textInput({ type: "password", value: creds.refreshToken, field: "refreshToken" });
+          const status = messageLine("ysrp-drive-status");
+          const result = messageLine("ysrp-drive-result");
+          status.el.classList.add("is-visible");
           const renderStatus = (s) => {
             const { text, tone } = statusText(sync, s);
             status.set(text, tone);
+            status.el.classList.add("is-visible");
           };
           statusListeners.add(renderStatus);
           renderStatus(sync.status);
-          const saveBtn = button(tr("Save & verify", "保存并验证"), { icon: "check" });
+          const saveBtn = button(tr("Save & verify", "保存并验证"), { variant: "primary", cls: "ysrp-drive-save" });
           saveBtn.addEventListener("click", async (ev) => {
             ev.preventDefault();
             saveCredentials({ clientId: clientId.value, clientSecret: clientSecret.value, refreshToken: refreshToken.value });
@@ -4757,7 +5011,7 @@
               saveBtn.disabled = false;
             }
           });
-          const uploadAll = button(tr("Upload all", "全部上传"), { icon: "cloud-arrow-up" });
+          const uploadAll = button(tr("Upload all", "全部上传"), { variant: "secondary", cls: "ysrp-drive-upload-all" });
           uploadAll.addEventListener("click", (ev) => {
             ev.preventDefault();
             if (!sync.configured()) {
@@ -4767,7 +5021,7 @@
             result.set("");
             sync.uploadAll();
           });
-          pane.append(card({ icon: "cloud", title: tr("Google Drive sync", "Google Drive 同步"), desc: tr('Each video is stored as "<title>｜<id>.json" in the "[Youtube] Video Memory" folder of your Drive.', "每个视频以“<标题>｜<id>.json”保存在你的云端硬盘“[Youtube] Video Memory”文件夹中。") }, status.el, h("div", { class: "ysrp-fields" }, field(tr("Client ID", "客户端 ID"), clientId), field(tr("Client secret", "客户端密钥"), secretInput(clientSecret, labels)), field(tr("Refresh token", "Refresh token"), secretInput(refreshToken, labels))), h("div", { class: "ysrp-actions" }, saveBtn, uploadAll), result.el), card({ icon: "circle-question", title: tr("How to get credentials", "如何获取凭据") }, h("ol", { class: "ysrp-steps" }, h("li", { text: tr('In Google Cloud Console create a project and an OAuth client (type "Web application"); add https://developers.google.com/oauthplayground as a redirect URI.', "在 Google Cloud Console 新建项目和 OAuth 客户端（类型“Web 应用”），把 https://developers.google.com/oauthplayground 加为重定向 URI。") }), h("li", { text: tr("Enable the Google Drive API for the project.", "为该项目启用 Google Drive API。") }), h("li", { text: tr('Open the OAuth 2.0 Playground, tick "Use your own OAuth credentials", authorise the https://www.googleapis.com/auth/drive scope and exchange the code for a refresh token.', "打开 OAuth 2.0 Playground，勾选“Use your own OAuth credentials”，授权 https://www.googleapis.com/auth/drive 范围，然后用授权码换取 refresh token。") }), h("li", {}, tr("Paste the three values above and click “Save & verify”. More: ", "把三项填到上面并点“保存并验证”。更多说明："), h("a", { href: HOMEPAGE_URL, target: "_blank", rel: "noopener noreferrer", text: HOMEPAGE_URL })))));
+          pane.appendChild(h("div", { class: "ysrp-groups" }, group("Google Drive", h("div", { class: "ysrp-note", text: tr('Each video is stored as "<title>｜<id>.json" in the "[Youtube] Video Memory" folder of your Drive.', "每个视频以“<标题>｜<id>.json”保存在你的云端硬盘“[Youtube] Video Memory”文件夹中。") }), settingsRow({ title: tr("Client ID", "客户端 ID"), below: [clientId] }).el, settingsRow({ title: tr("Client secret", "客户端密钥"), below: [secretInput(clientSecret)] }).el, settingsRow({ title: "Refresh token", below: [secretInput(refreshToken)] }).el, actions(saveBtn, uploadAll), status.el, result.el), group(tr("Getting credentials", "如何获取凭据"), h("ol", { class: "ysrp-steps" }, h("li", { text: tr('In Google Cloud Console create a project and an OAuth client (type "Web application"); add https://developers.google.com/oauthplayground as a redirect URI.', "在 Google Cloud Console 新建项目和 OAuth 客户端（类型“Web 应用”），把 https://developers.google.com/oauthplayground 加为重定向 URI。") }), h("li", { text: tr("Enable the Google Drive API for the project.", "为该项目启用 Google Drive API。") }), h("li", { text: tr('Open the OAuth 2.0 Playground, tick "Use your own OAuth credentials", authorise the https://www.googleapis.com/auth/drive scope and exchange the code for a refresh token.', "打开 OAuth 2.0 Playground，勾选“Use your own OAuth credentials”，授权 https://www.googleapis.com/auth/drive 范围，然后用授权码换取 refresh token。") }), h("li", {}, tr("Paste the three values above and click “Save & verify”. More: ", "把三项填到上面并点“保存并验证”。更多说明："), h("a", { href: HOMEPAGE_URL, target: "_blank", rel: "noopener noreferrer", text: HOMEPAGE_URL }))))));
           return () => statusListeners.delete(renderStatus);
         }
       });
@@ -5038,11 +5292,14 @@
   // src/plugins/transcript/index.ts
   function renderTab(pane) {
     const settings = getSettings();
-    const endpoint = h("input", { class: "ysrp-input", type: "text", value: settings.endpoint, placeholder: "https://example.com/v1/chat/completions", autocomplete: "off", spellcheck: false });
-    const model = h("input", { class: "ysrp-input", type: "text", value: settings.model, placeholder: "transcript", autocomplete: "off", spellcheck: false });
-    const apiKey = h("input", { class: "ysrp-input", type: "password", value: settings.apiKey, placeholder: "sk-***", autocomplete: "new-password", spellcheck: false });
+    const endpoint = textInput({ value: settings.endpoint, placeholder: "https://example.com/v1/chat/completions", field: "endpoint" });
+    const model = textInput({ value: settings.model, placeholder: "transcript", field: "model" });
+    const apiKey = textInput({ type: "password", value: settings.apiKey, placeholder: "sk-***", field: "apiKey" });
     const minutes = Math.min(60, Math.max(1, timeoutMinutes(settings.timeoutMs)));
-    const timeout = h("input", { class: "ysrp-input", type: "number", min: "1", max: "60", step: "1", value: String(minutes), placeholder: "10" });
+    const timeout = textInput({ type: "number", value: String(minutes), placeholder: "10", cls: "is-number", field: "timeout" });
+    timeout.min = "1";
+    timeout.max = "60";
+    timeout.step = "1";
     let timer = 0;
     const save = () => {
       const mins = parseFloat(timeout.value);
@@ -5062,31 +5319,24 @@
       el.addEventListener("input", schedule);
       el.addEventListener("change", schedule);
     }
-    const settingsCard = card({
-      icon: "closed-captioning",
-      title: tr("Subtitles · Transcript", "字幕与接口设置"),
-      desc: tr("Configure the OpenAI-compatible endpoint used for subtitles. Fetching lives in the Records tab.", "配置字幕接口（兼容 OpenAI）。字幕获取功能位于“记录”标签。")
-    }, h("div", { class: "ysrp-fields" }, field(tr("API Endpoint", "API 接口路径"), endpoint), field(tr("Model", "模型名称"), model), field(tr("API Key", "API 密钥"), secretInput(apiKey, { show: tr("Show", "显示"), hide: tr("Hide", "隐藏") }), tr("Leave empty to send no key.", "留空则不发送密钥。")), field(tr("Timeout (minutes)", "超时时长（分钟）"), timeout)));
-    const titleValue = h("span", { class: "ysrp-info-value" });
-    const idValue = h("span", { class: "ysrp-info-value ysrp-mono" });
-    const idRow = infoRow(tr("Video ID", "视频 ID"), idValue);
-    const titleLabel = h("span", { class: "ysrp-info-label", text: tr("Active video", "当前视频") });
+    const titleValue = h("span", { class: "ysrp-transcript-video-title" });
+    const idValue = h("span", { class: "ysrp-mono" });
+    const idLine = h("div", {}, tr("Video ID: ", "视频 ID："), idValue);
     const update = (status) => {
       const id = status && status.videoId || urlVideoId();
       if (!id) {
         titleValue.textContent = tr("No active video detected", "未检测到可用的影片");
-        idRow.style.display = "none";
+        idLine.style.display = "none";
         return;
       }
       titleValue.textContent = status && status.videoId === id && !status.isLoading ? status.title : status && status.videoId === id ? tr("Loading title…", "正在获取标题…") : UNKNOWN_TITLE;
       idValue.textContent = id;
-      idRow.style.display = "";
+      idLine.style.display = "";
     };
     update(currentStatus());
     const onStatus = (ev) => update(ev.detail || null);
     document.addEventListener(EVT_VIDEO_STATUS, onStatus);
-    const statusCard = card({ icon: "pen-to-square", title: tr("Status & Tips", "状态与提示") }, h("div", { class: "ysrp-hint", text: tr("These settings apply instantly. Use the Records tab to fetch transcripts for specific videos.", "设置立即生效，具体字幕获取请在“记录”标签中触发。") }), h("div", { class: "ysrp-info" }, h("div", { class: "ysrp-info-row" }, titleLabel, titleValue), idRow));
-    pane.append(settingsCard, statusCard);
+    pane.appendChild(h("div", { class: "ysrp-groups" }, group(tr("Endpoint", "接口"), settingsRow({ title: tr("API endpoint", "接口地址"), desc: tr("OpenAI-compatible chat/completions URL; a bare host gets the path added.", "兼容 OpenAI 的 chat/completions 地址；只填域名时自动补全路径。"), below: [endpoint] }).el, settingsRow({ title: tr("Model", "模型"), below: [model] }).el, settingsRow({ title: tr("API key", "API 密钥"), desc: tr("Leave empty to send no key.", "留空则不发送密钥。"), below: [secretInput(apiKey)] }).el, settingsRow({ title: tr("Timeout (minutes)", "超时（分钟）"), desc: tr("1–60 minutes.", "1–60 分钟。"), control: timeout }).el), group(tr("Current video", "当前视频"), h("div", { class: "ysrp-info-lines" }, h("div", {}, tr("Title: ", "标题："), titleValue), idLine), h("div", { class: "ysrp-note", text: tr("Fetch transcripts from the cards in the Records tab.", "在“记录”标签的卡片上获取字幕。") }))));
     return () => {
       document.removeEventListener(EVT_VIDEO_STATUS, onStatus);
       if (timer) {
@@ -5095,93 +5345,70 @@
       }
     };
   }
-  function createRowParts(ctx) {
-    const ui = ctx.ui;
-    const status = h("span", { class: "ysrp-panel-status" });
-    const refreshBtn = iconButton("arrows-rotate", tr("Refresh transcript", "刷新字幕"), "is-refresh");
-    const copyBtn = iconButton("copy", tr("Copy transcript", "复制字幕"), "is-copy");
-    copyBtn.disabled = true;
-    const area = h("textarea", { class: "ysrp-textarea ysrp-transcript-text", readOnly: true, rows: 5, placeholder: tr("Transcript will appear here…", "字幕内容加载后会显示在这里…") });
-    const panel = h("div", { class: "ysrp-panel ysrp-transcript-container" }, h("div", { class: "ysrp-panel-head" }, h("span", { class: "ysrp-panel-label" }, tr("Transcript", "字幕"), " ", status), h("span", { class: "ysrp-panel-tools" }, refreshBtn, copyBtn)), area);
-    const button = iconButton("closed-captioning", "", "is-transcript");
+  function openTranscriptDialog(ctx) {
+    const status = h("div", { class: "ysrp-transcript-status", attrs: { role: "status", "aria-live": "polite" } });
+    const area = textArea({ readOnly: true, placeholder: tr("Transcript will appear here…", "字幕内容加载后会显示在这里…"), cls: "ysrp-transcript-text" });
+    const refresh = button(tr("Refresh", "刷新"), { variant: "secondary", cls: "ysrp-transcript-refresh" });
+    const copy = button(tr("Copy", "复制"), { variant: "primary", cls: "ysrp-transcript-copy" });
+    copy.disabled = true;
     let loaded = false;
     let busy = false;
+    const dlg = openDialog({
+      title: tr("Transcript", "字幕"),
+      desc: ctx.title(),
+      size: "lg",
+      cls: "ysrp-transcript-dialog",
+      content: [status, area],
+      footer: [refresh, copy]
+    });
     const setStatus = (text, tone = "neutral") => {
       status.textContent = text;
       status.classList.toggle("is-error", tone === "error");
       status.classList.toggle("is-success", tone === "success");
-      area.title = text || area.placeholder;
-    };
-    const setOpen = (open) => {
-      ui.transcriptOpen = open;
-      panel.style.display = open ? "flex" : "none";
-      const tip = open ? tr("Hide transcript", "隐藏字幕") : tr("Show transcript", "显示字幕");
-      button.title = tip;
-      button.setAttribute("aria-label", tip);
-    };
-    const setBusy = (on) => {
-      busy = on;
-      button.disabled = false;
-      refreshBtn.disabled = on;
-      refreshBtn.querySelector("i")?.classList.toggle("fa-spin", on);
     };
     const show = (text) => {
       area.value = text;
-      copyBtn.disabled = !text.trim();
+      copy.disabled = !text.trim();
       area.style.opacity = text.trim() ? "1" : "0.7";
     };
     const load = (force) => {
       if (busy)
         return;
-      setBusy(true);
+      busy = true;
+      refresh.disabled = true;
       setStatus(loaded ? tr("Refreshing…", "正在重新获取…") : tr("Loading…", "正在获取…"));
       fetchTranscript(ctx.videoId, { force, videoUrl: ctx.url }).then((text) => {
+        if (!dlg.isOpen())
+          return;
         show(text);
         loaded = true;
         setStatus(tr("Updated ({time})", "已更新（{time}）", { time: new Date().toLocaleTimeString() }), "success");
       }).catch((err) => {
-        setStatus(tr("Failed: {message}", "获取失败：{message}", { message: errorMessage(err) }), "error");
-      }).finally(() => setBusy(false));
+        if (dlg.isOpen())
+          setStatus(tr("Failed: {message}", "获取失败：{message}", { message: errorMessage(err) }), "error");
+      }).finally(() => {
+        busy = false;
+        refresh.disabled = false;
+      });
     };
-    button.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      const open = ui.transcriptOpen !== true;
-      setOpen(open);
-      if (open && !loaded)
-        load(false);
-    });
-    refreshBtn.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      setOpen(true);
-      load(true);
-    });
-    copyBtn.addEventListener("click", (ev) => {
-      ev.preventDefault();
+    refresh.addEventListener("click", () => load(true));
+    copy.addEventListener("click", () => {
       const text = area.value.trim();
       if (!text) {
         setStatus(tr("No transcript content to copy.", "暂无字幕内容可复制。"));
         return;
       }
-      copyText(text).then(() => {
-        setIcon(copyBtn, "check");
-        copyBtn.classList.add("is-success");
-        window.setTimeout(() => {
-          setIcon(copyBtn, "copy");
-          copyBtn.classList.remove("is-success");
-        }, 1000);
-        setStatus(tr("Copied.", "已复制。"), "success");
-      }).catch((err) => setStatus(tr("Copy failed: {message}", "复制失败：{message}", { message: errorMessage(err) }), "error"));
+      copyText(text).then(() => setStatus(tr("Copied.", "已复制。"), "success")).catch((err) => setStatus(tr("Copy failed: {message}", "复制失败：{message}", { message: errorMessage(err) }), "error"));
     });
     const cached = cachedTranscript(ctx.videoId);
     if (cached) {
       show(cached);
       loaded = true;
       setStatus(tr("Loaded from cache.", "来自缓存。"));
-    }
-    setOpen(ui.transcriptOpen === true);
-    if (ui.transcriptOpen === true && !loaded)
+    } else {
+      show("");
       load(false);
-    return { button, panel };
+    }
   }
   var transcript_default = definePlugin({
     name: "Transcript",
@@ -5200,9 +5427,14 @@
         order: 20,
         icon: "closed-captioning",
         label: () => tr("Transcript", "字幕"),
+        info: () => tr("Configure the OpenAI-compatible endpoint used for transcripts. Fetching lives on the record cards.", "配置字幕接口（兼容 OpenAI）。字幕获取在记录卡片上。"),
         render: renderTab
       });
-      ctx.addRowButton({ id: "transcript", order: 10, panelOrder: 20, create: createRowParts });
+      ctx.addRowButton({
+        id: "transcript",
+        order: 10,
+        create: (rowCtx) => ({ button: iconButton("closed-captioning", tr("Transcript", "字幕"), "is-transcript", () => openTranscriptDialog(rowCtx)) })
+      });
       ctx.onDispose(recordChanges.on((change) => {
         if (change.kind === "delete")
           forgetTranscript(change.videoId);
@@ -5226,6 +5458,7 @@
       console.error("[Video Memory] Startup cleanup failed:", err);
     }
     addStyle(theme_default, "ysrp-theme");
+    addStyle(ui_default, "ysrp-ui");
     startPlugins(plugins);
   }
   bootstrap();
