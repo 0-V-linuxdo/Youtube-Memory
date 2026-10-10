@@ -441,6 +441,36 @@ const tests = {
     await ctx.close();
   },
 
+  async 'A-13b'() {
+    const ctx = await newContext();
+    const page = await seeded(ctx, Object.fromEntries(Array.from({ length: 15 }, (_, i) => [`a13b${i}`, { videoProgress: 10, saveDate: i, videoName: `V${i}`, originalTitle: `V${i}` }])));
+    await page.setViewportSize({ width: 1000, height: 600 });
+    await goto(page, 'v=a13bscroll');
+    await page.evaluate(() => document.body.appendChild(Object.assign(document.createElement('div'), { style: 'height:3000px' })));
+    await sleep(2000);
+    const widthBefore = await page.evaluate(() => document.documentElement.clientWidth);
+    await openSettings(page);
+    const after = await page.evaluate(() => ({ width: document.documentElement.clientWidth, body: document.body.style.overflow, html: document.documentElement.style.overflow, bodyCs: getComputedStyle(document.body).overflowY }));
+    await page.mouse.move(20, 300);
+    await page.mouse.wheel(0, 600);
+    await sleep(300);
+    const pageScrollWhileOpen = await page.evaluate(() => window.scrollY);
+    const box = await page.locator('.ysrp-pane.is-active').boundingBox();
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.wheel(0, 300);
+    await sleep(300);
+    const paneScroll = await page.evaluate(() => document.querySelector('.ysrp-pane.is-active').scrollTop);
+    await page.keyboard.press('Escape');
+    await page.mouse.move(20, 300);
+    await page.mouse.wheel(0, 400);
+    await sleep(300);
+    const pageScrollAfterClose = await page.evaluate(() => window.scrollY);
+    check('A-13b', 'open dialog keeps the page scrollbar (no sideways shift) but stops page scrolling; the list still scrolls',
+      after.width === widthBefore && after.body === '' && after.html === '' && after.bodyCs !== 'hidden' && pageScrollWhileOpen === 0 && paneScroll > 0 && pageScrollAfterClose > 0,
+      `viewport width ${widthBefore} → ${after.width}, body overflow "${after.body}", page scroll while open ${pageScrollWhileOpen}, list scroll ${paneScroll}, page scroll after close ${pageScrollAfterClose}`);
+    await ctx.close();
+  },
+
   async 'A-14'() {
     const ctx = await newContext();
     const page = await seeded(ctx, {

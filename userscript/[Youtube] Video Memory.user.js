@@ -711,16 +711,41 @@
   function hostRoot() {
     return document.querySelector("ytd-app #content") || document.querySelector("#content") || document.querySelector("#page-manager") || document.body;
   }
-  function lockScroll() {
-    if (!document.body.hasAttribute("data-ysrp-body-overflow")) {
-      document.body.setAttribute("data-ysrp-body-overflow", document.body.style.overflow || "");
+  var SCROLL_KEYS = new Set([" ", "PageUp", "PageDown", "Home", "End", "ArrowUp", "ArrowDown"]);
+  var scrollGuard = null;
+  function scrollableInside(target, container) {
+    for (let el = target;el && el !== container.parentElement; el = el.parentElement) {
+      if (el.scrollHeight > el.clientHeight && /(auto|scroll)/.test(getComputedStyle(el).overflowY))
+        return true;
+      if (el === container)
+        break;
     }
-    document.body.style.overflow = "hidden";
+    return false;
+  }
+  function lockScroll() {
+    if (scrollGuard)
+      return;
+    scrollGuard = (event) => {
+      if (!ui)
+        return;
+      if (event instanceof KeyboardEvent) {
+        const target = event.target;
+        if (!SCROLL_KEYS.has(event.key) || ui.container.contains(target) || target?.closest?.("input, textarea, select, [contenteditable]"))
+          return;
+      } else if (scrollableInside(event.target, ui.container)) {
+        return;
+      }
+      event.preventDefault();
+    };
+    for (const type of ["wheel", "touchmove", "keydown"])
+      window.addEventListener(type, scrollGuard, { capture: true, passive: false });
   }
   function unlockScroll() {
-    const previous = document.body.getAttribute("data-ysrp-body-overflow");
-    document.body.style.overflow = previous || "";
-    document.body.removeAttribute("data-ysrp-body-overflow");
+    if (!scrollGuard)
+      return;
+    for (const type of ["wheel", "touchmove", "keydown"])
+      window.removeEventListener(type, scrollGuard, { capture: true });
+    scrollGuard = null;
   }
   function isOpen() {
     return Boolean(ui && ui.container.style.display !== "none" && ui.container.isConnected);
@@ -3031,7 +3056,7 @@
 .ysrp-tab { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border: none; border-bottom: 2px solid transparent; background: transparent; cursor: pointer; color: var(--ysrp-sub); font-weight: 700; font-size: 14px; white-space: nowrap; }
 .ysrp-tab.is-active { color: var(--ysrp-accent); border-bottom-color: var(--ysrp-accent); }
 .ysrp-body { display: flex; flex-direction: column; flex: 1; min-height: 0; margin-top: 10px; overflow: hidden; }
-.ysrp-pane { display: none; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; padding-right: 4px; -webkit-overflow-scrolling: touch; }
+.ysrp-pane { overscroll-behavior: contain; display: none; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; padding-right: 4px; -webkit-overflow-scrolling: touch; }
 .ysrp-pane.is-active { display: flex; }
 .ysrp-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .ysrp-empty { color: var(--ysrp-sub); font-style: italic; padding: 12px 0; }

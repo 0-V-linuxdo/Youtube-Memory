@@ -28,17 +28,37 @@ function hostRoot() {
         || document.querySelector("#page-manager") || document.body;
 }
 
-function lockScroll() {
-    if (!document.body.hasAttribute("data-ysrp-body-overflow")) {
-        document.body.setAttribute("data-ysrp-body-overflow", document.body.style.overflow || "");
+// F-4.2: block page scrolling without touching overflow, so the page scrollbar stays and nothing shifts sideways.
+const SCROLL_KEYS = new Set([" ", "PageUp", "PageDown", "Home", "End", "ArrowUp", "ArrowDown"]);
+let scrollGuard: ((event: Event) => void) | null = null;
+
+function scrollableInside(target: EventTarget | null, container: HTMLElement) {
+    for (let el = target as HTMLElement | null; el && el !== container.parentElement; el = el.parentElement) {
+        if (el.scrollHeight > el.clientHeight && /(auto|scroll)/.test(getComputedStyle(el).overflowY)) return true;
+        if (el === container) break;
     }
-    document.body.style.overflow = "hidden";
+    return false;
+}
+
+function lockScroll() {
+    if (scrollGuard) return;
+    scrollGuard = event => {
+        if (!ui) return;
+        if (event instanceof KeyboardEvent) {
+            const target = event.target as HTMLElement | null;
+            if (!SCROLL_KEYS.has(event.key) || ui.container.contains(target) || target?.closest?.("input, textarea, select, [contenteditable]")) return;
+        } else if (scrollableInside(event.target, ui.container)) {
+            return;
+        }
+        event.preventDefault();
+    };
+    for (const type of ["wheel", "touchmove", "keydown"]) window.addEventListener(type, scrollGuard, { capture: true, passive: false });
 }
 
 function unlockScroll() {
-    const previous = document.body.getAttribute("data-ysrp-body-overflow");
-    document.body.style.overflow = previous || "";
-    document.body.removeAttribute("data-ysrp-body-overflow");
+    if (!scrollGuard) return;
+    for (const type of ["wheel", "touchmove", "keydown"]) window.removeEventListener(type, scrollGuard, { capture: true });
+    scrollGuard = null;
 }
 
 export function isOpen() {
