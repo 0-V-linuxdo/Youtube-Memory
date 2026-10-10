@@ -263,7 +263,8 @@
       listener();
   }
   function getSettingsTabs() {
-    return [...tabs.values()].sort((a, b) => a.order - b.order);
+    const rank = (g) => g === "general" ? 0 : 1;
+    return [...tabs.values()].sort((a, b) => rank(a.group) - rank(b.group) || a.order - b.order);
   }
   function onSettingsTabsChange(listener) {
     listeners3.add(listener);
@@ -657,10 +658,8 @@
     el.className = `ysrp-msg${kind ? ` is-${kind}` : ""}`;
     el.style.display = text ? "" : "none";
   }
-  function card(iconName, accentVar, titleText, subtitle, ...children) {
-    const ic = icon(iconName);
-    ic.style.color = `var(${accentVar})`;
-    return h("div", { class: "ysrp-card" }, h("div", { class: "ysrp-card-title" }, ic, h("span", { text: titleText })), subtitle ? h("div", { class: "ysrp-card-sub", text: subtitle }) : null, ...children);
+  function card(iconName, _accentVar, titleText, subtitle, ...children) {
+    return h("div", { class: "ysrp-card" }, h("div", { class: "ysrp-card-title" }, h("span", { class: "ysrp-card-icon" }, icon(iconName)), h("span", { text: titleText })), subtitle ? h("div", { class: "ysrp-card-sub", text: subtitle }) : null, ...children);
   }
   function field(label, control) {
     return h("label", { class: "ysrp-field" }, h("span", { text: label }), control);
@@ -789,10 +788,14 @@
     if (keyListener)
       return;
     keyListener = (event) => {
-      if (event.key === "Escape" && isOpen()) {
-        event.stopPropagation();
+      if (event.key !== "Escape" || !isOpen())
+        return;
+      event.stopPropagation();
+      const nested = ui?.container.querySelector(".ysrp-dialog-layer");
+      if (nested)
+        nested.remove();
+      else
         close();
-      }
     };
     document.addEventListener("keydown", keyListener, true);
     unsubscribeTabs = onSettingsTabsChange(() => {
@@ -826,15 +829,21 @@
     const title = h("h3");
     const modeBadge = h("span", { class: "ysrp-badge" });
     const spinner = h("span", { class: "ysrp-spinner", title: t("Refreshing…", "正在更新列表…") }, h("i", { class: "fa-solid fa-arrows-rotate fa-spin" }));
+    let count = list().length;
+    const renderTitle = () => {
+      const tab = tabs.find((x) => x.id === activeTab);
+      title.textContent = activeTab === "records" || !tab ? t("Saved Videos - ({count})", "已保存视频 - ({count})", { count }) : tab.label();
+    };
     const setCount = (n) => {
-      title.textContent = t("Saved Videos - ({count})", "已保存视频 - ({count})", { count: n });
+      count = n;
+      renderTitle();
     };
     const renderModeBadge = () => {
       modeBadge.textContent = getMode() === "gm" ? t("GM Storage", "GM 存储") : t("localStorage", "浏览器本地存储");
     };
-    setCount(list().length);
     renderModeBadge();
-    const header = h("div", { class: "ysrp-header" }, h("div", { class: "ysrp-header-left" }, title, modeBadge), h("div", { class: "ysrp-header-left" }, spinner, h("button", { type: "button", class: "ysrp-close", title: t("Close", "关闭"), "aria-label": t("Close", "关闭"), text: "✖", onclick: close })));
+    const closeButton = h("button", { type: "button", class: "ysrp-close", title: t("Close", "关闭"), "aria-label": t("Close", "关闭"), onclick: close }, icon("xmark"));
+    const header = h("div", { class: "ysrp-header" }, h("div", { class: "ysrp-header-left" }, title, modeBadge, spinner), closeButton);
     const ctx = {
       setCount,
       spin: (on) => spinner.classList.toggle("is-active", on),
@@ -844,19 +853,27 @@
     const tabs = getSettingsTabs();
     const panes = new Map;
     const tabButtons = new Map;
-    const tabsBar = h("div", { class: "ysrp-tabs", role: "tablist" });
+    const nav = h("nav", { class: "ysrp-tabs ysrp-nav", role: "tablist" });
+    const groupLabels = { general: t("Video Memory", "视频记忆"), plugins: t("Plugins", "插件") };
     const body = h("div", { class: "ysrp-body ysrp-settings-container-body" });
+    let lastGroup = "";
     for (const tab of tabs) {
+      if (tab.group !== lastGroup) {
+        lastGroup = tab.group;
+        nav.appendChild(h("div", { class: "ysrp-nav-group", text: groupLabels[tab.group] }));
+      }
       const pane = tab.render(ctx);
       pane.node.classList.add("ysrp-pane");
       pane.node.dataset.pane = tab.id;
       panes.set(tab.id, pane);
       const button = h("button", { type: "button", class: "ysrp-tab", role: "tab", dataset: { tabId: tab.id }, onclick: () => setTab(tab.id) }, icon(tab.icon), h("span", { text: tab.label() }));
       tabButtons.set(tab.id, button);
-      tabsBar.appendChild(button);
+      nav.appendChild(button);
       body.appendChild(pane.node);
     }
-    const container = h("div", { class: "ysrp-settings-container ysrp-theme", role: "dialog", "aria-modal": "true", style: { display: "none" } }, header, tabsBar, body);
+    nav.appendChild(h("div", { class: "ysrp-version" }, h("a", { href: "https://github.com/0-V-linuxdo/Youtube-Memory", target: "_blank", rel: "noreferrer", text: "Video Memory" }), h("span", { text: ` • ${"[20261010] v2.1.0"}` })));
+    const main = h("section", { class: "ysrp-main" }, header, body);
+    const container = h("div", { class: "ysrp-settings-container ysrp-theme", role: "dialog", "aria-modal": "true", style: { display: "none" } }, nav, main);
     for (const name of ["keydown", "keyup", "keypress"]) {
       container.addEventListener(name, (event) => {
         if (event.key !== "Escape")
@@ -866,12 +883,14 @@
     function setTab(id) {
       activeTab = panes.has(id) ? id : tabs[0]?.id ?? "records";
       container.dataset.activeTab = activeTab;
+      modeBadge.style.display = activeTab === "records" || activeTab === "storage" ? "" : "none";
       for (const [key, button] of tabButtons) {
         const on = key === activeTab;
         button.classList.toggle("is-active", on);
         button.setAttribute("aria-selected", String(on));
         panes.get(key)?.node.classList.toggle("is-active", on);
       }
+      renderTitle();
     }
     return {
       backdrop,
@@ -1415,6 +1434,7 @@
     name: "Engine",
     title: () => t("Progress engine", "进度引擎"),
     description: () => t("Saves the playback position and resumes it when you come back.", "保存播放位置，回来时自动接着播放。"),
+    icon: "gauge-high",
     authors: [Devs.V],
     required: true,
     start() {
@@ -1458,6 +1478,7 @@
     name: "PlayerBadge",
     title: () => t("Player badge", "播放器徽标"),
     description: () => t("Shows the last saved time and the settings button in the player controls.", "在播放器控制栏显示最近保存的时间和设置按钮。"),
+    icon: "tag",
     authors: [Devs.V],
     required: true,
     start() {
@@ -1501,76 +1522,173 @@
   }
 
   // src/plugins/_core/settings/PluginsPane.ts
-  function settingControl(settings, key, def) {
+  function Switch(checked, label, onChange, disabled = false) {
+    const node = h("button", { type: "button", class: "ysrp-switch", role: "switch", "aria-label": label });
+    const set = (value) => node.setAttribute("aria-checked", String(value));
+    set(checked);
+    node.disabled = disabled;
+    node.addEventListener("click", () => {
+      if (node.disabled)
+        return;
+      const next = node.getAttribute("aria-checked") !== "true";
+      set(next);
+      onChange(next);
+    });
+    return { node, set };
+  }
+  var visibleSettings = (plugin) => plugin.settings ? Object.entries(plugin.settings.def).filter(([, def]) => !def.hidden) : [];
+  function SettingRow(settings, key, def) {
     const store = settings.store;
-    const value = store[key];
+    const label = h("div", { class: "ysrp-row-label" }, h("div", { class: "ysrp-row-title", text: def.description() }));
     if (def.type === 2 /* BOOLEAN */) {
-      const input = h("input", { type: "checkbox", dataset: { setting: key } });
-      input.checked = Boolean(value);
-      input.addEventListener("change", () => {
-        store[key] = input.checked;
+      const sw = Switch(Boolean(store[key]), def.description(), (next) => {
+        store[key] = next;
       });
-      return h("label", { class: "ysrp-check" }, input, h("span", { text: def.description() }));
+      sw.node.dataset.setting = key;
+      return { node: h("div", { class: "ysrp-setting-row" }, label, sw.node), reset: () => sw.set(Boolean(store[key])) };
     }
-    let control;
     if (def.type === 3 /* SELECT */) {
       const select = h("select", { class: "ysrp-select", dataset: { setting: key } }, def.options.map((option) => h("option", { value: option.value, text: option.label() })));
-      select.value = String(value);
+      select.value = String(store[key]);
       select.addEventListener("change", () => {
         store[key] = select.value;
       });
-      control = select;
-    } else {
-      const input = h("input", {
-        class: "ysrp-input",
-        type: def.type === 1 /* NUMBER */ ? "number" : "text",
-        placeholder: def.type === 0 /* STRING */ ? def.placeholder : undefined,
-        min: def.type === 1 /* NUMBER */ ? def.min : undefined,
-        max: def.type === 1 /* NUMBER */ ? def.max : undefined,
-        dataset: { setting: key }
-      });
-      input.value = String(value ?? "");
-      input.addEventListener("change", () => {
-        store[key] = def.type === 1 /* NUMBER */ ? Number(input.value) : input.value;
-      });
-      control = input;
+      return { node: h("div", { class: "ysrp-setting-row" }, label, select), reset: () => {
+        select.value = String(store[key]);
+      } };
     }
-    return h("label", { class: "ysrp-field" }, h("span", { text: def.description() }), control);
-  }
-  function PluginCard(plugin) {
-    const toggle = h("button", { type: "button", class: "ysrp-switch", role: "switch", "aria-label": plugin.title(), dataset: { plugin: plugin.name } });
-    const settingsBox = h("div", { class: "ysrp-plugin-settings" });
-    const defs = plugin.settings ? Object.entries(plugin.settings.def).filter(([, def]) => !def.hidden) : [];
-    for (const [key, def] of defs)
-      settingsBox.appendChild(settingControl(plugin.settings, key, def));
-    function render() {
-      const enabled = isPluginEnabled(plugin.name);
-      toggle.setAttribute("aria-checked", String(enabled));
-      toggle.disabled = Boolean(plugin.required);
-      toggle.title = plugin.required ? t("Core plugin, always on", "核心插件，始终开启") : enabled ? t("Turn off", "关闭") : t("Turn on", "开启");
-      settingsBox.hidden = !enabled || defs.length === 0;
-    }
-    toggle.addEventListener("click", () => {
-      if (plugin.required)
-        return;
-      setPluginEnabled(plugin.name, !isPluginEnabled(plugin.name));
+    const input = h("input", {
+      class: "ysrp-input",
+      type: def.type === 1 /* NUMBER */ ? "number" : "text",
+      placeholder: def.type === 0 /* STRING */ ? def.placeholder : undefined,
+      min: def.type === 1 /* NUMBER */ ? def.min : undefined,
+      max: def.type === 1 /* NUMBER */ ? def.max : undefined,
+      dataset: { setting: key }
     });
-    render();
-    const node = h("div", { class: "ysrp-card ysrp-plugin", dataset: { plugin: plugin.name } }, h("div", { class: "ysrp-plugin-head" }, h("div", { class: "ysrp-plugin-text" }, h("div", { class: "ysrp-plugin-name" }, h("span", { text: plugin.title() }), plugin.required ? h("span", { class: "ysrp-plugin-tag", text: t("Core", "核心") }) : null), h("div", { class: "ysrp-plugin-desc", text: plugin.description() })), toggle), settingsBox);
-    return { node, render };
+    input.value = String(store[key] ?? "");
+    input.addEventListener("change", () => {
+      store[key] = def.type === 1 /* NUMBER */ ? Number(input.value) : input.value;
+    });
+    return { node: h("div", { class: "ysrp-setting-row is-stacked" }, label, input), reset: () => {
+      input.value = String(store[key] ?? "");
+    } };
+  }
+  function openPluginDialog(plugin, host) {
+    host.querySelector(".ysrp-dialog-layer")?.remove();
+    const settings = plugin.settings;
+    const entries = visibleSettings(plugin);
+    const rows = entries.map(([key, def]) => SettingRow(settings, key, def));
+    const layer = h("div", { class: "ysrp-dialog-layer" });
+    const close = () => layer.remove();
+    let armed = null;
+    const reset = h("button", { type: "button", class: "ysrp-btn is-small", text: t("Reset", "重置") });
+    reset.addEventListener("click", () => {
+      if (!armed) {
+        reset.textContent = t("Click again to reset", "再点一次确认重置");
+        reset.classList.add("is-armed");
+        armed = setTimeout(() => {
+          armed = null;
+          reset.classList.remove("is-armed");
+          reset.textContent = t("Reset", "重置");
+        }, 3000);
+        return;
+      }
+      clearTimeout(armed);
+      armed = null;
+      for (const [key, def] of entries) {
+        if (getPluginSettings(plugin.name)?.[key] !== undefined)
+          setPluginSetting(plugin.name, key, defaultValue(def));
+      }
+      for (const row of rows)
+        row.reset();
+      reset.classList.remove("is-armed");
+      reset.textContent = t("Reset", "重置");
+    });
+    const dialog = h("div", { class: "ysrp-dialog", role: "dialog", "aria-label": plugin.title(), dataset: { plugin: plugin.name } }, h("button", { type: "button", class: "ysrp-close ysrp-dialog-close", title: t("Close", "关闭"), "aria-label": t("Close", "关闭"), onclick: close }, icon("xmark")), h("div", { class: "ysrp-dialog-header" }, h("div", { class: "ysrp-dialog-title", text: plugin.title() }), h("div", { class: "ysrp-dialog-desc", text: plugin.description() })), h("div", { class: "ysrp-separator" }), h("div", { class: "ysrp-dialog-field" }, h("div", { class: "ysrp-dialog-label", text: t("Authors", "作者") }), h("div", { class: "ysrp-dialog-text", text: plugin.authors.join(", ") })), h("div", { class: "ysrp-dialog-field is-grow" }, h("div", { class: "ysrp-dialog-label", text: t("Settings", "设置") }), rows.length ? h("div", { class: "ysrp-dialog-settings" }, rows.map((r) => r.node)) : h("div", { class: "ysrp-dialog-text", text: t("No configurable settings.", "没有可配置的设置。") })), rows.length ? h("div", { class: "ysrp-dialog-footer" }, reset) : null);
+    layer.addEventListener("click", (event) => {
+      if (event.target === layer)
+        close();
+    });
+    layer.appendChild(dialog);
+    host.appendChild(layer);
+  }
+  function PluginCard(plugin, openSettings) {
+    const sw = Switch(isPluginEnabled(plugin.name), plugin.title(), (next) => setPluginEnabled(plugin.name, next), Boolean(plugin.required));
+    sw.node.dataset.plugin = plugin.name;
+    const controls = h("div", { class: "ysrp-card-controls" });
+    if (visibleSettings(plugin).length) {
+      controls.appendChild(iconButton("sliders", t("Settings", "设置"), () => openSettings(plugin), "ysrp-plugin-config"));
+    }
+    controls.appendChild(sw.node);
+    const node = h("div", { class: `ysrp-plugin${plugin.required ? " is-required" : ""}`, dataset: { plugin: plugin.name } }, h("div", { class: "ysrp-plugin-body" }, h("div", { class: "ysrp-plugin-head" }, h("div", { class: "ysrp-plugin-name" }, h("span", { class: "ysrp-plugin-icon" }, icon(plugin.icon || "puzzle-piece")), h("span", { class: "ysrp-plugin-title", text: plugin.title(), title: plugin.title() }), plugin.required ? h("span", { class: "ysrp-plugin-tag", title: t("Core plugin, always on", "核心插件，始终开启") }, icon("circle-exclamation")) : null), controls), h("div", { class: "ysrp-plugin-desc", text: plugin.description() })), h("div", { class: "ysrp-separator" }), h("div", { class: "ysrp-plugin-footer", text: plugin.authors.join(", ") || " " }));
+    return {
+      node,
+      plugin,
+      render() {
+        sw.set(isPluginEnabled(plugin.name));
+        sw.node.title = plugin.required ? t("Core plugin, always on", "核心插件，始终开启") : isPluginEnabled(plugin.name) ? t("Turn off", "关闭") : t("Turn on", "开启");
+      }
+    };
   }
   function PluginsPane() {
     const all = listPlugins();
-    const cards = [...all.filter((p) => !p.required), ...all.filter((p) => p.required)].map(PluginCard);
+    const optional = all.filter((p) => !p.required);
+    const required = all.filter((p) => p.required);
+    let search = "";
+    let filter = "all";
+    const node = h("div", { class: "ysrp-plugins" });
+    const openSettings = (plugin) => {
+      const host = node.closest(".ysrp-settings-container");
+      if (host)
+        openPluginDialog(plugin, host);
+    };
+    const cards = [...optional, ...required].map((p) => PluginCard(p, openSettings));
+    const input = h("input", { class: "ysrp-input ysrp-search", type: "text", placeholder: t("Search {n} plugins...", "搜索 {n} 个插件...", { n: all.length }) });
+    const select = h("select", { class: "ysrp-select ysrp-filter" }, h("option", { value: "all", text: t("All", "全部") }), h("option", { value: "enabled", text: t("Enabled", "已开启") }), h("option", { value: "disabled", text: t("Disabled", "已关闭") }));
+    const userGrid = h("div", { class: "ysrp-grid" });
+    const requiredGrid = h("div", { class: "ysrp-grid" });
+    const divider = h("div", { class: "ysrp-separator" });
+    const empty = h("div", { class: "ysrp-empty", text: t("No plugins match your search.", "没有符合条件的插件。") });
+    function apply() {
+      const q = search.trim().toLowerCase();
+      const visible = (c) => {
+        const enabled = isPluginEnabled(c.plugin.name);
+        if (filter === "enabled" && !enabled)
+          return false;
+        if (filter === "disabled" && enabled)
+          return false;
+        return !q || `${c.plugin.name} ${c.plugin.title()} ${c.plugin.description()} ${c.plugin.authors.join(" ")}`.toLowerCase().includes(q);
+      };
+      const user = cards.filter((c) => !c.plugin.required && visible(c));
+      const core = cards.filter((c) => c.plugin.required && visible(c));
+      userGrid.replaceChildren(...user.map((c) => c.node));
+      requiredGrid.replaceChildren(...core.map((c) => c.node));
+      userGrid.hidden = !user.length;
+      requiredGrid.hidden = !core.length;
+      divider.hidden = !user.length || !core.length;
+      empty.hidden = Boolean(user.length || core.length);
+    }
+    input.addEventListener("input", () => {
+      search = input.value;
+      apply();
+    });
+    select.addEventListener("change", () => {
+      filter = select.value;
+      apply();
+    });
+    node.append(h("div", { class: "ysrp-pane-hint", text: t("Turn features on or off. Changes apply immediately. Click the sliders icon to configure.", "开启或关闭各项功能，立即生效。点滑杆图标进行配置。") }), h("div", { class: "ysrp-search-bar" }, input, select), userGrid, divider, requiredGrid, empty);
+    apply();
     const off = onPluginToggle(() => {
       for (const c of cards)
         c.render();
+      apply();
     });
     return {
-      node: h("div", {}, h("div", { class: "ysrp-msg", text: t("Turn features on or off. Changes apply immediately.", "开启或关闭各项功能，立即生效。") }), cards.map((c) => c.node)),
+      node,
       refresh() {
         for (const c of cards)
           c.render();
+        apply();
       },
       destroy: off
     };
@@ -1973,10 +2091,10 @@
 
   // src/plugins/_core/settings/index.ts
   var tabs2 = [
-    { id: "records", order: 10, icon: "database", label: () => t("Records", "记录"), render: RecordsPane },
-    { id: "storage", order: 20, icon: "gear", label: () => t("Storage", "存储"), render: StoragePane },
-    { id: "plugins", order: 90, icon: "puzzle-piece", label: () => t("Plugins", "插件"), render: PluginsPane },
-    { id: "display", order: 100, icon: "globe", label: () => t("Display", "界面"), render: DisplayPane }
+    { id: "records", group: "general", order: 10, icon: "database", label: () => t("Records", "记录"), render: RecordsPane },
+    { id: "storage", group: "general", order: 20, icon: "gear", label: () => t("Storage", "存储"), render: StoragePane },
+    { id: "plugins", group: "plugins", order: 10, icon: "puzzle-piece", label: () => t("Plugins", "插件"), render: PluginsPane },
+    { id: "display", group: "general", order: 30, icon: "globe", label: () => t("Display", "界面"), render: DisplayPane }
   ];
   var languageTimer2 = null;
   var offLanguage2 = null;
@@ -1984,6 +2102,7 @@
     name: "Settings",
     title: () => t("Settings dialog", "设置弹窗"),
     description: () => t("The records list, storage, plugins and language settings.", "记录列表，以及存储、插件、语言等设置。"),
+    icon: "gear",
     authors: [Devs.V],
     required: true,
     start() {
@@ -2059,6 +2178,7 @@
     name: "BadgeToggle",
     title: () => t("Badge toggle", "徽标开关"),
     description: () => t("Adds a \uD83D\uDCBE button that shows or hides the progress badge.", "在徽标旁加一个 \uD83D\uDCBE 按钮，点击显示或隐藏进度徽标。"),
+    icon: "floppy-disk",
     authors: [Devs.V],
     enabledByDefault: true,
     settings,
@@ -2569,11 +2689,13 @@
     name: "DriveSync",
     title: () => t("Google Drive sync", "云同步"),
     description: () => t("Keeps your records in your own Google Drive and picks up progress from other devices.", "把记录同步到你自己的 Google Drive，在其它设备上接着看。"),
+    icon: "cloud",
     authors: [Devs.V],
     enabledByDefault: true,
     settingsTab: {
       id: "drive",
-      order: 40,
+      group: "plugins",
+      order: 30,
       icon: "cloud",
       label: () => t("Sync", "云同步"),
       render: DrivePane
@@ -2901,11 +3023,13 @@
     name: "Transcript",
     title: () => t("Transcript", "字幕"),
     description: () => t("Fetch a video's transcript from an OpenAI-compatible endpoint, from the records list.", "在记录列表里通过兼容 OpenAI 的接口获取视频字幕。"),
+    icon: "closed-captioning",
     authors: [Devs.V],
     enabledByDefault: true,
     settingsTab: {
       id: "transcript",
-      order: 30,
+      group: "plugins",
+      order: 20,
       icon: "closed-captioning",
       label: () => t("Transcript", "字幕"),
       render: TranscriptPane
@@ -3011,143 +3135,218 @@
   }
 
   // src/styles.css
-  var styles_default2 = `.ysrp-theme, .last-save-info-container {
-  --ysrp-bg: #ffffff; --ysrp-fg: #0f0f0f; --ysrp-sub: #666; --ysrp-border: #d5d5d5; --ysrp-card: #f2f2f2;
-  --ysrp-input: #ffffff; --ysrp-input-border: #c9ced6; --ysrp-accent: #0b57d0; --ysrp-danger: #d93025;
-  --ysrp-ok: #188038; --ysrp-link: #1a73e8; --ysrp-note: #2e9e5b; --ysrp-storage: #e8710a; --ysrp-display: #d01884;
-  --ysrp-transcript: #e8263c; --ysrp-hover: rgba(11, 87, 208, .10); --ysrp-backdrop: rgba(0, 0, 0, .35);
-  --ysrp-thumb: #9aa0a6; --ysrp-track: #e6e8ea;
+  var styles_default2 = `/* Monochrome tokens modelled on void++'s settings UI (Grok surface/fg scale). */
+.ysrp-theme, .last-save-info-container {
+  --ysrp-bg: #ffffff; --ysrp-nav-bg: #f7f7f7; --ysrp-card: #fafafa; --ysrp-l2: #f0f0f0;
+  --ysrp-border: rgba(0, 0, 0, .08); --ysrp-border-strong: rgba(0, 0, 0, .16);
+  --ysrp-fg: #0d0d0d; --ysrp-sub: #5e5e5e; --ysrp-tertiary: #8f8f8f; --ysrp-hover: rgba(0, 0, 0, .05);
+  --ysrp-input: #ffffff; --ysrp-input-border: rgba(0, 0, 0, .12);
+  --ysrp-danger: #d93025; --ysrp-ok: #188038; --ysrp-backdrop: rgba(0, 0, 0, .4);
+  --ysrp-thumb: rgba(0, 0, 0, .2); --ysrp-track: transparent;
+  --ysrp-accent: var(--ysrp-fg); --ysrp-link: var(--ysrp-fg); --ysrp-note: var(--ysrp-fg);
+  --ysrp-storage: var(--ysrp-fg); --ysrp-display: var(--ysrp-fg); --ysrp-transcript: var(--ysrp-fg);
+  --ysrp-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 @media (prefers-color-scheme: dark) {
   .ysrp-theme, .last-save-info-container {
-    --ysrp-bg: #262626; --ysrp-fg: #f1f1f1; --ysrp-sub: #b0b0b0; --ysrp-border: #444; --ysrp-card: #333;
-    --ysrp-input: #2b2b2b; --ysrp-input-border: #555; --ysrp-accent: #8ab4f8; --ysrp-danger: #f28b82;
-    --ysrp-ok: #81c995; --ysrp-link: #8ab4f8; --ysrp-note: #81c995; --ysrp-storage: #fcad70; --ysrp-display: #ff8bcb;
-    --ysrp-transcript: #ff7b8a; --ysrp-hover: rgba(255, 255, 255, .08); --ysrp-backdrop: rgba(0, 0, 0, .5);
-    --ysrp-thumb: #6b7280; --ysrp-track: #2b2b2b;
+    --ysrp-bg: #1a1a1a; --ysrp-nav-bg: #161616; --ysrp-card: #212121; --ysrp-l2: #2a2a2a;
+    --ysrp-border: rgba(255, 255, 255, .08); --ysrp-border-strong: rgba(255, 255, 255, .16);
+    --ysrp-fg: #fafafa; --ysrp-sub: #a3a3a3; --ysrp-tertiary: #737373; --ysrp-hover: rgba(255, 255, 255, .06);
+    --ysrp-input: #1f1f1f; --ysrp-input-border: rgba(255, 255, 255, .12);
+    --ysrp-danger: #f28b82; --ysrp-ok: #81c995; --ysrp-backdrop: rgba(0, 0, 0, .6);
+    --ysrp-thumb: rgba(255, 255, 255, .18);
   }
 }
-.last-save-info-container { display: flex; align-items: center; margin-left: 8px; font-family: Roboto, Arial, sans-serif; font-size: 13px; line-height: normal; text-shadow: none; }
-.last-save-info { display: flex; align-items: center; gap: 6px; padding: 4px 4px 4px 8px; border-radius: 8px; background: var(--ysrp-bg); color: var(--ysrp-fg); }
+
+/* Player badge */
+.last-save-info-container { display: flex; align-items: center; margin-left: 8px; font-family: var(--ysrp-font); font-size: 13px; line-height: normal; text-shadow: none; }
+.last-save-info { display: flex; align-items: center; gap: 6px; padding: 4px 4px 4px 8px; border-radius: 999px; background: var(--ysrp-bg); color: var(--ysrp-fg); }
 .last-save-info-text { white-space: nowrap; font-variant-numeric: tabular-nums; }
 .last-save-info-text.is-error { color: var(--ysrp-danger); font-weight: 600; }
 .last-save-info-text.is-resumed { color: var(--ysrp-ok); font-weight: 600; }
-.ysrp-settings-button { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 6px; background: transparent; color: var(--ysrp-fg); cursor: pointer; font-size: 13px; }
+.ysrp-settings-button { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 999px; background: transparent; color: var(--ysrp-fg); cursor: pointer; font-size: 13px; }
 .ysrp-settings-button:hover { background: var(--ysrp-hover); }
+
+/* Dialog shell: left nav + main column */
 .ysrp-backdrop { position: fixed; inset: 0; background: var(--ysrp-backdrop); z-index: 9998; }
 .ysrp-settings-container { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 9999; box-sizing: border-box;
-  display: flex; flex-direction: column; width: 500px; max-width: 90vw; max-height: 80vh; padding: 16px; border-radius: 10px;
-  border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); color: var(--ysrp-fg); box-shadow: rgba(0,0,0,.24) 0 3px 8px;
-  font-family: Roboto, Arial, sans-serif; font-size: 13px; line-height: 1.45; text-align: left; overflow: hidden; }
+  display: flex; flex-direction: row; width: min(56rem, 92vw); height: min(40rem, 85vh); padding: 0; border-radius: 1rem;
+  border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); color: var(--ysrp-fg); box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
+  font-family: var(--ysrp-font); font-size: 14px; line-height: 1.5; text-align: left; overflow: hidden; }
 .ysrp-settings-container *, .ysrp-settings-container *::before, .ysrp-settings-container *::after { box-sizing: border-box; }
 .ysrp-settings-container, .ysrp-settings-container * { scrollbar-width: thin; scrollbar-color: var(--ysrp-thumb) var(--ysrp-track); }
-.ysrp-settings-container ::-webkit-scrollbar { width: 10px; height: 10px; }
-.ysrp-settings-container ::-webkit-scrollbar-track { background: var(--ysrp-track); border-radius: 8px; }
-.ysrp-settings-container ::-webkit-scrollbar-thumb { background: var(--ysrp-thumb); border-radius: 8px; border: 2px solid var(--ysrp-track); }
-.ysrp-settings-container button { font: inherit; color: inherit; }
-.ysrp-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ysrp-settings-container ::-webkit-scrollbar { width: 8px; height: 8px; }
+.ysrp-settings-container ::-webkit-scrollbar-track { background: transparent; }
+.ysrp-settings-container ::-webkit-scrollbar-thumb { background: var(--ysrp-thumb); border-radius: 999px; }
+.ysrp-settings-container button, .ysrp-settings-container input, .ysrp-settings-container select, .ysrp-settings-container textarea { font: inherit; color: inherit; }
+.ysrp-settings-container a { color: inherit; }
+.ysrp-settings-container [hidden] { display: none !important; }
+
+.ysrp-nav { display: flex; flex-direction: column; gap: 2px; flex: 0 0 13rem; width: 13rem; padding: 1rem .75rem .75rem; background: var(--ysrp-nav-bg); border-right: 1px solid var(--ysrp-border); overflow-y: auto; }
+.ysrp-nav-group { padding: .75rem .625rem .25rem; font-size: 12px; font-weight: 500; color: var(--ysrp-tertiary); }
+.ysrp-nav-group:first-child { padding-top: .25rem; }
+.ysrp-tab { display: flex; align-items: center; gap: .625rem; width: 100%; min-height: 36px; padding: .375rem .625rem; border: none; border-radius: .625rem; background: transparent; color: var(--ysrp-sub); cursor: pointer; font-size: 14px; font-weight: 500; text-align: left; white-space: nowrap; }
+.ysrp-tab > i { width: 16px; text-align: center; font-size: 14px; }
+.ysrp-tab > span { overflow: hidden; text-overflow: ellipsis; }
+.ysrp-tab:hover { background: var(--ysrp-hover); color: var(--ysrp-fg); }
+.ysrp-tab.is-active { background: var(--ysrp-l2); color: var(--ysrp-fg); }
+.ysrp-version { margin-top: auto; padding: .75rem .625rem 0; font-size: 11px; opacity: .3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ysrp-version a { text-decoration: none; }
+.ysrp-version a:hover { text-decoration: underline; }
+
+.ysrp-main { position: relative; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; padding: 1.25rem 1.5rem 1rem; }
+.ysrp-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; margin-bottom: 1rem; }
 .ysrp-header-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.ysrp-header h3 { margin: 0; font-size: 16px; font-weight: 700; color: var(--ysrp-fg); }
-.ysrp-badge { font-size: 11px; padding: 2px 8px; border-radius: 8px; background: var(--ysrp-hover); color: var(--ysrp-accent); white-space: nowrap; }
-.ysrp-spinner { display: none; color: var(--ysrp-accent); }
+.ysrp-header h3 { margin: 0; font-size: 18px; font-weight: 600; color: var(--ysrp-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ysrp-badge { font-size: 12px; padding: 1px 10px; border-radius: 999px; border: 1px solid var(--ysrp-border-strong); color: var(--ysrp-sub); white-space: nowrap; }
+.ysrp-spinner { display: none; color: var(--ysrp-sub); }
 .ysrp-spinner.is-active { display: inline-flex; }
-.ysrp-close { background: transparent; border: none; cursor: pointer; font-size: 18px; color: var(--ysrp-fg); padding: 0 4px; }
-.ysrp-tabs { display: flex; gap: 4px; margin-top: 10px; border-bottom: 1px solid var(--ysrp-border); overflow-x: auto; }
-.ysrp-tab { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border: none; border-bottom: 2px solid transparent; background: transparent; cursor: pointer; color: var(--ysrp-sub); font-weight: 700; font-size: 14px; white-space: nowrap; }
-.ysrp-tab.is-active { color: var(--ysrp-accent); border-bottom-color: var(--ysrp-accent); }
-.ysrp-body { display: flex; flex-direction: column; flex: 1; min-height: 0; margin-top: 10px; overflow: hidden; }
-.ysrp-pane { overscroll-behavior: contain; display: none; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; padding-right: 4px; -webkit-overflow-scrolling: touch; }
+.ysrp-close { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 32px; height: 32px; padding: 0; border: none; border-radius: 999px; background: transparent; color: var(--ysrp-sub); cursor: pointer; font-size: 16px; }
+.ysrp-close:hover { background: var(--ysrp-hover); color: var(--ysrp-fg); }
+.ysrp-body { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+.ysrp-pane { overscroll-behavior: contain; display: none; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; margin-right: -.75rem; padding-right: .75rem; -webkit-overflow-scrolling: touch; }
 .ysrp-pane.is-active { display: flex; }
-.ysrp-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.ysrp-empty { color: var(--ysrp-sub); font-style: italic; padding: 12px 0; }
-.ysrp-row { display: flex; flex-direction: column; gap: 6px; padding: 8px; border-radius: 8px; background: var(--ysrp-card); color: var(--ysrp-fg); }
-.ysrp-row.is-current { box-shadow: inset 3px 0 0 var(--ysrp-accent); }
-.ysrp-row-top { display: flex; align-items: center; gap: 4px; }
-.ysrp-pct { min-width: 44px; text-align: right; margin-right: 6px; color: var(--ysrp-sub); font-variant-numeric: tabular-nums; }
-.ysrp-title { flex: 1; min-width: 0; word-break: break-word; }
-.ysrp-ibtn { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; flex: 0 0 auto; padding: 0; border: none; border-radius: 6px; background: transparent; cursor: pointer; color: var(--ysrp-fg); }
-.ysrp-ibtn:hover:not(:disabled) { background: var(--ysrp-hover); }
+.ysrp-pane-hint { color: var(--ysrp-sub); font-size: 13px; }
+
+/* Shared controls */
+.ysrp-separator { flex: 0 0 auto; height: 1px; width: 100%; background: var(--ysrp-border); }
+.ysrp-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 16px; border-radius: 999px; border: 1px solid var(--ysrp-border-strong); color: var(--ysrp-fg) !important; background: transparent; font-size: 14px; font-weight: 500; cursor: pointer; flex: 1 1 auto; white-space: nowrap; transition: background .15s; }
+.ysrp-btn:hover:not(:disabled) { background: var(--ysrp-hover); }
+.ysrp-btn:disabled { opacity: .5; cursor: default; }
+.ysrp-btn.is-small { min-height: 30px; padding: 0 12px; font-size: 13px; flex: 0 0 auto; }
+.ysrp-btn.is-armed { border-color: var(--ysrp-danger); color: var(--ysrp-danger) !important; }
+.ysrp-ibtn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; flex: 0 0 auto; padding: 0; border: none; border-radius: 999px; background: transparent; cursor: pointer; color: var(--ysrp-sub); }
+.ysrp-ibtn:hover:not(:disabled) { background: var(--ysrp-hover); color: var(--ysrp-fg); }
 .ysrp-ibtn:disabled { cursor: default; }
+.ysrp-textarea, .ysrp-input, .ysrp-select { width: 100%; min-height: 36px; padding: 6px 12px; border: 1px solid var(--ysrp-input-border); border-radius: .625rem; background: var(--ysrp-input); color: var(--ysrp-fg); font: inherit; font-size: 14px; outline: none; }
+.ysrp-input::placeholder, .ysrp-textarea::placeholder { color: var(--ysrp-tertiary); }
+.ysrp-textarea { resize: vertical; min-height: 72px; padding: 8px 12px; }
+.ysrp-textarea.is-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.ysrp-textarea:focus, .ysrp-input:focus, .ysrp-select:focus { border-color: var(--ysrp-border-strong); box-shadow: 0 0 0 2px var(--ysrp-hover); }
+.ysrp-select { width: auto; padding-right: 8px; cursor: pointer; }
+.ysrp-switch { position: relative; flex: 0 0 auto; width: 36px; height: 20px; padding: 0; border: none; border-radius: 999px; background: var(--ysrp-border-strong); cursor: pointer; transition: background .15s; }
+.ysrp-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform .15s; }
+.ysrp-switch[aria-checked="true"] { background: var(--ysrp-fg); }
+.ysrp-switch[aria-checked="true"]::after { transform: translateX(16px); background: var(--ysrp-bg); }
+.ysrp-switch:disabled { opacity: .5; cursor: default; }
+.ysrp-check { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; }
+.ysrp-check input { width: 16px; height: 16px; margin: 0; accent-color: var(--ysrp-fg); }
+.ysrp-field { display: flex; flex-direction: column; gap: 6px; }
+.ysrp-field > span { font-weight: 500; color: var(--ysrp-sub); font-size: 13px; }
+.ysrp-inline { display: flex; gap: 8px; }
+.ysrp-inline .ysrp-btn { flex: 0 0 auto; }
+.ysrp-row-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.ysrp-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ysrp-msg { color: var(--ysrp-sub); font-size: 13px; }
+.ysrp-msg.is-ok { color: var(--ysrp-ok); }
+.ysrp-msg.is-error { color: var(--ysrp-danger); }
+.ysrp-empty { color: var(--ysrp-tertiary); padding: 24px 0; text-align: center; }
+
+/* Section cards (storage, transcript, sync, display) */
+.ysrp-card { display: flex; flex-direction: column; gap: 12px; padding: 1rem; border-radius: 1rem; border: 1px solid var(--ysrp-border); background: var(--ysrp-card); }
+.ysrp-card-title { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; }
+.ysrp-card-icon, .ysrp-plugin-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 28px; height: 28px; border-radius: .5rem; background: var(--ysrp-l2); color: var(--ysrp-fg); font-size: 13px; }
+.ysrp-card-sub { color: var(--ysrp-sub); font-size: 13px; margin-top: -4px; }
+.ysrp-choice { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: .75rem; border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); cursor: pointer; transition: border-color .15s, background .15s; }
+.ysrp-choice:hover:not(.is-disabled) { background: var(--ysrp-hover); }
+.ysrp-choice input { display: none; }
+.ysrp-choice.is-selected { border-color: var(--ysrp-fg); box-shadow: 0 0 0 1px var(--ysrp-fg); }
+.ysrp-choice.is-disabled { opacity: .5; cursor: not-allowed; }
+.ysrp-choice-badge { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; color: var(--ysrp-sub); border: 1px solid var(--ysrp-border-strong); flex: 0 0 auto; }
+.ysrp-choice.is-selected .ysrp-choice-badge { background: var(--ysrp-fg); border-color: var(--ysrp-fg); color: var(--ysrp-bg); }
+.ysrp-choice-text { display: flex; flex-direction: column; min-width: 0; }
+.ysrp-choice-label { font-weight: 500; }
+.ysrp-choice-hint { color: var(--ysrp-sub); font-size: 12px; }
+.ysrp-file { position: relative; overflow: hidden; display: flex; align-items: center; gap: 8px; flex: 1 1 200px; min-height: 36px; padding: 6px 14px; border: 1px dashed var(--ysrp-border-strong); border-radius: 999px; cursor: pointer; color: var(--ysrp-sub); }
+.ysrp-file:hover, .ysrp-file:focus-within { color: var(--ysrp-fg); background: var(--ysrp-hover); }
+.ysrp-file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ysrp-file input { display: none; }
+.ysrp-file.is-ios input { display: block; position: absolute; inset: 0; width: 100%; height: 100%; opacity: .01; margin: 0; cursor: pointer; }
+.ysrp-info { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: .75rem; background: var(--ysrp-bg); border: 1px solid var(--ysrp-border); }
+.ysrp-info-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.ysrp-info-row b { color: var(--ysrp-sub); font-weight: 500; white-space: nowrap; }
+
+/* Records list */
+.ysrp-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.ysrp-row { display: flex; flex-direction: column; gap: 6px; padding: 8px 8px 8px 12px; border-radius: .875rem; border: 1px solid var(--ysrp-border); background: var(--ysrp-card); color: var(--ysrp-fg); }
+.ysrp-row.is-current { border-color: var(--ysrp-border-strong); box-shadow: inset 3px 0 0 var(--ysrp-fg); }
+.ysrp-row-top { display: flex; align-items: center; gap: 2px; }
+.ysrp-pct { min-width: 48px; margin-right: 8px; color: var(--ysrp-sub); font-size: 13px; font-variant-numeric: tabular-nums; }
+.ysrp-title { flex: 1; min-width: 0; word-break: break-word; }
 .ysrp-ibtn.ysrp-da.is-pending { filter: grayscale(1); opacity: .4; }
 .ysrp-ibtn.ysrp-da.is-off { filter: grayscale(1); opacity: .6; }
-.ysrp-ibtn.is-transcript { color: var(--ysrp-accent); }
-.ysrp-ibtn.is-note { color: var(--ysrp-note); }
-.ysrp-ibtn.is-link { color: var(--ysrp-link); }
-.ysrp-ibtn.is-delete { color: var(--ysrp-danger); border: 1px solid var(--ysrp-border); }
+.ysrp-ibtn.is-delete:hover:not(:disabled) { color: var(--ysrp-danger); }
 .ysrp-ibtn.is-copied { color: var(--ysrp-ok); }
-.ysrp-panel { display: none; flex-direction: column; gap: 6px; padding: 8px; border-radius: 8px; background: var(--ysrp-bg); }
+.ysrp-panel { display: none; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: .75rem; background: var(--ysrp-bg); border: 1px solid var(--ysrp-border); }
 .ysrp-panel.is-open { display: flex; }
 .ysrp-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-.ysrp-panel-label { font-weight: 600; color: var(--ysrp-sub); }
-.ysrp-status { font-size: 12px; color: var(--ysrp-accent); }
+.ysrp-panel-label { font-weight: 500; color: var(--ysrp-sub); font-size: 13px; }
+.ysrp-status { font-size: 12px; color: var(--ysrp-sub); }
 .ysrp-status.is-error { color: var(--ysrp-danger); }
 .ysrp-url { display: flex; align-items: center; gap: 4px; word-break: break-all; color: var(--ysrp-sub); text-align: left; }
 .ysrp-url span { flex: 1; }
 .ysrp-note-text { white-space: pre-wrap; word-break: break-word; }
-.ysrp-note-text.is-empty { color: var(--ysrp-sub); font-style: italic; }
-.ysrp-textarea, .ysrp-input { width: 100%; padding: 8px 10px; border: 1px solid var(--ysrp-input-border); border-radius: 6px; background: var(--ysrp-input); color: var(--ysrp-fg); font: inherit; outline: none; }
-.ysrp-textarea { resize: vertical; min-height: 64px; }
-.ysrp-textarea.is-mono { font-family: monospace; }
-.ysrp-textarea:focus, .ysrp-input:focus { box-shadow: 0 0 0 2px var(--ysrp-accent); }
-.ysrp-card { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; border-radius: 10px; border: 1px solid var(--ysrp-input-border); background: var(--ysrp-card); }
-.ysrp-card-title { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 700; }
-.ysrp-card-sub { color: var(--ysrp-sub); margin-top: -6px; }
-.ysrp-choice { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; border: 1px solid var(--ysrp-input-border); background: var(--ysrp-bg); cursor: pointer; }
-.ysrp-choice input { display: none; }
-.ysrp-choice.is-selected { border-color: var(--ysrp-choice-accent); box-shadow: 0 0 0 1px var(--ysrp-choice-accent); }
-.ysrp-choice.is-disabled { opacity: .5; cursor: not-allowed; }
-.ysrp-choice-badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 8px; color: var(--ysrp-choice-accent); border: 1px solid var(--ysrp-choice-accent); flex: 0 0 auto; }
-.ysrp-choice.is-selected .ysrp-choice-badge { background: var(--ysrp-choice-accent); color: var(--ysrp-bg); }
-.ysrp-choice-text { display: flex; flex-direction: column; min-width: 0; }
-.ysrp-choice-label { font-weight: 600; }
-.ysrp-choice.is-selected .ysrp-choice-label { color: var(--ysrp-choice-accent); }
-.ysrp-choice-hint { color: var(--ysrp-sub); font-size: 12px; }
-.ysrp-row-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.ysrp-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 32px; padding: 4px 12px; border-radius: 8px; border: 1px solid var(--ysrp-btn-accent, var(--ysrp-accent)); color: var(--ysrp-btn-accent, var(--ysrp-accent)) !important; background: var(--ysrp-bg); font-weight: 600; cursor: pointer; flex: 1 1 auto; }
-.ysrp-btn:hover { background: var(--ysrp-hover); }
-.ysrp-btn:disabled { opacity: .6; cursor: default; }
-.ysrp-file { position: relative; overflow: hidden; display: flex; align-items: center; gap: 8px; flex: 1 1 200px; min-height: 36px; padding: 6px 12px; border: 1px dashed var(--ysrp-input-border); border-radius: 8px; cursor: pointer; }
-.ysrp-file:hover, .ysrp-file:focus-within { border-color: var(--ysrp-accent); color: var(--ysrp-accent); }
-.ysrp-file-name { flex: 1; color: var(--ysrp-sub); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ysrp-file input { display: none; }
-.ysrp-file.is-ios input { display: block; position: absolute; inset: 0; width: 100%; height: 100%; opacity: .01; margin: 0; cursor: pointer; }
-.ysrp-check { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; }
-.ysrp-check input { width: 16px; height: 16px; margin: 0; accent-color: var(--ysrp-accent); }
-.ysrp-field { display: flex; flex-direction: column; gap: 4px; }
-.ysrp-field > span { font-weight: 600; color: var(--ysrp-sub); font-size: 12px; }
-.ysrp-inline { display: flex; gap: 8px; }
-.ysrp-inline .ysrp-btn { flex: 0 0 auto; }
-.ysrp-info { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border-radius: 8px; background: var(--ysrp-bg); }
-.ysrp-info-row { display: flex; gap: 8px; flex-wrap: wrap; }
-.ysrp-info-row b { color: var(--ysrp-sub); font-weight: 600; white-space: nowrap; }
-.ysrp-mono { font-family: monospace; }
-.ysrp-msg { color: var(--ysrp-sub); font-size: 12px; }
-.ysrp-msg.is-ok { color: var(--ysrp-ok); }
-.ysrp-msg.is-error { color: var(--ysrp-danger); }
+.ysrp-note-text.is-empty { color: var(--ysrp-tertiary); }
+
+/* Plugins tab: search bar + two-column card grid */
+.ysrp-plugins { display: flex; flex-direction: column; gap: 12px; }
+.ysrp-search-bar { display: flex; gap: 8px; }
+.ysrp-search-bar .ysrp-search { flex: 1; min-width: 0; }
+.ysrp-search-bar .ysrp-filter { flex: 0 0 auto; }
+.ysrp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.ysrp-grid:empty { display: none; }
+.ysrp-plugin { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: 1rem; border: 1px solid var(--ysrp-border); background: var(--ysrp-card); transition: border-color .15s; }
+.ysrp-plugin:hover { border-color: var(--ysrp-border-strong); }
+.ysrp-plugin.is-required { opacity: .4; }
+.ysrp-plugin.is-required:hover { opacity: .7; }
+.ysrp-plugin-body { display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.ysrp-plugin-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ysrp-plugin-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ysrp-plugin-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ysrp-plugin-tag { display: inline-flex; color: var(--ysrp-tertiary); font-size: 12px; }
+.ysrp-card-controls { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.ysrp-plugin-desc { color: var(--ysrp-sub); font-size: 13px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 2.9em; }
+.ysrp-plugin-footer { color: var(--ysrp-tertiary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Nested plugin config dialog */
+.ysrp-dialog-layer { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; padding: 1.5rem; background: var(--ysrp-backdrop); }
+.ysrp-dialog { position: relative; display: flex; flex-direction: column; gap: 14px; width: min(32rem, 100%); max-height: 100%; padding: 1.5rem; border-radius: 1rem; border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); box-shadow: 0 16px 48px rgba(0, 0, 0, .3); overflow-y: auto; overscroll-behavior: contain; }
+.ysrp-dialog-close { position: absolute; top: .75rem; right: .75rem; }
+.ysrp-dialog-header { display: flex; flex-direction: column; gap: 4px; padding-right: 2rem; }
+.ysrp-dialog-title { font-size: 18px; font-weight: 600; }
+.ysrp-dialog-desc { color: var(--ysrp-sub); font-size: 13px; }
+.ysrp-dialog-field { display: flex; flex-direction: column; gap: 8px; }
+.ysrp-dialog-label { font-size: 12px; font-weight: 500; color: var(--ysrp-tertiary); }
+.ysrp-dialog-text { color: var(--ysrp-sub); }
+.ysrp-dialog-settings { display: flex; flex-direction: column; border-radius: .875rem; border: 1px solid var(--ysrp-border); background: var(--ysrp-card); }
+.ysrp-dialog-footer { display: flex; justify-content: flex-end; }
+.ysrp-setting-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; }
+.ysrp-setting-row + .ysrp-setting-row { border-top: 1px solid var(--ysrp-border); }
+.ysrp-setting-row.is-stacked { flex-direction: column; align-items: stretch; gap: 8px; }
+.ysrp-row-label { min-width: 0; }
+.ysrp-row-title { font-size: 14px; }
+
+/* In-player &t= choice (F-2.6) */
 .ysrp-resume { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 1000; box-sizing: border-box;
-  display: flex; flex-direction: column; gap: 10px; width: 360px; max-width: calc(100% - 32px); padding: 16px; border-radius: 10px;
-  border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); color: var(--ysrp-fg); box-shadow: rgba(0,0,0,.4) 0 4px 16px;
-  font-family: Roboto, Arial, sans-serif; font-size: 13px; line-height: 1.45; text-align: left; text-shadow: none; }
+  display: flex; flex-direction: column; gap: 10px; width: 360px; max-width: calc(100% - 32px); padding: 18px; border-radius: 1rem;
+  border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); color: var(--ysrp-fg); box-shadow: 0 8px 32px rgba(0, 0, 0, .4);
+  font-family: var(--ysrp-font); font-size: 14px; line-height: 1.5; text-align: left; text-shadow: none; }
 .ysrp-resume * { box-sizing: border-box; }
 .ysrp-resume button { font: inherit; }
-.ysrp-resume-title { font-size: 16px; font-weight: 700; }
-.ysrp-resume-sub { color: var(--ysrp-sub); }
+.ysrp-resume-title { font-size: 16px; font-weight: 600; }
+.ysrp-resume-sub { color: var(--ysrp-sub); font-size: 13px; }
 .ysrp-resume .ysrp-btn { font-variant-numeric: tabular-nums; }
-.ysrp-resume-saved { --ysrp-btn-accent: var(--ysrp-ok); }
-.ysrp-plugin { gap: 8px; }
-.ysrp-plugin-head { display: flex; align-items: flex-start; gap: 12px; }
-.ysrp-plugin-text { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
-.ysrp-plugin-name { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 700; }
-.ysrp-plugin-desc { color: var(--ysrp-sub); }
-.ysrp-plugin-tag { font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 6px; background: var(--ysrp-hover); color: var(--ysrp-accent); }
-.ysrp-plugin-settings { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px solid var(--ysrp-border); }
-.ysrp-plugin-settings[hidden] { display: none; }
-.ysrp-switch { position: relative; flex: 0 0 auto; width: 36px; height: 20px; margin-top: 2px; padding: 0; border: none; border-radius: 10px; background: var(--ysrp-thumb); cursor: pointer; transition: background .15s; }
-.ysrp-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: transform .15s; }
-.ysrp-switch[aria-checked="true"] { background: var(--ysrp-accent); }
-.ysrp-switch[aria-checked="true"]::after { transform: translateX(16px); }
-.ysrp-switch:disabled { opacity: .5; cursor: default; }
-.ysrp-select { width: 100%; padding: 6px 8px; border: 1px solid var(--ysrp-input-border); border-radius: 6px; background: var(--ysrp-input); color: var(--ysrp-fg); font: inherit; }
+.ysrp-resume-saved { background: var(--ysrp-fg) !important; border-color: var(--ysrp-fg) !important; color: var(--ysrp-bg) !important; }
+
+/* Narrow screens: nav becomes a scrolling top row */
+@media (max-width: 640px) {
+  .ysrp-settings-container { flex-direction: column; width: 94vw; height: 88vh; }
+  .ysrp-nav { flex: 0 0 auto; width: auto; flex-direction: row; gap: 4px; padding: .5rem; border-right: none; border-bottom: 1px solid var(--ysrp-border); overflow-x: auto; overflow-y: hidden; }
+  .ysrp-nav-group, .ysrp-version { display: none; }
+  .ysrp-tab { width: auto; flex: 0 0 auto; }
+  .ysrp-main { padding: 1rem; }
+  .ysrp-grid { grid-template-columns: minmax(0, 1fr); }
+}
 `;
 
   // src/index.ts

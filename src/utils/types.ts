@@ -51,6 +51,7 @@ export interface PluginDef {
     name: string;
     title: Text;
     description: Text;
+    icon?: string;
     authors: string[];
     required?: boolean;
     enabledByDefault?: boolean;

@@ -253,6 +253,7 @@ export default definePlugin({
     name: "Engine",
     title: () => t("Progress engine", "进度引擎"),
     description: () => t("Saves the playback position and resumes it when you come back.", "保存播放位置，回来时自动接着播放。"),
+    icon: "gauge-high",
     authors: [Devs.V],
     required: true,
 

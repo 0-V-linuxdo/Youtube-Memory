@@ -742,6 +742,42 @@ const tests = {
       names.join(',') === 'Title a23one｜a23one.json,Title a23three｜a23three.json,Title a23two｜a23two.json' && flag === '1' && drive.uploads.length === uploads,
       `files ${names.join(',')}, flag ${flag}, uploads ${uploads} then ${drive.uploads.length} after reload`);
     await ctx.close();
+  },
+
+  async 'A-24'() {
+    const ctx = await newContext();
+    const page = await newPage(ctx);
+    await goto(page, 'v=a24dialog');
+    await sleep(2000);
+    await openSettings(page);
+    await page.click('.ysrp-tab[data-tab-id="plugins"]');
+    const groups = await page.$$eval('.ysrp-nav-group', els => els.length);
+    const visible = () => page.$$eval('.ysrp-plugin', els => els.filter(e => e.offsetParent).map(e => e.dataset.plugin).join(','));
+    await page.fill('.ysrp-search', '字幕');
+    const searched = await visible();
+    await page.fill('.ysrp-search', '');
+    await page.selectOption('.ysrp-filter', 'disabled');
+    const disabledOnly = await visible();
+    const emptyShown = await page.isVisible('.ysrp-plugins .ysrp-empty');
+    await page.selectOption('.ysrp-filter', 'all');
+    await page.click('.ysrp-plugin[data-plugin="BadgeToggle"] .ysrp-plugin-config');
+    const title = await page.textContent('.ysrp-dialog-title');
+    await page.click('.ysrp-dialog .ysrp-switch[data-setting="startHidden"]');
+    const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem('YSRP_Plugins')).plugins.BadgeToggle.startHidden);
+    const afterToggle = await stored();
+    await page.click('.ysrp-dialog-footer .ysrp-btn');
+    const afterOneClick = await stored();
+    await page.click('.ysrp-dialog-footer .ysrp-btn');
+    const afterReset = await stored();
+    const switchOn = await page.getAttribute('.ysrp-dialog .ysrp-switch[data-setting="startHidden"]', 'aria-checked');
+    await page.keyboard.press('Escape');
+    const dialogGone = await page.locator('.ysrp-dialog').count() === 0;
+    const modalOpen = await page.isVisible('.ysrp-settings-container');
+    check('A-24', 'plugins tab: grouped nav, search and filter, config dialog edits and resets settings, Esc closes the dialog first',
+      groups === 2 && searched === 'Transcript' && disabledOnly === '' && emptyShown && title === '徽标开关' &&
+      afterToggle === false && afterOneClick === false && afterReset === true && switchOn === 'true' && dialogGone && modalOpen,
+      `groups ${groups}, search "${searched}", disabled "${disabledOnly}" empty ${emptyShown}, title ${title}, stored ${afterToggle}/${afterOneClick}/${afterReset}, switch ${switchOn}, dialog gone ${dialogGone}, modal open ${modalOpen}`);
+    await ctx.close();
   }
 };
 

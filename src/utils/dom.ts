@@ -80,11 +80,10 @@ export function setMessage(el: HTMLElement, text: string, kind?: "ok" | "error")
     el.style.display = text ? "" : "none";
 }
 
-export function card(iconName: string, accentVar: string, titleText: string, subtitle: string | null, ...children: Child[]) {
-    const ic = icon(iconName);
-    ic.style.color = `var(${accentVar})`;
+// Cards are monochrome like void++; the accent argument is kept so callers stay unchanged.
+export function card(iconName: string, _accentVar: string, titleText: string, subtitle: string | null, ...children: Child[]) {
     return h("div", { class: "ysrp-card" },
-        h("div", { class: "ysrp-card-title" }, ic, h("span", { text: titleText })),
+        h("div", { class: "ysrp-card-title" }, h("span", { class: "ysrp-card-icon" }, icon(iconName)), h("span", { text: titleText })),
         subtitle ? h("div", { class: "ysrp-card-sub", text: subtitle }) : null,
         ...children);
 }

@@ -51,6 +51,7 @@ export default definePlugin({
     name: "BadgeToggle",
     title: () => t("Badge toggle", "徽标开关"),
     description: () => t("Adds a 💾 button that shows or hides the progress badge.", "在徽标旁加一个 💾 按钮，点击显示或隐藏进度徽标。"),
+    icon: "floppy-disk",
     authors: [Devs.V],
     enabledByDefault: true,
     settings,

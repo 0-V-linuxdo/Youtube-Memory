@@ -90,12 +90,14 @@ export default definePlugin({
     name: "Transcript",
     title: () => t("Transcript", "字幕"),
     description: () => t("Fetch a video's transcript from an OpenAI-compatible endpoint, from the records list.", "在记录列表里通过兼容 OpenAI 的接口获取视频字幕。"),
+    icon: "closed-captioning",
     authors: [Devs.V],
     enabledByDefault: true,
 
     settingsTab: {
         id: "transcript",
-        order: 30,
+        group: "plugins",
+        order: 20,
         icon: "closed-captioning",
         label: () => t("Transcript", "字幕"),
         render: TranscriptPane,

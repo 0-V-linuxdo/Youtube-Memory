@@ -21,12 +21,14 @@ export default definePlugin({
     name: "DriveSync",
     title: () => t("Google Drive sync", "云同步"),
     description: () => t("Keeps your records in your own Google Drive and picks up progress from other devices.", "把记录同步到你自己的 Google Drive，在其它设备上接着看。"),
+    icon: "cloud",
     authors: [Devs.V],
     enabledByDefault: true,
 
     settingsTab: {
         id: "drive",
-        order: 40,
+        group: "plugins",
+        order: 30,
         icon: "cloud",
         label: () => t("Sync", "云同步"),
         render: DrivePane,

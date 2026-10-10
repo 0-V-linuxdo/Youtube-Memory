@@ -17,8 +17,11 @@ export interface Pane {
     destroy?(): void;
 }
 
+export type SettingsTabGroup = "general" | "plugins";
+
 export interface SettingsTabDef {
     id: string;
+    group: SettingsTabGroup;
     order: number;
     label: () => string;
     icon: string;
@@ -39,7 +42,8 @@ export function removeSettingsTab(id: string) {
 }
 
 export function getSettingsTabs() {
-    return [...tabs.values()].sort((a, b) => a.order - b.order);
+    const rank = (g: SettingsTabGroup) => (g === "general" ? 0 : 1);
+    return [...tabs.values()].sort((a, b) => rank(a.group) - rank(b.group) || a.order - b.order);
 }
 
 export function onSettingsTabsChange(listener: () => void) {

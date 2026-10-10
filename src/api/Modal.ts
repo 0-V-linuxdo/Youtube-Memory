@@ -96,7 +96,11 @@ export function rebuild() {
 export function mount() {
     if (keyListener) return;
     keyListener = event => {
-        if (event.key === "Escape" && isOpen()) { event.stopPropagation(); close(); }
+        if (event.key !== "Escape" || !isOpen()) return;
+        event.stopPropagation();
+        const nested = ui?.container.querySelector<HTMLElement>(".ysrp-dialog-layer");
+        if (nested) nested.remove();
+        else close();
     };
     document.addEventListener("keydown", keyListener, true);
     unsubscribeTabs = onSettingsTabsChange(() => { if (ui) rebuild(); });
@@ -125,17 +129,23 @@ function build(): ModalUI {
     const title = h("h3");
     const modeBadge = h("span", { class: "ysrp-badge" });
     const spinner = h("span", { class: "ysrp-spinner", title: t("Refreshing…", "正在更新列表…") }, h("i", { class: "fa-solid fa-arrows-rotate fa-spin" }));
-    const setCount = (n: number) => { title.textContent = t("Saved Videos - ({count})", "已保存视频 - ({count})", { count: n }); };
+    let count = Store.list().length;
+    const renderTitle = () => {
+        const tab = tabs.find(x => x.id === activeTab);
+        title.textContent = activeTab === "records" || !tab
+            ? t("Saved Videos - ({count})", "已保存视频 - ({count})", { count })
+            : tab.label();
+    };
+    const setCount = (n: number) => { count = n; renderTitle(); };
     const renderModeBadge = () => {
         modeBadge.textContent = Store.getMode() === "gm" ? t("GM Storage", "GM 存储") : t("localStorage", "浏览器本地存储");
     };
-    setCount(Store.list().length);
     renderModeBadge();
 
+    const closeButton = h("button", { type: "button", class: "ysrp-close", title: t("Close", "关闭"), "aria-label": t("Close", "关闭"), onclick: close }, icon("xmark"));
     const header = h("div", { class: "ysrp-header" },
-        h("div", { class: "ysrp-header-left" }, title, modeBadge),
-        h("div", { class: "ysrp-header-left" }, spinner,
-            h("button", { type: "button", class: "ysrp-close", title: t("Close", "关闭"), "aria-label": t("Close", "关闭"), text: "✖", onclick: close })));
+        h("div", { class: "ysrp-header-left" }, title, modeBadge, spinner),
+        closeButton);
 
     const ctx: PaneContext = {
         setCount,
@@ -144,12 +154,19 @@ function build(): ModalUI {
         listen,
     };
 
+    // Same layout as void++ (inside Grok's settings dialog): grouped navigation on the left, the active tab on the right.
     const tabs = getSettingsTabs();
     const panes = new Map<string, Pane>();
     const tabButtons = new Map<string, HTMLButtonElement>();
-    const tabsBar = h("div", { class: "ysrp-tabs", role: "tablist" });
+    const nav = h("nav", { class: "ysrp-tabs ysrp-nav", role: "tablist" });
+    const groupLabels = { general: t("Video Memory", "视频记忆"), plugins: t("Plugins", "插件") };
     const body = h("div", { class: "ysrp-body ysrp-settings-container-body" });
+    let lastGroup = "";
     for (const tab of tabs) {
+        if (tab.group !== lastGroup) {
+            lastGroup = tab.group;
+            nav.appendChild(h("div", { class: "ysrp-nav-group", text: groupLabels[tab.group] }));
+        }
         const pane = tab.render(ctx);
         pane.node.classList.add("ysrp-pane");
         pane.node.dataset.pane = tab.id;
@@ -157,12 +174,16 @@ function build(): ModalUI {
         const button = h("button", { type: "button", class: "ysrp-tab", role: "tab", dataset: { tabId: tab.id }, onclick: () => setTab(tab.id) },
             icon(tab.icon), h("span", { text: tab.label() }));
         tabButtons.set(tab.id, button);
-        tabsBar.appendChild(button);
+        nav.appendChild(button);
         body.appendChild(pane.node);
     }
+    nav.appendChild(h("div", { class: "ysrp-version" },
+        h("a", { href: "https://github.com/0-V-linuxdo/Youtube-Memory", target: "_blank", rel: "noreferrer", text: "Video Memory" }),
+        h("span", { text: ` • ${VERSION}` })));
 
+    const main = h("section", { class: "ysrp-main" }, header, body);
     const container = h("div", { class: "ysrp-settings-container ysrp-theme", role: "dialog", "aria-modal": "true", style: { display: "none" } },
-        header, tabsBar, body);
+        nav, main);
     for (const name of ["keydown", "keyup", "keypress"]) {
         container.addEventListener(name, event => {
             if ((event as KeyboardEvent).key !== "Escape") event.stopPropagation();
@@ -172,12 +193,14 @@ function build(): ModalUI {
     function setTab(id: string) {
         activeTab = panes.has(id) ? id : tabs[0]?.id ?? "records";
         container.dataset.activeTab = activeTab;
+        modeBadge.style.display = activeTab === "records" || activeTab === "storage" ? "" : "none";
         for (const [key, button] of tabButtons) {
             const on = key === activeTab;
             button.classList.toggle("is-active", on);
             button.setAttribute("aria-selected", String(on));
             panes.get(key)?.node.classList.toggle("is-active", on);
         }
+        renderTitle();
     }
 
     return {

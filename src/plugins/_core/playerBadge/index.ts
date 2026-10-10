@@ -20,6 +20,7 @@ export default definePlugin({
     name: "PlayerBadge",
     title: () => t("Player badge", "播放器徽标"),
     description: () => t("Shows the last saved time and the settings button in the player controls.", "在播放器控制栏显示最近保存的时间和设置按钮。"),
+    icon: "tag",
     authors: [Devs.V],
     required: true,
 
