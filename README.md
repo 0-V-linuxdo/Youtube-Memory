@@ -1,4 +1,42 @@
-<img src="https://github.com/0-V-linuxdo/Youtube-Memory/raw/refs/heads/main/main_icon/main_icon.svg"/>
-
 # [Youtube] Video Memory
-[Youtube] Video Memory
+
+记住每个 YouTube 视频的播放进度，下次打开时自动从上次的位置继续播放。
+
+## 功能
+
+- **自动保存 / 恢复进度**：等待播放器就绪、自动避开广告；恢复后会多次确认位置，被 YouTube 拉回时会重新跳转。
+- **时间戳链接冲突提示**：链接里带 `t=` 且与已保存进度相差较大时，弹窗让你选择从哪里播放。
+- **播放器徽标**：在播放器上显示「上次保存」时间和同步状态。
+- **设置面板（Void++ 风格）**：记录卡片（搜索筛选、笔记、链接、字幕，删除需确认）、存储后端（浏览器本地存储 / GM 存储）切换与迁移、JSON 导入导出、界面语言、插件收藏 / 置顶 / 开关与设置。
+- **启动时整理记录**：删除损坏的记录，补全缺失字段。
+- 中英双语界面，单色配色，跟随系统深色 / 浅色主题。
+
+## 插件
+
+| 插件 | 说明 |
+| --- | --- |
+| 进度引擎（必需） | 保存与恢复播放进度 |
+| 播放器徽标（必需） | 播放器上的状态徽标与续播选择弹窗 |
+| 设置弹窗（必需） | 设置面板 |
+| 徽标开关 | 一键隐藏 / 显示播放器徽标 |
+| 字幕 | 字幕接口设置；在记录列表中获取、复制字幕 |
+| 云同步 | 通过 Google Drive 在多台设备间同步记录 |
+
+非必需插件可在设置面板的「插件」页中启用或停用，停用后立即移除其添加的所有内容。
+
+## 安装
+
+1. 安装 Tampermonkey（或 Violentmonkey 等）脚本管理器。
+2. 打开 `userscript/[Youtube] Video Memory.user.js`，按提示安装。
+
+## 构建
+
+需要 [Bun](https://bun.sh)。
+
+```sh
+bun run build.ts        # 生成 userscript/*.user.js 与 *.meta.js（--dev 为开发构建）
+npx tsc --noEmit        # 类型检查
+NODE_PATH=$(npm root -g) node tests/acceptance.mjs   # 验收测试（需全局 Playwright）
+```
+
+源码结构：`src/api`（插件 API 与界面部件 `ui.ts` / `dialogs.ts`）、`src/utils`（工具）、`src/plugins/_core`（核心插件）、`src/plugins/*`（可选插件）。新增插件只需在 `src/plugins/` 下新建目录，构建时会自动注册。

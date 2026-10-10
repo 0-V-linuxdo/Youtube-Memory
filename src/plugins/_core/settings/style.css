@@ -1,0 +1,197 @@
+/* Settings modal shell (N-5.3) and tab layouts. Parts (cards, rows, dialogs…) are in src/api/ui.css.
+   All sizes in px: YouTube sets html { font-size: 10px }. */
+
+.ysrp-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--ysrp-overlay);
+  z-index: 9998;
+  display: none;
+}
+.ysrp-backdrop.is-open { display: block; }
+
+.ysrp-settings-container {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+  padding: 0;
+  z-index: 9999;
+  width: min(896px, calc(100vw - 32px));
+  height: min(640px, calc(100vh - 32px));
+  display: none;
+  flex-direction: row;
+  overflow: hidden;
+  background: var(--ysrp-surface-base);
+  color: var(--ysrp-fg-primary);
+  border: 1px solid var(--ysrp-border-l1);
+  border-radius: 16px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
+}
+.ysrp-settings-container.is-open { display: flex; }
+
+/* ---------------------------------------------------------------- N-5.3.5 navigation */
+.ysrp-nav {
+  position: relative;
+  flex: 0 0 224px;
+  width: 224px;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 12px 56px;
+  background: var(--ysrp-surface-base);
+  border-right: 1px solid var(--ysrp-border-l1);
+  overflow-y: auto;
+}
+.ysrp-nav-groups { display: flex; flex-direction: column; gap: 8px; }
+.ysrp-nav-group { display: flex; flex-direction: column; gap: 2px; }
+.ysrp-nav-title {
+  padding: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 16px;
+  color: var(--ysrp-fg-tertiary);
+}
+.ysrp-tab {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 36px;
+  margin: 0;
+  padding: 0 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ysrp-fg-secondary);
+  font-family: var(--ysrp-font);
+  font-size: 14px;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 150ms, color 150ms;
+}
+.ysrp-tab:hover { background: var(--ysrp-surface-l2); }
+.ysrp-tab.is-active { background: var(--ysrp-surface-l2); color: var(--ysrp-fg-primary); font-weight: 500; }
+.ysrp-tab-icon { display: inline-flex; justify-content: center; flex: 0 0 16px; width: 16px; font-size: 16px; }
+.ysrp-tab-icon i { font-size: 16px; }
+.ysrp-tab-label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ysrp-tab:focus-visible { outline: 2px solid var(--ysrp-border-l2); outline-offset: -2px; }
+.ysrp-nav-footer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 12px;
+  opacity: .3;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--ysrp-fg-secondary);
+  user-select: text;
+  -webkit-user-select: text;
+}
+.ysrp-version-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ysrp-version-link { color: inherit; text-decoration: none; }
+.ysrp-version-link:hover { text-decoration: underline; }
+
+/* ---------------------------------------------------------------- N-5.3.6 right column */
+.ysrp-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 20px 16px;
+}
+.ysrp-header {
+  flex: 0 0 32px;
+  height: 32px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ysrp-header-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ysrp-heading {
+  margin: 0;
+  font-family: var(--ysrp-font);
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 28px;
+  color: var(--ysrp-fg-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ysrp-header-info { display: inline-flex; align-items: center; }
+.ysrp-badge {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--ysrp-fg-secondary);
+  border: 1px solid var(--ysrp-border-l1);
+  border-radius: 6px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+.ysrp-refresh { display: none; font-size: 14px; color: var(--ysrp-fg-tertiary); }
+.ysrp-refresh.is-active { display: inline-flex; }
+.ysrp-close { flex: 0 0 auto; width: 32px; height: 32px; }
+.ysrp-close i { font-size: 16px; }
+
+/* N-5.2.16 scroll area: extends 20px to each side with the same padding, scrollbar at the edge */
+.ysrp-panes { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+.ysrp-pane {
+  display: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0 -20px;
+  padding: 0 20px 4px;
+}
+.ysrp-pane.is-active { display: block; }
+.ysrp-pane-stack { display: flex; flex-direction: column; gap: 16px; }
+
+/* ---------------------------------------------------------------- records tab (N-5.4) */
+.ysrp-record .ysrp-card-desc { -webkit-line-clamp: 2; }
+.ysrp-record-title { cursor: default; }
+.ysrp-link-input { cursor: text; }
+.ysrp-transcript-dialog .ysrp-dialog-body { min-height: 0; }
+.ysrp-transcript-text { flex: 1 1 auto; min-height: 200px; }
+.ysrp-transcript-status { font-size: 13px; line-height: 20px; color: var(--ysrp-fg-secondary); }
+.ysrp-transcript-status.is-error { color: var(--ysrp-fg-danger); }
+.ysrp-transcript-status.is-success { color: var(--ysrp-fg-success); }
+
+/* ---------------------------------------------------------------- plugins tab (N-5.5) */
+.ysrp-plugin.is-core { opacity: .4; }
+.ysrp-plugin.is-core:hover { opacity: .7; }
+.ysrp-plugin.is-failed { opacity: .5; border-color: var(--ysrp-danger-border); }
+.ysrp-core-sep { margin: 4px 0; }
+.ysrp-plugin-settings { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; min-height: 0; }
+
+/* ---------------------------------------------------------------- storage tab (N-5.7.1) */
+.ysrp-file-name { font-size: 12px; color: var(--ysrp-fg-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
+.ysrp-file-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.ysrp-steps { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; line-height: 1.5; color: var(--ysrp-fg-secondary); }
+.ysrp-steps a { color: var(--ysrp-fg-primary); }
+.ysrp-info-lines { display: flex; flex-direction: column; gap: 4px; font-size: 12px; line-height: 16px; color: var(--ysrp-fg-secondary); }
+
+/* ---------------------------------------------------------------- N-5.3.7 narrow screens */
+@media (max-width: 640px) {
+  .ysrp-settings-container.is-open { flex-direction: column; }
+  .ysrp-nav {
+    flex: 0 0 auto;
+    width: auto;
+    padding: 8px 12px;
+    border-right: none;
+    border-bottom: 1px solid var(--ysrp-border-l1);
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .ysrp-nav-groups, .ysrp-nav-group { flex-direction: row; }
+  .ysrp-nav-title, .ysrp-nav-footer { display: none; }
+  .ysrp-tab { width: auto; flex: 0 0 auto; }
+  .ysrp-main { padding: 16px 16px 12px; }
+  .ysrp-pane { margin: 0 -16px; padding: 0 16px 4px; }
+}

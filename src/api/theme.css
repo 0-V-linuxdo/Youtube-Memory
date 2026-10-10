@@ -1,0 +1,34 @@
+/* N-5.1 colour tokens: follow the system light/dark scheme live. */
+:root {
+  --ysrp-surface-base: #ffffff;
+  --ysrp-surface-l1: #f4f4f5;
+  --ysrp-surface-l2: #e8e8eb;
+  --ysrp-border-l1: rgba(0, 0, 0, .08);
+  --ysrp-border-l2: #c4c4cc;
+  --ysrp-fg-primary: #0d0d0d;
+  --ysrp-fg-secondary: #6b6b75;
+  --ysrp-fg-tertiary: #8a8a94;
+  --ysrp-fg-danger: #dc2626;
+  --ysrp-fg-success: #16a34a;
+  --ysrp-overlay: rgba(0, 0, 0, .4);
+  --ysrp-icon-block: rgba(13, 13, 13, .1);
+  --ysrp-danger-border: rgba(220, 38, 38, .45);
+  --ysrp-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ysrp-surface-base: #0e0e10;
+    --ysrp-surface-l1: #141416;
+    --ysrp-surface-l2: #1f1f23;
+    --ysrp-border-l1: rgba(255, 255, 255, .08);
+    --ysrp-border-l2: #4a4a52;
+    --ysrp-fg-primary: #fafafa;
+    --ysrp-fg-secondary: #a1a1aa;
+    --ysrp-fg-tertiary: #9a9aa3;
+    --ysrp-fg-danger: #f87171;
+    --ysrp-fg-success: #4ade80;
+    --ysrp-overlay: rgba(0, 0, 0, .6);
+    --ysrp-icon-block: rgba(250, 250, 250, .1);
+    --ysrp-danger-border: rgba(248, 113, 113, .45);
+  }
+}
