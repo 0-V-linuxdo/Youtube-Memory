@@ -1,131 +1,144 @@
-// DOM construction helpers. Trusted Types safe: nothing here ever touches innerHTML/outerHTML (N-0.4).
+/*
+ * [Youtube] Video Memory
+ * Copyright (c) 2025 0-V-linuxdo
+ * SPDX-License-Identifier: MIT
+ */
 
-export type Child = Node | string | number | null | undefined | false | Child[];
+type Child = Node | string | null | undefined | false | Child[];
+type Props = Record<string, unknown> & {
+    class?: string;
+    style?: Partial<CSSStyleDeclaration> | Record<string, string>;
+    text?: string;
+    dataset?: Record<string, string>;
+};
 
-export interface Props {
-  class?: string;
-  style?: string;
-  text?: string;
-  title?: string;
-  attrs?: Record<string, string | number | boolean | null | undefined>;
-  dataset?: Record<string, string>;
-  on?: { [type: string]: (ev: any) => void };
-  [prop: string]: unknown;
-}
-
-const RESERVED = new Set(['class', 'style', 'text', 'attrs', 'dataset', 'on']);
-
-function appendChildren(el: Node, children: Child[]): void {
-  for (const child of children) {
-    if (child === null || child === undefined || child === false) continue;
-    if (Array.isArray(child)) appendChildren(el, child);
-    else if (child instanceof Node) el.appendChild(child);
-    else el.appendChild(document.createTextNode(String(child)));
-  }
-}
-
-/** Create an element with properties and children. */
 export function h<K extends keyof HTMLElementTagNameMap>(tag: K, props?: Props | null, ...children: Child[]): HTMLElementTagNameMap[K] {
-  const el = document.createElement(tag);
-  if (props) {
-    if (props.class) el.className = props.class;
-    if (props.style) el.setAttribute('style', props.style);
-    if (props.text !== undefined) el.textContent = props.text;
-    if (props.attrs) {
-      for (const [k, v] of Object.entries(props.attrs)) {
-        if (v === null || v === undefined || v === false) continue;
-        el.setAttribute(k, v === true ? '' : String(v));
-      }
+    const node = document.createElement(tag);
+    if (props) {
+        for (const [key, value] of Object.entries(props)) {
+            if (value === null || value === undefined || value === false) continue;
+            if (key === "class") node.className = String(value);
+            else if (key === "style") Object.assign(node.style, value);
+            else if (key === "text") node.textContent = String(value);
+            else if (key === "dataset") Object.assign(node.dataset, value);
+            else if (key.startsWith("on") && typeof value === "function") node.addEventListener(key.slice(2), value as EventListener);
+            else if (typeof value === "boolean") (node as unknown as Record<string, unknown>)[key] = value;
+            else node.setAttribute(key, String(value));
+        }
     }
-    if (props.dataset) for (const [k, v] of Object.entries(props.dataset)) el.dataset[k] = v;
-    if (props.on) for (const [type, fn] of Object.entries(props.on)) el.addEventListener(type, fn as EventListener);
-    for (const [k, v] of Object.entries(props)) {
-      if (RESERVED.has(k) || v === undefined) continue;
-      if (k === 'innerHTML' || k === 'outerHTML') throw new Error('innerHTML is not allowed (Trusted Types)');
-      (el as unknown as Record<string, unknown>)[k] = v;
+    for (const child of (children as unknown[]).flat(Infinity) as (Node | string | null | undefined | false)[]) {
+        if (child !== null && child !== undefined && child !== false) node.append(child);
     }
-  }
-  appendChildren(el, children);
-  return el;
+    return node;
 }
 
-/** Font Awesome 6 solid icon (C-31). Unknown names give an empty <i>. */
-export function icon(name: string, extraClass = ''): HTMLElement {
-  const i = document.createElement('i');
-  if (name) i.className = `fa-solid fa-${name}${extraClass ? ` ${extraClass}` : ''}`;
-  i.setAttribute('aria-hidden', 'true');
-  return i;
+export const icon = (name: string) => h("i", { class: `fa-solid fa-${name} ysrp-icon`, "aria-hidden": "true" });
+
+export function setIcon(button: HTMLElement, name: string) {
+    const el = button.firstElementChild;
+    if (el) el.className = `fa-solid fa-${name} ysrp-icon`;
 }
 
-const SVG_NS = 'http://www.w3.org/2000/svg';
-const DEARROW_PATHS: Array<[string, string]> = [
-  ['#1213BD', 'M36 18.302c0 4.981-2.46 9.198-5.655 12.462s-7.323 5.152-12.199 5.152s-9.764-1.112-12.959-4.376S0 23.283 0 18.302s2.574-9.38 5.769-12.644S13.271 0 18.146 0s9.394 2.178 12.589 5.442C33.931 8.706 36 13.322 36 18.302z'],
-  ['#88c9f9', 'm 30.394282,18.410186 c 0,3.468849 -1.143025,6.865475 -3.416513,9.137917 -2.273489,2.272442 -5.670115,2.92874 -9.137918,2.92874 -3.467803,0 -6.373515,-1.147212 -8.6470033,-3.419654 -2.2734888,-2.272442 -3.5871299,-5.178154 -3.5871299,-8.647003 0,-3.46885 0.9420533,-6.746149 3.2144954,-9.0196379 2.2724418,-2.2734888 5.5507878,-3.9513905 9.0196378,-3.9513905 3.46885,0 6.492841,1.9322561 8.76633,4.204698 2.273489,2.2724424 3.788101,5.2974804 3.788101,8.7663304 z'],
-  ['#0a62a5', 'm 23.95823,17.818306 c 0,3.153748 -2.644888,5.808102 -5.798635,5.808102 -3.153748,0 -5.599825,-2.654354 -5.599825,-5.808102 0,-3.153747 2.446077,-5.721714 5.599825,-5.721714 3.153747,0 5.798635,2.567967 5.798635,5.721714 z']
-];
-
-/** DeArrow logo (C-33, appendix A). */
-export function dearrowIcon(size = 20): SVGSVGElement {
-  const svg = document.createElementNS(SVG_NS, 'svg');
-  svg.setAttribute('viewBox', '0 0 36 36');
-  svg.setAttribute('width', String(size));
-  svg.setAttribute('height', String(size));
-  svg.setAttribute('aria-hidden', 'true');
-  svg.setAttribute('focusable', 'false');
-  svg.setAttribute('role', 'img');
-  for (const [fill, d] of DEARROW_PATHS) {
-    const path = document.createElementNS(SVG_NS, 'path');
-    path.setAttribute('fill', fill);
-    path.setAttribute('d', d);
-    svg.appendChild(path);
-  }
-  return svg;
+export function iconButton(name: string, title: string, onClick: (event: MouseEvent) => void, extraClass = "") {
+    return h("button", { type: "button", class: `ysrp-ibtn ${extraClass}`, title, "aria-label": title, onclick: onClick }, icon(name));
 }
 
-/** Remove all children. */
-export function clear(el: Element): void {
-  while (el.firstChild) el.removeChild(el.firstChild);
+export function textButton(name: string, label: string, onClick: (event: MouseEvent) => void, extraClass = "") {
+    return h("button", { type: "button", class: `ysrp-btn ${extraClass}`, title: label, onclick: onClick }, icon(name), h("span", { text: label }));
 }
 
-/** Inject a <style> element; returns it so the caller can remove it again. */
-export function addStyle(css: string, id?: string): HTMLStyleElement {
-  const style = document.createElement('style');
-  if (id) style.id = id;
-  style.textContent = css;
-  (document.head || document.documentElement).appendChild(style);
-  return style;
+export function deArrowIcon() {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 36 36");
+    svg.setAttribute("width", "22");
+    svg.setAttribute("height", "22");
+    svg.setAttribute("aria-hidden", "true");
+    for (const [r, fill] of [[18, "#1213BD"], [13, "#88C9F9"], [6, "#0A62A5"]] as const) {
+        const circle = document.createElementNS(ns, "circle");
+        circle.setAttribute("cx", "18");
+        circle.setAttribute("cy", "18");
+        circle.setAttribute("r", String(r));
+        circle.setAttribute("fill", fill);
+        svg.appendChild(circle);
+    }
+    return svg;
 }
 
-/** Wait (without polling) for a selector to match; resolves with the first match. Optional timeout resolves null. */
-export function waitFor(selector: string, timeoutMs = 0): Promise<Element | null> {
-  const found = document.querySelector(selector);
-  if (found) return Promise.resolve(found);
-  return new Promise(resolve => {
-    let timer = 0;
-    const obs = new MutationObserver(() => {
-      const el = document.querySelector(selector);
-      if (el) {
-        obs.disconnect();
-        if (timer) clearTimeout(timer);
-        resolve(el);
-      }
+// F-3.4: pointer, click and touch on our controls must not reach the player.
+export function shieldFromPlayer(button: HTMLElement, onActivate: () => void) {
+    const swallow = (event: Event) => { event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation(); };
+    button.addEventListener("pointerdown", event => { swallow(event); onActivate(); }, { capture: true });
+    button.addEventListener("mousedown", swallow, { capture: true });
+    button.addEventListener("click", swallow, { capture: true });
+    button.addEventListener("touchstart", swallow, { capture: true, passive: false });
+}
+
+export function setMessage(el: HTMLElement, text: string, kind?: "ok" | "error") {
+    el.textContent = text || "";
+    el.className = `ysrp-msg${kind ? ` is-${kind}` : ""}`;
+    el.style.display = text ? "" : "none";
+}
+
+// Cards are monochrome like void++; the accent argument is kept so callers stay unchanged.
+export function card(iconName: string, _accentVar: string, titleText: string, subtitle: string | null, ...children: Child[]) {
+    return h("div", { class: "ysrp-card" },
+        h("div", { class: "ysrp-card-title" }, h("span", { class: "ysrp-card-icon" }, icon(iconName)), h("span", { text: titleText })),
+        subtitle ? h("div", { class: "ysrp-card-sub", text: subtitle }) : null,
+        ...children);
+}
+
+export function field(label: string, control: Node) {
+    return h("label", { class: "ysrp-field" }, h("span", { text: label }), control);
+}
+
+export interface ChoiceOption {
+    value: string;
+    badge: string;
+    label: string;
+    hint?: string;
+    disabled?: boolean;
+}
+
+export function ChoiceGroup(name: string, accentVar: string, options: ChoiceOption[], selected: string, onPick?: (value: string) => void) {
+    const items = new Map<string, { row: HTMLLabelElement; input: HTMLInputElement; }>();
+    const node = h("div", { style: { display: "flex", flexDirection: "column", gap: "8px" } });
+    for (const option of options) {
+        const input = h("input", { type: "radio", name, value: option.value });
+        const row = h("label", { class: `ysrp-choice${option.disabled ? " is-disabled" : ""}`, dataset: { value: option.value } },
+            input,
+            h("span", { class: "ysrp-choice-badge", text: option.badge }),
+            h("span", { class: "ysrp-choice-text" },
+                h("span", { class: "ysrp-choice-label", text: option.label }),
+                option.hint ? h("span", { class: "ysrp-choice-hint", text: option.hint }) : null));
+        row.style.setProperty("--ysrp-choice-accent", `var(${accentVar})`);
+        row.addEventListener("click", event => {
+            event.preventDefault();
+            if (option.disabled) return;
+            select(option.value);
+            onPick?.(option.value);
+        });
+        items.set(option.value, { row, input });
+        node.appendChild(row);
+    }
+    function select(value: string) {
+        for (const [key, item] of items) {
+            item.input.checked = key === value;
+            item.row.classList.toggle("is-selected", key === value);
+        }
+    }
+    select(selected);
+    return { node, select, value: () => [...items].find(([, item]) => item.input.checked)?.[0] };
+}
+
+export function secretInput(placeholder: string, showLabel: () => string, hideLabel: () => string, accentVar: string) {
+    const input = h("input", { class: "ysrp-input", type: "password", placeholder, autocomplete: "new-password", spellcheck: "false" });
+    const toggle = h("button", { type: "button", class: "ysrp-btn", text: showLabel() });
+    toggle.style.setProperty("--ysrp-btn-accent", `var(${accentVar})`);
+    toggle.addEventListener("click", () => {
+        const hidden = input.type === "password";
+        input.type = hidden ? "text" : "password";
+        toggle.textContent = hidden ? hideLabel() : showLabel();
     });
-    obs.observe(document.documentElement, { childList: true, subtree: true });
-    if (timeoutMs > 0) timer = window.setTimeout(() => { obs.disconnect(); resolve(null); }, timeoutMs);
-  });
-}
-
-/** Host element for page-level overlays: never inside the player (S-90). */
-export function pageHost(): HTMLElement {
-  return (document.querySelector('ytd-app #content') as HTMLElement) ||
-    (document.getElementById('content') as HTMLElement) ||
-    (document.getElementById('page-manager') as HTMLElement) ||
-    document.body;
-}
-
-/** Stop an event from reaching the player (and anything else). */
-export function swallow(ev: Event): void {
-  ev.preventDefault();
-  ev.stopImmediatePropagation();
-  ev.stopPropagation();
+    return { input, node: h("div", { class: "ysrp-inline" }, input, toggle) };
 }

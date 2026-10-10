@@ -1,306 +1,281 @@
-// Progress engine (N-2): per-video sessions, wait -> (choose) -> restore -> track.
-// Replaces the original fixed 1.5 s save loop and the one-shot restore poll (S-74..S-85).
+/*
+ * [Youtube] Video Memory
+ * Copyright (c) 2025 0-V-linuxdo
+ * SPDX-License-Identifier: MIT
+ */
 
-import { flashStatus, resetBadge, showSavedTime, showStatus } from '../../../api/badge';
-import { dispatch } from '../../../api/events';
-import { runBeforeRestoreHooks } from '../../../api/hooks';
-import { getPlayer, isPlaying, linkStartTime, playerDuration, playerTime, readyPlayer, urlVideoId, videoData, type YtPlayer } from '../../../api/player';
-import { definePlugin, type PluginContext } from '../../../api/plugins';
-import { readRecord, updateRecord } from '../../../api/records';
-import { askResume, type ResumePromptHandle } from '../../../api/resumePrompt';
-import { cachedOriginalTitle, getSources, knownOriginalTitle, setCurrentVideo, titleForRecord } from '../../../api/titles';
-import { EVT_RECORD_UPDATED } from '../../../utils/constants';
-import { errorMessage, formatTime } from '../../../utils/text';
+import * as Badge from "@api/Badge";
+import { runRestoreHooks } from "@api/RestoreHooks";
+import * as ResumePrompt from "@api/ResumePrompt";
+import * as Store from "@api/Store";
+import * as Titles from "@api/Titles";
+import {
+    BEFORE_RESTORE_TIMEOUT_MS, Devs, END_GUARD_SECONDS, EVT_RECORD, EVT_VIDEO, MIN_RESTORE_POSITION, MIN_SAVE_DELTA, RESTORE_MAX_ATTEMPTS,
+    RESTORE_RETRY_MS, RESTORE_TIMEOUT_MS, RESTORE_TOLERANCE, SAVE_THROTTLE_MS, TICK_MS, UNKNOWN_TITLE
+} from "@utils/constants";
+import { t } from "@utils/i18n";
+import { Logger } from "@utils/Logger";
+import { emit, errorMessage, isPlaceholderTitle, normTitle } from "@utils/misc";
+import definePlugin from "@utils/types";
+import { getPlayer, isPlayerReadyFor, playerVideoData, urlHasStartTime, urlStartTime, urlVideoId, type YouTubePlayer } from "@utils/youtube";
 
-const TICK_MS = 250;
-const SAVE_EVERY_MS = 1500;
-const MIN_DELTA_S = 0.5;
-const CONFIRM_EVERY_MS = 500;
-const CONFIRM_TOLERANCE_S = 3;
-const CONFIRMATIONS = 2;
-const MAX_SEEKS = 8;
-const RESTORE_WINDOW_MS = 15000;
-const HOOK_TIMEOUT_MS = 4000;
-const MIN_RESUMABLE_S = 1;
-const FINISHED_MARGIN_S = 5;
+const logger = new Logger("Engine");
 
-type Phase = 'sync' | 'waiting' | 'choosing' | 'restoring' | 'tracking' | 'live';
-
-interface RestoreState {
-  target: number;
-  seeks: number;
-  firstSeekAt: number;
-  lastCheckAt: number;
-  confirms: number;
-}
+type Phase = "waiting" | "choosing" | "restoring" | "tracking";
 
 interface Session {
-  id: string;
-  phase: Phase;
-  lastReadyTime: number | null;
-  lastDuration: number;
-  lastWritten: number | null;
-  lastSaveAt: number;
-  restore: RestoreState | null;
-  prompt: ResumePromptHandle | null;
-  ended: boolean;
+    id: string;
+    phase: Phase;
+    ready: boolean;
+    isLive: boolean;
+    duration: number;
+    lastTime: number | null;
+    lastWritten: number | null;
+    lastWriteAt: number;
+    restoreTarget: number;
+    restoreStartedAt: number;
+    lastSeekAt: number;
+    seekAttempts: number;
+    confirmations: number;
 }
 
-class Engine {
-  private session: Session | null = null;
+let session: Session | null = null;
+let timer: ReturnType<typeof setInterval> | null = null;
+const cleanups: (() => void)[] = [];
 
-  constructor(private readonly ctx: PluginContext) {}
-
-  start(): void {
-    const ctx = this.ctx;
-    ctx.interval(() => this.tick(), TICK_MS);
-    // N-2.5.1: immediate writes on navigation start, background, pagehide, pause, seeked.
-    ctx.listen(window, 'yt-navigate-start', () => this.flush(), true);
-    for (const type of ['yt-navigate-finish', 'yt-page-data-updated', 'yt-page-data-fetched', 'yt-history-popstate']) {
-      ctx.listen(window, type, () => this.tick(), true);
-    }
-    ctx.listen(window, 'popstate', () => this.tick());
-    ctx.listen(document, 'visibilitychange', () => { if (document.visibilityState === 'hidden') this.flush(); });
-    ctx.listen(window, 'pagehide', () => this.flush());
-    const onMedia = (ev: Event) => {
-      const target = ev.target as Element | null;
-      if (target && target.tagName === 'VIDEO' && target.closest('#movie_player')) this.flush();
+function newSession(id: string): Session {
+    return {
+        id,
+        phase: "waiting",
+        ready: true,
+        isLive: false,
+        duration: 0,
+        lastTime: null,
+        lastWritten: null,
+        lastWriteAt: 0,
+        restoreTarget: 0,
+        restoreStartedAt: 0,
+        lastSeekAt: 0,
+        seekAttempts: 0,
+        confirmations: 0,
     };
-    ctx.listen(document, 'pause', onMedia, true);
-    ctx.listen(document, 'seeked', onMedia, true);
-    ctx.onDispose(() => { if (this.session) this.endSession(this.session); });
-    // First tick after every plugin has started, so "before restore" hooks are registered.
-    ctx.timeout(() => this.tick(), 0);
-  }
+}
 
-  /** Write the current session position right away (still only in the tracking phase). */
-  private flush(): void {
-    if (this.session) this.save(this.session, true);
-  }
+function titleFor(id: string, rec: Store.VideoRecord | null) {
+    const dearrow = Titles.knownDeArrow(id);
+    const original = Titles.knownOriginal(id) || (rec && normTitle(rec.originalTitle)) || null;
+    if (dearrow) return { videoName: dearrow, originalTitle: original };
+    const stored = rec && !isPlaceholderTitle(rec.videoName) ? normTitle(rec.videoName) : null;
+    return { videoName: stored || original || UNKNOWN_TITLE, originalTitle: original };
+}
 
-  private tick(): void {
-    const id = urlVideoId();
-    if (id !== (this.session ? this.session.id : '')) this.switchTo(id);
-    const s = this.session;
-    if (!s || s.phase === 'sync' || s.phase === 'choosing' || s.phase === 'live') return;
-
-    // N-2.4.4: live streams are neither restored nor saved.
-    const raw = getPlayer();
-    const data = videoData(raw);
-    if (raw && data && data.video_id === s.id && data.isLive) {
-      s.phase = 'live';
-      return;
-    }
-
-    const player = readyPlayer(s.id);
-    if (player) {
-      s.lastReadyTime = playerTime(player);
-      s.lastDuration = playerDuration(player);
-    }
-    switch (s.phase) {
-      case 'waiting':
-        if (player) this.decide(s, player);
-        break;
-      case 'restoring':
-        if (player) this.continueRestore(s, player);
-        break;
-      case 'tracking':
-        if (Date.now() - s.lastSaveAt >= SAVE_EVERY_MS) this.save(s, false);
-        break;
-    }
-  }
-
-  private switchTo(id: string): void {
-    if (this.session) this.endSession(this.session);
-    this.session = null;
-    setCurrentVideo(id || null);
-    resetBadge();
-    if (!id) return;
-    const s: Session = {
-      id, phase: 'sync', lastReadyTime: null, lastDuration: 0, lastWritten: null,
-      lastSaveAt: 0, restore: null, prompt: null, ended: false
-    };
-    this.session = s;
-    // N-2.4.6: wait (max 4 s) for "before restore" hooks such as the Drive pull.
-    void runBeforeRestoreHooks(id, HOOK_TIMEOUT_MS, () => {
-      if (this.session === s) showStatus('Syncing…', '正在同步…');
-    }).then(() => {
-      if (this.session !== s || s.phase !== 'sync') return;
-      s.phase = 'waiting';
-      resetBadge();
-      this.tick();
-    });
-  }
-
-  private endSession(s: Session): void {
-    // N-2.5.3: the last write of a session uses its own last ready reading, never the new video's.
-    if (s.phase === 'tracking') this.save(s, true);
-    if (s.prompt) s.prompt.cancel();
-    s.prompt = null;
-    s.ended = true;
-  }
-
-  /** N-2.4.2 */
-  private decide(s: Session, player: YtPlayer): void {
-    const data = videoData(player);
-    if (data && data.title) knownOriginalTitle(s.id, data.title);
-    const rec = readRecord(s.id);
-    const saved = Number(rec ? rec.videoProgress : NaN);
-    const resumable = Number.isFinite(saved) && saved > MIN_RESUMABLE_S;
-    const duration = playerDuration(player);
-    const finished = resumable && duration - saved < FINISHED_MARGIN_S;
-    const link = linkStartTime();
-    if (!resumable) {
-      this.startTracking(s);
-    } else if (finished) {
-      // D-2: a finished video starts from the beginning (a link time wins if present).
-      if (link === null) {
-        try { player.seekTo(0, true); } catch { /* ignore */ }
-      }
-      this.startTracking(s);
-    } else if (link !== null) {
-      if (Math.abs(link - saved) > CONFIRM_TOLERANCE_S) this.choose(s, player, saved, link);
-      else this.startTracking(s);
-    } else {
-      this.beginRestore(s, player, saved);
-    }
-  }
-
-  /** N-3: link time and saved progress disagree. */
-  private choose(s: Session, player: YtPlayer, saved: number, link: number): void {
-    s.phase = 'choosing';
-    const wasPlaying = isPlaying(player);
-    try { player.pauseVideo?.(); } catch { /* ignore */ }
-    showStatus('Choose a position…', '请选择播放位置…');
-    const handle = askResume({ videoId: s.id, saved, link });
-    s.prompt = handle;
-    void handle.result.then(choice => {
-      if (this.session !== s || s.ended) return;
-      s.prompt = null;
-      const p = getPlayer();
-      resetBadge();
-      if (choice === 'saved' && p) {
-        s.phase = 'restoring';
-        s.restore = { target: saved, seeks: 0, firstSeekAt: 0, lastCheckAt: 0, confirms: 0 };
-        this.seek(s.restore, p);
-        if (wasPlaying) {
-          try { p.playVideo?.(); } catch { /* ignore */ }
-        }
-      } else {
-        if (wasPlaying && p) {
-          try { p.playVideo?.(); } catch { /* ignore */ }
-        }
-        this.startTracking(s);
-      }
-    });
-  }
-
-  private beginRestore(s: Session, player: YtPlayer, target: number): void {
-    s.phase = 'restoring';
-    s.restore = { target, seeks: 0, firstSeekAt: 0, lastCheckAt: 0, confirms: 0 };
-    this.continueRestore(s, player);
-  }
-
-  private seek(r: RestoreState, player: YtPlayer): void {
-    const now = Date.now();
-    try { player.seekTo(r.target, true); } catch { /* ignore */ }
-    r.seeks++;
-    r.lastCheckAt = now;
-    if (!r.firstSeekAt) r.firstSeekAt = now;
-  }
-
-  /** N-2.4.3: confirm twice (500 ms apart) within 3 s of the target; re-seek when YouTube moves it back. */
-  private continueRestore(s: Session, player: YtPlayer): void {
-    const r = s.restore;
-    if (!r) return this.startTracking(s);
-    if (r.seeks === 0) {
-      this.seek(r, player);
-      return;
-    }
-    const now = Date.now();
-    if (now - r.lastCheckAt < CONFIRM_EVERY_MS) return;
-    r.lastCheckAt = now;
-    if (Math.abs(playerTime(player) - r.target) <= CONFIRM_TOLERANCE_S) {
-      r.confirms++;
-      if (r.confirms >= CONFIRMATIONS) this.finishRestore(s, true);
-      return;
-    }
-    r.confirms = 0;
-    if (r.seeks < MAX_SEEKS && now - r.firstSeekAt < RESTORE_WINDOW_MS) this.seek(r, player);
-    else this.finishRestore(s, false);
-  }
-
-  private finishRestore(s: Session, ok: boolean): void {
-    const target = s.restore ? s.restore.target : 0;
-    s.restore = null;
-    this.startTracking(s);
-    if (ok) flashStatus('Resumed {t}', '已恢复 {t}', { t: formatTime(target) }, 2500);
-  }
-
-  private startTracking(s: Session): void {
-    s.phase = 'tracking';
-    s.lastWritten = null;
-    this.save(s, false);
-  }
-
-  /** N-2.5: only while tracking and with a ready player (or the session's last ready reading). */
-  private save(s: Session, useLastReading: boolean): void {
-    if (s.phase !== 'tracking') return;
-    s.lastSaveAt = Date.now();
-    let time: number | null = null;
-    let duration = s.lastDuration;
-    const player = s.ended ? null : readyPlayer(s.id);
-    if (player) {
-      time = playerTime(player);
-      duration = playerDuration(player);
-      s.lastReadyTime = time;
-      s.lastDuration = duration;
-    } else if (useLastReading) {
-      time = s.lastReadyTime;
-    }
-    if (time === null) return;
-    if (s.lastWritten !== null && Math.abs(time - s.lastWritten) < MIN_DELTA_S) return;
-    this.write(s, time, duration);
-  }
-
-  private write(s: Session, time: number, duration: number): void {
-    const id = s.id;
+function write(s: Session) {
+    if (s.phase !== "tracking" || s.isLive || s.lastTime === null) return false;
+    const position = Math.round(s.lastTime * 1000) / 1000;
     try {
-      updateRecord(id, cur => {
-        const base = cur || {};
-        const original = cachedOriginalTitle(id) || getSources(id).original || null;
-        return {
-          ...base,
-          videoProgress: time,
-          saveDate: Date.now(),
-          videoDuration: duration > 0 ? duration : base.videoDuration,
-          videoName: titleForRecord(id, base.videoName),
-          // Fix S-Q11: an unknown original title never erases a stored one.
-          originalTitle: original || base.originalTitle || null
-        };
-      }, 'content');
-      s.lastWritten = time;
-      if (this.session === s) showSavedTime(time);
-      dispatch(EVT_RECORD_UPDATED, { videoId: id, videoProgress: time });
+        Store.update(s.id, rec => {
+            const titles = titleFor(s.id, rec);
+            return Object.assign(rec, {
+                videoProgress: position,
+                saveDate: Date.now(),
+                videoName: titles.videoName,
+                originalTitle: titles.originalTitle || rec.originalTitle || null,
+                videoDuration: s.duration || rec.videoDuration,
+            });
+        });
     } catch (err) {
-      // N-2.5.5 / fix BUG-6: failures are reported instead of swallowed.
-      console.error('[Video Memory] Failed to save video progress:', err);
-      if (this.session === s) showStatus('⚠ Save failed', '⚠ 保存失败', undefined, { tooltip: errorMessage(err), error: true });
+        logger.error("Failed to save progress:", err);
+        Badge.show({ kind: "error", message: errorMessage(err) });
+        return false;
     }
-  }
+    s.lastWritten = position;
+    s.lastWriteAt = Date.now();
+    Badge.show({ kind: "saved", seconds: position });
+    emit(EVT_RECORD, { videoId: s.id, videoProgress: position });
+    return true;
 }
+
+function maybeWrite(s: Session | null, force: boolean) {
+    if (!s || s.phase !== "tracking" || s.isLive || s.lastTime === null) return;
+    if (s.lastWritten !== null && Math.abs(s.lastTime - s.lastWritten) < MIN_SAVE_DELTA) return;
+    if (!force && Date.now() - s.lastWriteAt < SAVE_THROTTLE_MS) return;
+    write(s);
+}
+
+function enterTracking(s: Session, notice?: Badge.BadgeState) {
+    s.phase = "tracking";
+    if (notice) Badge.show(notice);
+    else if (s.lastWritten === null) Badge.show({ kind: "idle" });
+}
+
+function beginRestore(s: Session, player: YouTubePlayer) {
+    const data = playerVideoData(player);
+    s.isLive = Boolean(data.isLive);
+    if (data.title) Titles.rememberOriginal(s.id, data.title);
+    if (s.isLive) return enterTracking(s, { kind: "live" });
+    const rec = Store.get(s.id);
+    const target = rec ? Number(rec.videoProgress) : NaN;
+    if (!Number.isFinite(target) || target <= MIN_RESTORE_POSITION) return enterTracking(s);
+    if (target >= s.duration - END_GUARD_SECONDS) return enterTracking(s);
+    s.restoreTarget = target;
+    if (urlHasStartTime()) return askForChoice(s, player);
+    startRestoring(s, player);
+}
+
+function startRestoring(s: Session, player: YouTubePlayer) {
+    s.phase = "restoring";
+    s.restoreStartedAt = Date.now();
+    s.seekAttempts = 0;
+    seek(s, player);
+}
+
+// D-1 / F-2.6: a timestamp link and a saved position disagree; the user picks one.
+function askForChoice(s: Session, player: YouTubePlayer) {
+    const linkTime = urlStartTime() ?? (Number(player.getCurrentTime()) || 0);
+    if (Math.abs(linkTime - s.restoreTarget) <= RESTORE_TOLERANCE) return enterTracking(s);
+    s.phase = "choosing";
+    let wasPlaying = false;
+    try { wasPlaying = player.getPlayerState?.() === 1; player.pauseVideo?.(); } catch {}
+    Badge.show({ kind: "choosing" });
+    ResumePrompt.open({ saved: s.restoreTarget, link: linkTime }, choice => {
+        if (session !== s || s.phase !== "choosing") return;
+        const current = getPlayer();
+        if (choice === "saved" && current) startRestoring(s, current);
+        else enterTracking(s);
+        if (wasPlaying && current) { try { current.playVideo?.(); } catch {} }
+    });
+}
+
+function seek(s: Session, player: YouTubePlayer) {
+    s.seekAttempts++;
+    s.lastSeekAt = Date.now();
+    s.confirmations = 0;
+    try { player.seekTo(s.restoreTarget, true); } catch (err) { logger.error("seekTo failed", err); }
+}
+
+function continueRestore(s: Session, player: YouTubePlayer, now: number) {
+    const current = Number(player.getCurrentTime()) || 0;
+    if (Math.abs(current - s.restoreTarget) <= RESTORE_TOLERANCE) {
+        s.confirmations++;
+        if (s.confirmations >= 2) {
+            s.lastWritten = s.restoreTarget;
+            enterTracking(s, { kind: "resumed", seconds: s.restoreTarget });
+        }
+        return;
+    }
+    s.confirmations = 0;
+    if (s.seekAttempts >= RESTORE_MAX_ATTEMPTS || now - s.restoreStartedAt > RESTORE_TIMEOUT_MS) {
+        logger.warn("Could not restore position for", s.id);
+        s.lastWritten = current;
+        enterTracking(s);
+        return;
+    }
+    if (now - s.lastSeekAt >= RESTORE_RETRY_MS) seek(s, player);
+}
+
+function startSession(id: string | null) {
+    ResumePrompt.close();
+    const s = id ? newSession(id) : null;
+    session = s;
+    Badge.show({ kind: "loading" });
+    if (s) {
+        const rec = Store.get(s.id);
+        if (rec && normTitle(rec.originalTitle)) Titles.rememberOriginal(s.id, rec.originalTitle);
+        Titles.getDeArrow(s.id).then(title => {
+            if (title) Store.updateIfExists(s.id, r => Object.assign(r, { videoName: title }));
+        });
+        const hooks = runRestoreHooks(s.id);
+        if (hooks.length) {
+            s.ready = false;
+            Badge.show({ kind: "syncing" });
+            const timeout = new Promise(resolve => setTimeout(resolve, BEFORE_RESTORE_TIMEOUT_MS));
+            Promise.race([Promise.allSettled(hooks), timeout]).then(() => {
+                s.ready = true;
+                if (session === s && s.phase === "waiting") Badge.show({ kind: "loading" });
+            });
+        }
+    }
+    emit(EVT_VIDEO, { videoId: id, title: id ? titleFor(id, Store.get(id)).videoName : null });
+}
+
+// Reads the player only when it is showing this session's video (BUG-3).
+function sample(s: Session) {
+    const player = getPlayer();
+    if (!isPlayerReadyFor(player, s.id)) return null;
+    const time = Number(player.getCurrentTime());
+    s.duration = Number(player.getDuration()) || s.duration;
+    if (s.phase === "tracking" && Number.isFinite(time)) s.lastTime = time;
+    return player;
+}
+
+function tick() {
+    const id = urlVideoId();
+    if (!session || session.id !== id) {
+        if (session) { sample(session); maybeWrite(session, true); }
+        startSession(id);
+    }
+    const s = session;
+    if (!s) return;
+    const player = sample(s);
+    if (!player) return;
+    if (s.phase === "waiting") {
+        if (!s.ready) return;
+        beginRestore(s, player);
+    } else if (s.phase === "restoring") continueRestore(s, player, Date.now());
+    if (s.phase === "tracking") {
+        if (s.lastTime === null) sample(s);
+        maybeWrite(s, false);
+    }
+}
+
+function flush() {
+    const s = session;
+    if (!s || s.id !== urlVideoId()) { tick(); return; }
+    sample(s);
+    maybeWrite(s, true);
+}
+
+const safeTick = () => { try { tick(); } catch (err) { logger.error("tick failed", err); } };
+const safeFlush = () => { try { flush(); } catch (err) { logger.error("flush failed", err); } };
+
+function listen(target: EventTarget, name: string, handler: (event: Event) => void, capture = false) {
+    target.addEventListener(name, handler, capture);
+    cleanups.push(() => target.removeEventListener(name, handler, capture));
+}
+
+const fromPlayer = (event: Event) => Boolean((event.target as Element | null)?.closest?.("#movie_player"));
+
+export const currentId = () => session?.id ?? null;
+export const currentDuration = () => session?.duration ?? 0;
+export const phase = () => session?.phase ?? null;
 
 export default definePlugin({
-  name: 'Engine',
-  displayName: { en: 'Progress engine', zh: '进度引擎' },
-  description: {
-    en: 'Saves and restores the playback position of every video; waits for the player, skips ads and handles timestamp links.',
-    zh: '保存并恢复每个视频的播放进度；等待播放器就绪、避开广告并处理时间戳链接。'
-  },
-  authors: ['0_V'],
-  icon: 'gauge-high',
-  required: true,
-  start(ctx) {
-    new Engine(ctx).start();
-  }
+    name: "Engine",
+    title: () => t("Progress engine", "进度引擎"),
+    description: () => t("Saves the playback position and resumes it when you come back.", "保存播放位置，回来时自动接着播放。"),
+    icon: "gauge-high",
+    authors: [Devs.V],
+    required: true,
+
+    start() {
+        Store.cleanup();
+        timer = setInterval(safeTick, TICK_MS);
+        setTimeout(safeTick, 0);
+        for (const name of ["pause", "seeked"]) listen(document, name, event => { if (fromPlayer(event)) safeFlush(); }, true);
+        for (const name of ["loadedmetadata", "durationchange", "playing"]) listen(document, name, event => { if (fromPlayer(event)) safeTick(); }, true);
+        listen(window, "yt-navigate-start", safeFlush, true);
+        listen(window, "yt-navigate-finish", safeTick, true);
+        listen(window, "popstate", safeTick);
+        listen(document, "visibilitychange", () => (document.hidden ? safeFlush() : safeTick()));
+        listen(window, "pagehide", safeFlush);
+        listen(window, "beforeunload", safeFlush);
+    },
+
+    stop() {
+        safeFlush();
+        if (timer) clearInterval(timer);
+        timer = null;
+        for (const fn of cleanups.splice(0)) fn();
+        session = null;
+    },
 });

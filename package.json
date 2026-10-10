@@ -1,13 +1,25 @@
 {
-  "name": "youtube-memory",
-  "version": "2.2.0",
-  "private": true,
-  "type": "module",
-  "description": "[Youtube] Video Memory userscript: save & resume YouTube playback progress (void++-style plugin architecture).",
-  "license": "MIT",
-  "scripts": {
-    "build": "bun run build.ts",
-    "tsc": "tsc --noEmit",
-    "test": "node tests/acceptance.mjs"
-  }
+    "name": "youtube-memory",
+    "version": "2.1.0",
+    "description": "[Youtube] Video Memory — save & resume YouTube playback progress",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/0-V-linuxdo/Youtube-Memory.git"
+    },
+    "license": "MIT",
+    "author": "0_V",
+    "type": "module",
+    "scripts": {
+        "build": "bun run build.ts",
+        "watch": "bun run build.ts --watch",
+        "tsc": "tsc --noEmit",
+        "test": "bun run build.ts && node tests/acceptance.mjs"
+    },
+    "devDependencies": {
+        "@types/bun": "1.3.10",
+        "typescript": "5.9.3"
+    },
+    "engines": {
+        "bun": ">=1.1"
+    }
 }

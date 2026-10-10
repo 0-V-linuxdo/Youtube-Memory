@@ -1,43 +1,52 @@
-// Settings core plugin: modal shell (N-5) with the Records, Storage, Display and Plugins tabs,
-// plus the core row buttons (note, link). Delete is built into every row.
+/*
+ * [Youtube] Video Memory
+ * Copyright (c) 2025 0-V-linuxdo
+ * SPDX-License-Identifier: MIT
+ */
 
-import { definePlugin } from '../../../api/plugins';
-import { setModalController } from '../../../api/tabs';
-import { createDisplayTab } from './displayTab';
-import { createPluginsTab } from './pluginsTab';
-import { createRecordsTab } from './recordsTab';
-import { linkContribution, noteContribution } from './rowParts';
-import { SettingsModal } from './shell';
-import { createStorageTab } from './storageTab';
-import css from './style.css';
+import * as Modal from "@api/Modal";
+import { addSettingsTab, removeSettingsTab, type SettingsTabDef } from "@api/SettingsTabs";
+import { Devs, EVT_LANG } from "@utils/constants";
+import { t } from "@utils/i18n";
+import { on } from "@utils/misc";
+import definePlugin from "@utils/types";
+
+import { DisplayPane } from "./DisplayPane";
+import { PluginsPane } from "./PluginsPane";
+import { RecordsPane } from "./RecordsPane";
+import { StoragePane } from "./StoragePane";
+
+const tabs: SettingsTabDef[] = [
+    { id: "records", group: "general", order: 10, icon: "database", label: () => t("Records", "记录"), render: RecordsPane },
+    { id: "storage", group: "general", order: 20, icon: "gear", label: () => t("Storage", "存储"), render: StoragePane },
+    { id: "plugins", group: "plugins", order: 10, icon: "puzzle-piece", label: () => t("Plugins", "插件"), render: PluginsPane },
+    { id: "display", group: "general", order: 30, icon: "globe", label: () => t("Display", "界面"), render: DisplayPane },
+];
+
+let languageTimer: ReturnType<typeof setTimeout> | null = null;
+let offLanguage: (() => void) | null = null;
 
 export default definePlugin({
-  name: 'Settings',
-  displayName: { en: 'Settings', zh: '设置弹窗' },
-  description: {
-    en: 'The settings dialog shell with the Records, Storage, Plugins and Display tabs.',
-    zh: '设置弹窗外壳，以及记录、存储、插件、界面标签。'
-  },
-  authors: ['0_V'],
-  icon: 'gear',
-  required: true,
-  start(ctx) {
-    ctx.addStyle(css);
-    const modal = new SettingsModal();
-    modal.start();
-    ctx.onDispose(() => modal.destroy());
-    setModalController({
-      open: tab => modal.open(tab),
-      close: () => modal.close(),
-      isOpen: () => modal.isOpen(),
-      refreshHeader: () => modal.refreshHeader()
-    });
-    ctx.onDispose(() => setModalController(null));
-    ctx.addTab(createRecordsTab(busy => modal.setBusy(busy)));
-    ctx.addTab(createStorageTab());
-    ctx.addTab(createDisplayTab());
-    ctx.addTab(createPluginsTab((content, onClose) => modal.openDialog(content, onClose)));
-    ctx.addRowButton(noteContribution);
-    ctx.addRowButton(linkContribution);
-  }
+    name: "Settings",
+    title: () => t("Settings dialog", "设置弹窗"),
+    description: () => t("The records list, storage, plugins and language settings.", "记录列表，以及存储、插件、语言等设置。"),
+    icon: "gear",
+    authors: [Devs.V],
+    required: true,
+
+    start() {
+        Modal.mount();
+        for (const tab of tabs) addSettingsTab(tab);
+        offLanguage = on(EVT_LANG, () => {
+            if (languageTimer) clearTimeout(languageTimer);
+            languageTimer = setTimeout(() => Modal.rebuild(), 50);
+        });
+    },
+
+    stop() {
+        offLanguage?.();
+        offLanguage = null;
+        for (const tab of tabs) removeSettingsTab(tab.id);
+        Modal.unmount();
+    },
 });

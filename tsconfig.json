@@ -1,16 +1,21 @@
 {
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "strict": true,
-    "noEmit": true,
-    "isolatedModules": true,
-    "skipLibCheck": true,
-    "noUnusedLocals": true,
-    "noFallthroughCasesInSwitch": true,
-    "types": []
-  },
-  "include": ["src/**/*.ts"]
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "strict": true,
+        "isolatedModules": true,
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true,
+        "noEmit": true,
+        "lib": ["ES2022", "DOM", "DOM.Iterable"],
+        "paths": {
+            "@api/*": ["./src/api/*"],
+            "@plugins/*": ["./src/plugins/*"],
+            "@utils/*": ["./src/utils/*"]
+        },
+        "types": ["bun"]
+    },
+    "include": ["src/**/*.ts", "build.ts"],
+    "exclude": ["node_modules", "dist"]
 }
