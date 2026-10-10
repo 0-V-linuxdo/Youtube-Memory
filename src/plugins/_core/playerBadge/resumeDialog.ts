@@ -1,4 +1,4 @@
-// N-3.2..N-3.5: "Where to continue?" dialog shown inside #movie_player.
+// N-3.2..N-3.5: "Where to continue?" dialog shown inside #movie_player, styled as a small nested dialog (N-5.8).
 
 import type { ResumeChoice, ResumePromptHandle, ResumePromptOptions } from '../../../api/resumePrompt';
 import { h } from '../../../utils/dom';
@@ -12,14 +12,17 @@ export function createResumePrompt(opts: ResumePromptOptions): ResumePromptHandl
   let done = false;
   const result = new Promise<ResumeChoice>(resolve => { settle = resolve; });
 
-  const savedBtn = h('button', { class: 'ysrp-resume-btn ysrp-resume-saved', type: 'button' },
+  const savedBtn = h('button', { class: 'ysrp-btn is-primary ysrp-resume-btn ysrp-resume-saved', type: 'button' },
     tr('Saved progress {t}', '上次进度 {t}', { t: formatTime(opts.saved) }));
-  const linkBtn = h('button', { class: 'ysrp-resume-btn ysrp-resume-link', type: 'button' },
+  const linkBtn = h('button', { class: 'ysrp-btn is-secondary ysrp-resume-btn ysrp-resume-link', type: 'button' },
     tr('Link time {t}', '链接时间 {t}', { t: formatTime(opts.link) }));
-  const root = h('div', { class: 'ysrp-resume', attrs: { role: 'dialog', 'aria-modal': 'true' } },
-    h('div', { class: 'ysrp-resume-title', text: tr('Where to continue?', '从哪里继续播放？') }),
-    h('div', { class: 'ysrp-resume-text', text: tr('This link starts at a different time than your saved progress.', '这个链接指定的时间与你上次的进度不同。') }),
-    h('div', { class: 'ysrp-resume-actions' }, savedBtn, linkBtn)
+  // No ✕ (N-5.8): Esc counts as "link time" (N-3.4).
+  const root = h('div', { class: 'ysrp-ui ysrp-resume', attrs: { role: 'dialog', 'aria-modal': 'true' } },
+    h('div', { class: 'ysrp-resume-head' },
+      h('div', { class: 'ysrp-resume-title', text: tr('Where to continue?', '从哪里继续播放？') }),
+      h('div', { class: 'ysrp-resume-text', text: tr('This link starts at a different time than your saved progress.', '这个链接指定的时间与你上次的进度不同。') })
+    ),
+    h('div', { class: 'ysrp-resume-actions' }, linkBtn, savedBtn)
   );
 
   const onDocKey = (ev: KeyboardEvent) => {
@@ -51,7 +54,8 @@ export function createResumePrompt(opts: ResumePromptOptions): ResumePromptHandl
     finish('link');
     return { result, cancel() { /* nothing */ } };
   }
-  const width = Math.max(200, Math.min(360, player.clientWidth - 32 || 360));
+  // N-5.8: 448 px, never wider than the player minus 32 px.
+  const width = Math.max(200, Math.min(448, (player.clientWidth || 480) - 32));
   root.style.width = `${width}px`;
   player.appendChild(root);
   try { savedBtn.focus({ preventScroll: true }); } catch { /* ignore */ }

@@ -1,4 +1,4 @@
-// Settings tabs registry and settings-modal bridge (N-4.1, N-5.2.1).
+// Settings tabs registry and settings-modal bridge (N-4.1, N-5.3).
 
 import { Emitter } from './events';
 
@@ -13,6 +13,8 @@ export interface TabDef {
   label(): string;
   /** Header title while the tab is active (defaults to the label). */
   heading?(): string;
+  /** Text of the info hint next to the title (N-5.3.6). */
+  info?(): string;
   /** Show the storage-backend badge in the header (records and storage tabs). */
   storageBadge?: boolean;
   /** Build the tab content into the pane; may return a cleanup function. */

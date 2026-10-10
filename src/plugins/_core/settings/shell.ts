@@ -1,9 +1,12 @@
-// Settings modal shell (N-5.1, N-5.2): page-level dialog with left navigation and a right content column.
-// Replaces the original shell layout (U-38..U-64); open via the gear (S-100), close via ✕, backdrop or Esc (D-4).
+// Settings modal shell (N-5.3): page-level dialog, 224 px navigation with a two-line version footer,
+// right column with title + info hint + status, and the scrollable tab content (N-5.2.16).
+// Open via the gear (S-100); close via ✕, backdrop or Esc (D-4); Esc closes nested dialogs first.
 
+import { closeAllDialogs, dialogLayers, hasDialogs } from '../../../api/dialogs';
 import { Emitter } from '../../../api/events';
-import { listTabs, getTab, tabsChanged, type TabDef } from '../../../api/tabs';
-import { CLS_BACKDROP, CLS_MODAL, CLS_MODAL_BODY, EVT_LANGUAGE, HOMEPAGE_URL, VERSION_SHORT } from '../../../utils/constants';
+import { getTab, listTabs, tabsChanged, type TabDef } from '../../../api/tabs';
+import { button, infoHint } from '../../../api/ui';
+import { CLS_BACKDROP, CLS_MODAL, CLS_MODAL_BODY, COMMIT, EVT_LANGUAGE, HOMEPAGE_URL, IS_DEV_BUILD, VERSION_SHORT } from '../../../utils/constants';
 import { clear, h, icon, pageHost } from '../../../utils/dom';
 import { tr } from '../../../utils/i18n';
 import { getMode } from '../../../utils/storage';
@@ -21,23 +24,42 @@ export function storageModeLabel(): string {
   return getMode() === 'gm' ? tr('GM Storage', 'GM 存储') : tr('Browser storage', '浏览器本地存储');
 }
 
+/** N-5.3.5: "Video Memory • v2.2.0 • (abc1234)" / "Production • Userscript". */
+function versionFooter(): HTMLElement {
+  const link = (href: string, text: string) => h('a', { class: 'ysrp-version-link', href, target: '_blank', rel: 'noopener noreferrer', text });
+  const hash = COMMIT && COMMIT !== 'dev'
+    ? link(`${HOMEPAGE_URL}/commit/${COMMIT}`, `(${COMMIT})`)
+    : h('span', { text: `(${COMMIT || 'dev'})` });
+  return h('div', { class: 'ysrp-nav-footer' },
+    h('div', { class: 'ysrp-version-line' }, link(HOMEPAGE_URL, 'Video Memory'), ` • ${VERSION_SHORT} • `, hash),
+    h('div', { class: 'ysrp-version-line', text: `${IS_DEV_BUILD ? 'Development' : 'Production'} • Userscript` })
+  );
+}
+
 export class SettingsModal {
   private backdrop: HTMLElement | null = null;
   private root: HTMLElement | null = null;
   private navGroups: HTMLElement | null = null;
   private headingEl: HTMLElement | null = null;
+  private infoEl: HTMLElement | null = null;
   private badgeEl: HTMLElement | null = null;
   private spinnerEl: HTMLElement | null = null;
   private panesEl: HTMLElement | null = null;
   private panes = new Map<string, PaneEntry>();
   private active = 'records';
   private opened = false;
-  private dialogs: Array<() => void> = [];
   private spinUntil = 0;
   private spinTimer = 0;
   private disposers: Array<() => void> = [];
   private languageTimer = 0;
-  private readonly scrollLock = createScrollLock(() => this.root, () => this.activePane());
+  private readonly scrollLock = createScrollLock(
+    () => [this.root, ...dialogLayers()].filter((el): el is HTMLElement => Boolean(el)),
+    () => {
+      const layers = dialogLayers();
+      const top = layers.length ? layers[layers.length - 1].querySelector('.ysrp-dialog') as HTMLElement | null : null;
+      return top || this.activePane();
+    }
+  );
 
   start(): void {
     this.disposers.push(tabsChanged.on(() => this.onTabsChanged()));
@@ -49,11 +71,11 @@ export class SettingsModal {
     document.addEventListener(EVT_LANGUAGE, onLanguage);
     this.disposers.push(() => document.removeEventListener(EVT_LANGUAGE, onLanguage));
     const onKey = (ev: KeyboardEvent) => {
-      if (!this.opened || ev.key !== 'Escape') return;
+      // Nested dialogs consume Esc themselves (window capture), so this only closes the modal.
+      if (!this.opened || ev.key !== 'Escape' || hasDialogs()) return;
       ev.preventDefault();
       ev.stopPropagation();
-      if (this.dialogs.length) this.dialogs[this.dialogs.length - 1]();
-      else this.close();
+      this.close();
     };
     document.addEventListener('keydown', onKey, true);
     this.disposers.push(() => document.removeEventListener('keydown', onKey, true));
@@ -67,10 +89,6 @@ export class SettingsModal {
 
   isOpen(): boolean {
     return this.opened;
-  }
-
-  activeTab(): string {
-    return this.active;
   }
 
   activePane(): HTMLElement | null {
@@ -94,29 +112,11 @@ export class SettingsModal {
 
   close(): void {
     if (!this.opened) return;
-    while (this.dialogs.length) this.dialogs[this.dialogs.length - 1]();
+    closeAllDialogs();
     this.opened = false;
     this.backdrop?.classList.remove('is-open');
     this.root?.classList.remove('is-open');
     this.scrollLock.unlock();
-  }
-
-  /** Show a sub dialog inside the modal (N-5.5). Returns a close function. */
-  openDialog(content: HTMLElement, onClose?: () => void): () => void {
-    if (!this.root) return () => {};
-    const overlay = h('div', { class: 'ysrp-dialog-overlay' }, content);
-    let closed = false;
-    const close = () => {
-      if (closed) return;
-      closed = true;
-      overlay.remove();
-      this.dialogs = this.dialogs.filter(fn => fn !== close);
-      onClose?.();
-    };
-    overlay.addEventListener('click', ev => { if (ev.target === overlay) close(); });
-    this.root.appendChild(overlay);
-    this.dialogs.push(close);
-    return close;
   }
 
   /** Header spinner (U-54/U-55); kept visible at least 300 ms so it can actually be seen (fixes U-Q4). */
@@ -134,9 +134,14 @@ export class SettingsModal {
   }
 
   refreshHeader(): void {
-    if (!this.headingEl || !this.badgeEl) return;
+    if (!this.headingEl || !this.badgeEl || !this.infoEl) return;
     const tab = getTab(this.active);
-    this.headingEl.textContent = tab ? (tab.heading ? tab.heading() : tab.label()) : '';
+    const title = tab ? (tab.heading ? tab.heading() : tab.label()) : '';
+    this.headingEl.textContent = title;
+    this.headingEl.title = title;
+    const info = tab && tab.info ? tab.info() : '';
+    this.infoEl.replaceChildren(info ? infoHint(info) : '');
+    this.infoEl.style.display = info ? '' : 'none';
     this.badgeEl.textContent = storageModeLabel();
     this.badgeEl.style.display = tab && tab.storageBadge ? '' : 'none';
   }
@@ -177,25 +182,24 @@ export class SettingsModal {
     this.backdrop = backdrop;
 
     this.navGroups = h('div', { class: 'ysrp-nav-groups' });
-    const footer = h('div', { class: 'ysrp-nav-footer' },
-      h('a', { href: HOMEPAGE_URL, target: '_blank', rel: 'noopener noreferrer', text: 'Video Memory' }),
-      h('span', { text: ` • ${VERSION_SHORT}` })
-    );
-    const nav = h('nav', { class: 'ysrp-nav', attrs: { 'aria-label': tr('Settings sections', '设置分区') } }, this.navGroups, footer);
+    const nav = h('nav', { class: 'ysrp-nav', attrs: { 'aria-label': tr('Settings sections', '设置分区') } }, this.navGroups, versionFooter());
 
     this.headingEl = h('h3', { class: 'ysrp-heading' });
+    this.infoEl = h('span', { class: 'ysrp-header-info' });
     this.badgeEl = h('span', { class: 'ysrp-badge' });
     this.spinnerEl = h('span', { class: 'ysrp-refresh', title: tr('Refreshing…', '正在更新列表…') }, icon('arrows-rotate', 'fa-spin'));
-    const closeBtn = h('button', { class: 'ysrp-close', type: 'button', title: tr('Close', '关闭'), attrs: { 'aria-label': tr('Close', '关闭') } }, icon('xmark'));
+    const closeBtn = button('', { variant: 'tertiary', cls: 'is-square ysrp-close', title: tr('Close', '关闭') });
+    closeBtn.replaceChildren(icon('xmark'));
+    closeBtn.setAttribute('aria-label', tr('Close', '关闭'));
     closeBtn.addEventListener('click', ev => { ev.preventDefault(); this.close(); });
     const header = h('div', { class: 'ysrp-header' },
-      h('div', { class: 'ysrp-header-left' }, this.headingEl, this.badgeEl, this.spinnerEl),
+      h('div', { class: 'ysrp-header-left' }, this.headingEl, this.infoEl, this.badgeEl, this.spinnerEl),
       closeBtn
     );
     this.panesEl = h('div', { class: `ysrp-panes ${CLS_MODAL_BODY}` });
     const main = h('div', { class: 'ysrp-main' }, header, this.panesEl);
 
-    const root = h('div', { class: CLS_MODAL, attrs: { role: 'dialog', 'aria-modal': 'true' } }, nav, main);
+    const root = h('div', { class: `ysrp-ui ${CLS_MODAL}`, attrs: { role: 'dialog', 'aria-modal': 'true' } }, nav, main);
     // Keys typed inside the modal must not trigger YouTube shortcuts.
     root.addEventListener('keydown', ev => ev.stopPropagation());
     root.addEventListener('keyup', ev => ev.stopPropagation());

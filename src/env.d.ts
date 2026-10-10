@@ -2,6 +2,10 @@
 
 /** Version string injected by build.ts (e.g. "[20261010] v2.2.0"). */
 declare const __VERSION__: string;
+/** Short git commit hash injected by build.ts ("dev" without git). */
+declare const __COMMIT__: string;
+/** "production" or "development" (bun run build.ts --dev). */
+declare const __BUILD_MODE__: string;
 
 declare module '*.css' {
   const css: string;

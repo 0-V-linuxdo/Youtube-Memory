@@ -7,7 +7,7 @@ import { h } from '../../utils/dom';
 import { tr } from '../../utils/i18n';
 import { readSetting } from '../../utils/storage';
 import { errorMessage } from '../../utils/text';
-import { button, card, field, messageLine, secretInput } from '../_core/settings/ui';
+import { actions, button, group, messageLine, secretInput, settingsRow, textInput } from '../../api/ui';
 import { readCredentials, saveCredentials } from './drive';
 import { DriveSync, type SyncStatus } from './sync';
 
@@ -55,22 +55,25 @@ export default definePlugin({
       order: 30,
       icon: 'cloud',
       label: () => tr('Drive sync', '云同步'),
+      info: () => tr('Sync every video record to a folder in your own Google Drive.', '把每个视频的记录同步到你自己的 Google Drive 文件夹。'),
       render(pane) {
         const creds = readCredentials();
-        const clientId = h('input', { class: 'ysrp-input', type: 'text', value: creds.clientId, placeholder: 'xxxx.apps.googleusercontent.com', autocomplete: 'off', spellcheck: false });
-        const clientSecret = h('input', { class: 'ysrp-input', type: 'password', value: creds.clientSecret, autocomplete: 'new-password', spellcheck: false });
-        const refreshToken = h('input', { class: 'ysrp-input', type: 'password', value: creds.refreshToken, autocomplete: 'new-password', spellcheck: false });
-        const labels = { show: tr('Show', '显示'), hide: tr('Hide', '隐藏') };
-        const status = messageLine();
-        const result = messageLine();
+        const clientId = textInput({ value: creds.clientId, placeholder: 'xxxx.apps.googleusercontent.com', field: 'clientId' });
+        const clientSecret = textInput({ type: 'password', value: creds.clientSecret, field: 'clientSecret' });
+        const refreshToken = textInput({ type: 'password', value: creds.refreshToken, field: 'refreshToken' });
+        const status = messageLine('ysrp-drive-status');
+        const result = messageLine('ysrp-drive-result');
+        // N-5.7.3: the status line is always visible (secondary unless success / error).
+        status.el.classList.add('is-visible');
         const renderStatus = (s: SyncStatus) => {
           const { text, tone } = statusText(sync, s);
           status.set(text, tone);
+          status.el.classList.add('is-visible');
         };
         statusListeners.add(renderStatus);
         renderStatus(sync.status);
 
-        const saveBtn = button(tr('Save & verify', '保存并验证'), { icon: 'check' });
+        const saveBtn = button(tr('Save & verify', '保存并验证'), { variant: 'primary', cls: 'ysrp-drive-save' });
         saveBtn.addEventListener('click', async ev => {
           ev.preventDefault();
           saveCredentials({ clientId: clientId.value, clientSecret: clientSecret.value, refreshToken: refreshToken.value });
@@ -92,7 +95,7 @@ export default definePlugin({
             saveBtn.disabled = false;
           }
         });
-        const uploadAll = button(tr('Upload all', '全部上传'), { icon: 'cloud-arrow-up' });
+        const uploadAll = button(tr('Upload all', '全部上传'), { variant: 'secondary', cls: 'ysrp-drive-upload-all' });
         uploadAll.addEventListener('click', ev => {
           ev.preventDefault();
           if (!sync.configured()) {
@@ -103,18 +106,17 @@ export default definePlugin({
           sync.uploadAll();
         });
 
-        pane.append(
-          card({ icon: 'cloud', title: tr('Google Drive sync', 'Google Drive 同步'), desc: tr('Each video is stored as "<title>｜<id>.json" in the "[Youtube] Video Memory" folder of your Drive.', '每个视频以“<标题>｜<id>.json”保存在你的云端硬盘“[Youtube] Video Memory”文件夹中。') },
+        pane.appendChild(h('div', { class: 'ysrp-groups' },
+          group('Google Drive',
+            h('div', { class: 'ysrp-note', text: tr('Each video is stored as "<title>｜<id>.json" in the "[Youtube] Video Memory" folder of your Drive.', '每个视频以“<标题>｜<id>.json”保存在你的云端硬盘“[Youtube] Video Memory”文件夹中。') }),
+            settingsRow({ title: tr('Client ID', '客户端 ID'), below: [clientId] }).el,
+            settingsRow({ title: tr('Client secret', '客户端密钥'), below: [secretInput(clientSecret)] }).el,
+            settingsRow({ title: 'Refresh token', below: [secretInput(refreshToken)] }).el,
+            actions(saveBtn, uploadAll),
             status.el,
-            h('div', { class: 'ysrp-fields' },
-              field(tr('Client ID', '客户端 ID'), clientId),
-              field(tr('Client secret', '客户端密钥'), secretInput(clientSecret, labels)),
-              field(tr('Refresh token', 'Refresh token'), secretInput(refreshToken, labels))
-            ),
-            h('div', { class: 'ysrp-actions' }, saveBtn, uploadAll),
             result.el
           ),
-          card({ icon: 'circle-question', title: tr('How to get credentials', '如何获取凭据') },
+          group(tr('Getting credentials', '如何获取凭据'),
             h('ol', { class: 'ysrp-steps' },
               h('li', { text: tr('In Google Cloud Console create a project and an OAuth client (type "Web application"); add https://developers.google.com/oauthplayground as a redirect URI.', '在 Google Cloud Console 新建项目和 OAuth 客户端（类型“Web 应用”），把 https://developers.google.com/oauthplayground 加为重定向 URI。') }),
               h('li', { text: tr('Enable the Google Drive API for the project.', '为该项目启用 Google Drive API。') }),
@@ -123,7 +125,7 @@ export default definePlugin({
                 h('a', { href: HOMEPAGE_URL, target: '_blank', rel: 'noopener noreferrer', text: HOMEPAGE_URL }))
             )
           )
-        );
+        ));
         return () => statusListeners.delete(renderStatus);
       }
     });

@@ -1,8 +1,9 @@
-// Entry point: storage mode, startup cleanup, shared theme, then the plugins (L-78, N-4.3).
+// Entry point: storage mode, startup cleanup, colour tokens + shared parts (N-5.1, N-5.2), then the plugins (L-78, N-4.3).
 
 import { cleanupRecords } from './api/records';
 import { startPlugins } from './api/plugins';
 import themeCss from './api/theme.css';
+import uiCss from './api/ui.css';
 import { plugins } from './generated/plugins';
 import { VERSION } from './utils/constants';
 import { addStyle } from './utils/dom';
@@ -19,6 +20,7 @@ function bootstrap(): void {
     console.error('[Video Memory] Startup cleanup failed:', err);
   }
   addStyle(themeCss, 'ysrp-theme');
+  addStyle(uiCss, 'ysrp-ui');
   startPlugins(plugins);
 }
 

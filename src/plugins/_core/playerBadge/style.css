@@ -9,8 +9,8 @@
 }
 .last-save-info-container .last-save-info {
   text-shadow: none;
-  background: var(--ysrp-bg);
-  color: var(--ysrp-text);
+  background: var(--ysrp-surface-base);
+  color: var(--ysrp-fg-primary);
   padding: 5px;
   border-radius: 5px;
   display: flex;
@@ -18,11 +18,11 @@
   line-height: 1.2;
 }
 .last-save-info-container .last-save-info-text.is-error {
-  color: var(--ysrp-error);
+  color: var(--ysrp-fg-danger);
 }
 .last-save-info-container .ysrp-settings-button {
-  background: var(--ysrp-layer);
-  color: var(--ysrp-text);
+  background: var(--ysrp-surface-l2);
+  color: var(--ysrp-fg-primary);
   border: none;
   margin: 0 0 0 5px;
   padding: 0;
@@ -36,6 +36,7 @@
   font-size: 12px;
 }
 
+/* N-5.8: small nested-dialog look (N-5.2.11); buttons are the shared .ysrp-btn parts. */
 .ysrp-resume {
   position: absolute;
   left: 50%;
@@ -43,49 +44,19 @@
   transform: translate(-50%, -50%);
   z-index: 70;
   box-sizing: border-box;
-  padding: 20px;
-  border-radius: 16px;
-  background: var(--ysrp-bg);
-  color: var(--ysrp-text);
-  border: 1px solid var(--ysrp-border);
-  box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
-  font-family: var(--ysrp-font);
-  font-size: 14px;
-  line-height: 1.5;
-  text-align: left;
-  text-shadow: none;
-}
-.ysrp-resume-title {
-  font-size: 18px;
-  font-weight: 600;
-  margin: 0 0 6px;
-}
-.ysrp-resume-text {
-  color: var(--ysrp-text-2);
-  margin: 0 0 16px;
-}
-.ysrp-resume-actions {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 16px;
+  max-height: calc(100% - 32px);
+  overflow: auto;
+  padding: 24px;
+  border-radius: 16px;
+  background: var(--ysrp-surface-l1);
+  color: var(--ysrp-fg-primary);
+  border: 1px solid var(--ysrp-border-l1);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
 }
-.ysrp-resume-btn {
-  flex: 1 1 0;
-  height: 36px;
-  padding: 0 12px;
-  border-radius: 999px;
-  border: 1px solid var(--ysrp-border-strong);
-  background: transparent;
-  color: var(--ysrp-text);
-  font: inherit;
-  font-weight: 500;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.ysrp-resume-btn:hover { background: var(--ysrp-hover); }
-.ysrp-resume-btn:focus-visible { outline: 2px solid var(--ysrp-border-strong); outline-offset: 2px; }
-.ysrp-resume-saved {
-  background: var(--ysrp-text);
-  border-color: var(--ysrp-text);
-  color: var(--ysrp-bg);
-}
-.ysrp-resume-saved:hover { background: var(--ysrp-text); opacity: .88; }
+.ysrp-resume-head { display: flex; flex-direction: column; gap: 4px; }
+.ysrp-resume-title { font-size: 16px; font-weight: 600; line-height: 24px; }
+.ysrp-resume-text { font-size: 13px; line-height: 1.5; color: var(--ysrp-fg-secondary); }
+.ysrp-resume-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }

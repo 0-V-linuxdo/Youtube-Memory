@@ -1,6 +1,9 @@
 // Storage keys, event names, DOM contracts and URLs (all external contracts, see spec C-14..C-21, N-1).
 
 export const VERSION: string = typeof __VERSION__ === 'string' ? __VERSION__ : 'dev';
+/** Short git hash of the build (N-5.3.5); "dev" when git was not available. */
+export const COMMIT: string = typeof __COMMIT__ === 'string' && __COMMIT__ ? __COMMIT__ : 'dev';
+export const IS_DEV_BUILD: boolean = typeof __BUILD_MODE__ === 'string' && __BUILD_MODE__ === 'development';
 export const VERSION_SHORT: string = (VERSION.match(/v[\d.]+/) || [VERSION])[0];
 
 export const RECORD_PREFIX = 'Youtube_SaveResume_Progress-';

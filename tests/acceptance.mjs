@@ -481,37 +481,64 @@ const tests = {
     await sleep(3000);
     await openSettings(page);
     await sleep(800);
-    const ids = await page.$$eval('.ysrp-row', rows => rows.map(r => r.dataset.videoId));
+    const card = id => `.ysrp-record[data-video-id="${id}"]`;
+    const ids = await page.$$eval('.ysrp-record', rows => rows.map(r => r.dataset.videoId));
     const heading = await page.textContent('.ysrp-header h3');
-    const pct = await page.textContent('.ysrp-row[data-video-id="daolder"] .ysrp-pct');
-    const legacyPct = await page.textContent('.ysrp-row[data-video-id="plainnew"] .ysrp-pct');
-    // Every panel (link, note, transcript) starts collapsed.
-    const openPanels = await page.$$eval('.ysrp-panel', ps => ps.filter(p => getComputedStyle(p).display !== 'none').length);
-    const daTitle = await page.textContent('.ysrp-row[data-video-id="daolder"] .ysrp-title');
-    const plainTitle = await page.textContent('.ysrp-row[data-video-id="plainnew"] .ysrp-title');
-    const plainHasDa = await page.locator('.ysrp-row[data-video-id="plainnew"] .ysrp-da').count();
-    await page.click('.ysrp-row[data-video-id="daolder"] .ysrp-da');
-    const toggled = await page.textContent('.ysrp-row[data-video-id="daolder"] .ysrp-title');
-    // note
-    await page.click('.ysrp-row[data-video-id="plainnew"] .ysrp-ibtn.is-note');
-    await page.fill('.ysrp-row[data-video-id="plainnew"] .ysrp-note-container textarea', '  hello note  ');
-    await page.click('.ysrp-row[data-video-id="plainnew"] .ysrp-ibtn.is-note');
+    // N-5.4.2: Void++ card anatomy and the description / footer lines.
+    const anatomy = await page.$eval(card('daolder'), el => el.classList.contains('ysrp-card') &&
+      ['.ysrp-card-icon', '.ysrp-card-title', '.ysrp-card-controls', '.ysrp-card-desc', '.ysrp-card-sep', '.ysrp-card-footer'].every(sel => el.querySelector(sel)));
+    const columns = await page.$eval('.ysrp-records', g => getComputedStyle(g).gridTemplateColumns.split(' ').length);
+    const pct = await page.textContent(`${card('daolder')} .ysrp-card-desc`);
+    const legacyPct = await page.textContent(`${card('plainnew')} .ysrp-card-desc`);
+    const footer = await page.textContent(`${card('daolder')} .ysrp-card-footer`);
+    const currentIcon = await page.$eval(`${card('a14current')} .ysrp-card-icon i`, i => i.className);
+    const daTitle = await page.textContent(`${card('daolder')} .ysrp-card-title`);
+    const plainTitle = await page.textContent(`${card('plainnew')} .ysrp-card-title`);
+    const plainHasDa = await page.locator(`${card('plainnew')} .ysrp-da`).count();
+    await page.click(`${card('daolder')} .ysrp-da`);
+    const toggled = await page.textContent(`${card('daolder')} .ysrp-card-title`);
+    // note: edited and saved in the notes dialog
+    await page.click(`${card('plainnew')} .ysrp-ibtn.is-note`);
+    await page.fill('.ysrp-note-dialog textarea', '  hello note  ');
+    await page.click('.ysrp-note-dialog .ysrp-note-save');
     const noted = await record(page, 'plainnew');
-    // link + copy
-    await page.click('.ysrp-row[data-video-id="plainnew"] .ysrp-ibtn.is-link');
-    const urlRow = await page.$eval('.ysrp-row[data-video-id="plainnew"] .ysrp-url', el => getComputedStyle(el).flexDirection + '/' + el.getBoundingClientRect().height);
-    await page.click('.ysrp-row[data-video-id="plainnew"] .ysrp-url .ysrp-ibtn.is-link');
+    const noteMark = await page.locator(`${card('plainnew')} .is-note-mark`).count();
+    // link dialog + copy
+    await page.click(`${card('plainnew')} .ysrp-ibtn.is-link`);
+    const linkValue = await page.inputValue('.ysrp-link-dialog .ysrp-link-input');
+    await page.click('.ysrp-link-dialog .ysrp-link-copy');
     const clip = await page.evaluate(() => navigator.clipboard.readText());
-    // delete
-    await page.click('.ysrp-row[data-video-id="daolder"] .ysrp-ibtn.is-delete');
-    const afterDelete = await page.$$eval('.ysrp-row', rows => rows.map(r => r.dataset.videoId));
+    const copied = (await page.textContent('.ysrp-link-dialog .ysrp-link-copy')).trim();
+    await page.keyboard.press('Escape');
+    const linkClosed = await page.locator('.ysrp-link-dialog').count() === 0 && await page.isVisible('.ysrp-settings-container');
+    // N-5.4.3: nothing ever expands inside a card
+    const inlinePanels = await page.$$eval('.ysrp-record', cards => cards.filter(c => c.querySelector('textarea, input, select, .ysrp-panel')).length);
+    // delete goes through the confirm dialog
+    await page.click(`${card('daolder')} .ysrp-ibtn.is-delete`);
+    const confirmShown = await page.locator('.ysrp-dialog.is-confirm').count();
+    await page.click('.ysrp-confirm-cancel');
+    const keptOnCancel = Boolean(await record(page, 'daolder')) && await page.locator(card('daolder')).count() === 1;
+    await page.click(`${card('daolder')} .ysrp-ibtn.is-delete`);
+    await page.click('.ysrp-confirm-ok');
+    const afterDelete = await page.$$eval('.ysrp-record', rows => rows.map(r => r.dataset.videoId));
     const heading2 = await page.textContent('.ysrp-header h3');
+    // search + filter bar
+    const visibleIds = () => page.$$eval('.ysrp-record', rows => rows.filter(r => r.offsetParent).map(r => r.dataset.videoId).join(','));
+    await page.fill('.ysrp-records-search', 'PLAINNEW');
+    const searched = await visibleIds();
+    await page.fill('.ysrp-records-search', '');
+    await page.selectOption('.ysrp-records-filter', 'notes');
+    const withNotes = await visibleIds();
+    await page.selectOption('.ysrp-records-filter', 'all');
     const ok = ids[0] === 'a14current' && ids.join() === 'a14current,plainnew,daolder' && heading.includes('(3)') &&
-      pct === '25.0%' && legacyPct === '0:10' && openPanels === 0 && urlRow.startsWith('row/') && parseFloat(urlRow.split('/')[1]) < 60 && daTitle === 'DeArrow daolder' && toggled === 'Original daolder' && plainTitle === 'Original plainnew' &&
-      plainHasDa === 0 && noted.videoNote === 'hello note' && clip === 'https://www.youtube.com/watch?v=plainnew' &&
-      afterDelete.join() === 'a14current,plainnew' && heading2.includes('(2)') && !(await record(page, 'daolder'));
-    check('A-14', 'records tab: ordering, count, %, DeArrow toggle, note, copy link, delete', ok,
-      `order ${ids.join()}, "${heading}", pct ${pct}/${legacyPct}, open panels ${openPanels}, url row ${urlRow}, titles "${daTitle}"/"${toggled}"/"${plainTitle}", note "${noted.videoNote}", clip ${clip}, after delete ${afterDelete.join()} "${heading2}"`);
+      anatomy && columns === 2 && pct === '已看 25.0% · 0:30 / 2:00' && legacyPct === '已看到 0:10' && /^保存于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(footer) &&
+      currentIcon.includes('fa-play') && daTitle === 'DeArrow daolder' && toggled === 'Original daolder' && plainTitle === 'Original plainnew' &&
+      plainHasDa === 0 && noted.videoNote === 'hello note' && noteMark === 1 && linkValue === 'https://www.youtube.com/watch?v=plainnew' &&
+      clip === 'https://www.youtube.com/watch?v=plainnew' && copied === '已复制' && linkClosed && inlinePanels === 0 &&
+      confirmShown === 1 && keptOnCancel && afterDelete.join() === 'a14current,plainnew' && heading2.includes('(2)') && !(await record(page, 'daolder')) &&
+      searched === 'plainnew' && withNotes === 'plainnew';
+    check('A-14', 'records tab: ordering, count, Void++ cards in 2 columns, %, DeArrow toggle, note dialog, link dialog copy, confirmed delete, search/filter', ok,
+      `order ${ids.join()}, "${heading}", anatomy ${anatomy}, columns ${columns}, desc "${pct}"/"${legacyPct}", footer "${footer}", titles "${daTitle}"/"${toggled}"/"${plainTitle}", note "${noted.videoNote}" mark ${noteMark}, link ${linkValue}, clip ${clip} (${copied}), inline panels ${inlinePanels}, confirm ${confirmShown} kept ${keptOnCancel}, after delete ${afterDelete.join()} "${heading2}", search "${searched}", notes "${withNotes}"`);
     await ctx.close();
   },
 
@@ -522,29 +549,35 @@ const tests = {
     await sleep(3000);
     await openSettings(page);
     await page.click('.ysrp-tab[data-tab-id="storage"]');
-    await page.click('.ysrp-choice[data-value="gm"]');
-    await page.click('.ysrp-pane[data-pane="storage"] .ysrp-btn >> nth=0');
+    await page.selectOption('.ysrp-storage-mode', 'gm');
+    await page.click('.ysrp-apply-migrate');
+    const migrateConfirm = await page.locator('.ysrp-dialog.is-confirm').count();
+    await page.click('.ysrp-confirm-ok');
     const state = await page.evaluate(() => ({
       local: Object.keys(localStorage).filter(k => k.startsWith('Youtube_SaveResume_Progress-')).length,
       gm: GM_listValues().filter(k => k.startsWith('Youtube_SaveResume_Progress-')).length,
       mode: localStorage.getItem('YSRP_StorageMode'),
       badge: document.querySelector('.ysrp-badge').textContent
     }));
-    // export -> clipboard, wipe one record, overwrite-import
-    await page.click('.ysrp-pane[data-pane="storage"] .ysrp-card >> nth=1 >> .ysrp-btn >> nth=0');
+    // export -> clipboard, wipe one record, overwrite-import (confirmed)
+    await page.click('.ysrp-copy-json');
     const exported = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()));
     await page.evaluate(() => { GM_deleteValue('Youtube_SaveResume_Progress-s1'); GM_setValue('Youtube_SaveResume_Progress-junk', '{}'); });
-    await page.check('.ysrp-overwrite');
-    await page.fill('.ysrp-pane[data-pane="storage"] textarea', JSON.stringify(exported));
-    await page.click('.ysrp-pane[data-pane="storage"] .ysrp-card >> nth=2 >> .ysrp-btn >> nth=0');
-    const msg = await page.textContent('.ysrp-pane[data-pane="storage"] .ysrp-card >> nth=2 >> .ysrp-msg >> nth=-1');
+    await page.click('.ysrp-overwrite');
+    const overwriteOn = await page.getAttribute('.ysrp-overwrite', 'aria-checked');
+    await page.fill('.ysrp-import-text', JSON.stringify(exported));
+    await page.click('.ysrp-import-btn');
+    const importConfirm = await page.locator('.ysrp-dialog.is-confirm').count();
+    await page.click('.ysrp-confirm-ok');
+    const msg = await page.textContent('.ysrp-import-msg');
     const after = await page.evaluate(() => GM_listValues().filter(k => k.startsWith('Youtube_SaveResume_Progress-')).sort());
     const s1 = await page.evaluate(() => JSON.parse(GM_getValue('Youtube_SaveResume_Progress-s1')));
-    const ok = state.local === 0 && state.gm === 3 && state.mode === 'gm' && state.badge === 'GM 存储' &&
+    const ok = migrateConfirm === 1 && state.local === 0 && state.gm === 3 && state.mode === 'gm' && state.badge === 'GM 存储' &&
       exported.version === '1' && exported.storageMode === 'gm' && Object.keys(exported.entries).length === 3 &&
+      overwriteOn === 'true' && importConfirm === 1 &&
       after.length === 3 && !after.includes('Youtube_SaveResume_Progress-junk') && s1.videoProgress === 11 && /已导入 3 条记录/.test(msg);
-    check('A-15', 'storage tab: migrate to GM, export, overwrite import round trip', ok,
-      `${JSON.stringify(state)}, exported ${Object.keys(exported.entries).length}, after import ${after.length}, msg "${msg}"`);
+    check('A-15', 'storage tab: confirmed migration to GM, export, confirmed overwrite import round trip', ok,
+      `confirm ${migrateConfirm}/${importConfirm}, ${JSON.stringify(state)}, exported ${Object.keys(exported.entries).length}, overwrite ${overwriteOn}, after import ${after.length}, msg "${msg}"`);
     await ctx.close();
   },
 
@@ -562,16 +595,16 @@ const tests = {
     await sleep(3000);
     await openSettings(page);
     await page.click('.ysrp-tab[data-tab-id="transcript"]');
-    await page.fill('.ysrp-pane[data-pane="transcript"] input >> nth=0', 'example.com');
-    await page.fill('.ysrp-pane[data-pane="transcript"] input >> nth=2', 'sk-test');
-    await page.fill('.ysrp-pane[data-pane="transcript"] input >> nth=3', '99');
+    await page.fill('.ysrp-pane[data-pane="transcript"] input[data-field="endpoint"]', 'example.com');
+    await page.fill('.ysrp-pane[data-pane="transcript"] input[data-field="apiKey"]', 'sk-test');
+    await page.fill('.ysrp-pane[data-pane="transcript"] input[data-field="timeout"]', '99');
     await sleep(600);
     const settings = await page.evaluate(() => JSON.parse(localStorage.getItem('YSRP_TranscriptSettings')));
     const info = await page.textContent('.ysrp-pane[data-pane="transcript"] .ysrp-mono');
     await page.click('.ysrp-tab[data-tab-id="records"]');
-    await page.click('.ysrp-row[data-video-id="a16tr"] .ysrp-ibtn.is-transcript');
+    await page.click('.ysrp-record[data-video-id="a16tr"] .ysrp-ibtn.is-transcript');
     await sleep(1000);
-    const text = await page.inputValue('.ysrp-row[data-video-id="a16tr"] .ysrp-transcript-container textarea');
+    const text = await page.inputValue('.ysrp-transcript-dialog textarea');
     const rec = await record(page, 'a16tr');
     const ok = settings.endpoint === 'https://example.com/v1/chat/completions' && settings.apiKey === 'sk-test' && settings.timeoutMs === 3600000 &&
       info === 'a16tr' && requestBody && requestBody.model === 'transcript' &&
@@ -590,7 +623,7 @@ const tests = {
     await openSettings(page);
     const before = await page.textContent('.ysrp-tab[data-tab-id="records"]');
     await page.click('.ysrp-tab[data-tab-id="display"]');
-    await page.click('.ysrp-language-options .ysrp-choice[data-value="en"]');
+    await page.selectOption('.ysrp-language-select', 'en');
     await sleep(500);
     const after = await page.textContent('.ysrp-tab[data-tab-id="records"]');
     const stillOpen = await page.isVisible('.ysrp-settings-container');
@@ -611,6 +644,7 @@ const tests = {
     await sleep(2000);
     await openSettings(page);
     await page.click('.ysrp-tab[data-tab-id="plugins"]');
+    await page.click('.ysrp-cat[data-cat="all"]');
     const names = await page.$$eval('.ysrp-plugin', els => els.map(e => e.dataset.plugin));
     const coreLocked = await page.$$eval('.ysrp-plugin[data-plugin="Engine"] .ysrp-switch', els => els[0].disabled);
     await page.click('.ysrp-switch[data-plugin="Transcript"]');
@@ -618,17 +652,18 @@ const tests = {
     const tabGone = await page.locator('.ysrp-tab[data-tab-id="transcript"]').count() === 0;
     const activeTab = await page.evaluate(() => document.querySelector('.ysrp-settings-container').dataset.activeTab);
     await page.click('.ysrp-tab[data-tab-id="records"]');
-    const rowButtonGone = await page.locator('.ysrp-row .is-transcript').count() === 0;
+    const rowButtonGone = await page.locator('.ysrp-record .is-transcript').count() === 0;
     const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('YSRP_Plugins')).plugins.Transcript.enabled);
     await page.reload();
     await sleep(2000);
     await openSettings(page);
     const stillOff = await page.locator('.ysrp-tab[data-tab-id="transcript"]').count() === 0;
     await page.click('.ysrp-tab[data-tab-id="plugins"]');
+    await page.click('.ysrp-cat[data-cat="all"]');
     await page.click('.ysrp-switch[data-plugin="Transcript"]');
     await sleep(300);
     await page.click('.ysrp-tab[data-tab-id="records"]');
-    const back = await page.locator('.ysrp-tab[data-tab-id="transcript"]').count() === 1 && await page.locator('.ysrp-row .is-transcript').count() > 0;
+    const back = await page.locator('.ysrp-tab[data-tab-id="transcript"]').count() === 1 && await page.locator('.ysrp-record .is-transcript').count() > 0;
     const expected = ['BadgeToggle', 'DriveSync', 'Transcript', 'Engine', 'PlayerBadge', 'Settings'];
     check('A-19', 'plugins tab lists plugins; turning Transcript off removes its tab and row button, persists, and comes back',
       JSON.stringify(names) === JSON.stringify(expected) && coreLocked && tabGone && activeTab === 'plugins' && rowButtonGone && stored === false && stillOff && back,
@@ -659,6 +694,7 @@ const tests = {
     await page.click('.ysrp-badge-toggle');
     await page.click('.ysrp-settings-button');
     await page.click('.ysrp-tab[data-tab-id="plugins"]');
+    await page.click('.ysrp-cat[data-cat="all"]');
     await page.click('.ysrp-switch[data-plugin="BadgeToggle"]');
     await page.keyboard.press('Escape');
     const togglesOff = await page.locator('.ysrp-badge-toggle').count();
@@ -689,7 +725,8 @@ const tests = {
     const latest = JSON.parse(drive.inFolder().find(f => f.name.endsWith('｜a21upload.json')).content);
     const rec = await record(page, 'a21upload');
     await openSettings(page);
-    await page.click('.ysrp-row[data-video-id="a21other"] .is-delete');
+    await page.click('.ysrp-record[data-video-id="a21other"] .is-delete');
+    await page.click('.ysrp-confirm-ok');
     await sleep(2500);
     const remaining = drive.files.filter(f => f.name.endsWith('｜a21other.json')).length;
     check('A-21', 'drive: progress uploads as "<title>｜<id>.json" in the folder, at most once per 15 s, delete removes the file',
@@ -752,36 +789,167 @@ const tests = {
     // YouTube sets html { font-size: 10px }; the dialog must not shrink with it.
     await page.evaluate(() => { document.documentElement.style.fontSize = '10px'; });
     await openSettings(page);
-    const width = await page.evaluate(() => Math.round(document.querySelector('.ysrp-settings-container').getBoundingClientRect().width));
+    const size = await page.evaluate(() => {
+      const r = document.querySelector('.ysrp-settings-container').getBoundingClientRect();
+      return `${Math.round(r.width)}x${Math.round(r.height)}`;
+    });
+    const navWidth = await page.evaluate(() => Math.round(document.querySelector('.ysrp-nav').getBoundingClientRect().width));
+    const footer = await page.$$eval('.ysrp-nav-footer .ysrp-version-line', ls => ls.map(l => l.textContent));
+    const homeLink = await page.$eval('.ysrp-nav-footer a', a => a.getAttribute('href'));
     await page.click('.ysrp-tab[data-tab-id="plugins"]');
     const groups = await page.$$eval('.ysrp-nav-group', els => els.length);
     const visible = () => page.$$eval('.ysrp-plugin', els => els.filter(e => e.offsetParent).map(e => e.dataset.plugin).join(','));
-    await page.fill('.ysrp-search', '字幕');
+    const prefs = () => page.evaluate(() => JSON.parse(localStorage.getItem('YSRP_Plugins') || '{}'));
+    // categories: Favorites by default (empty), All lists the core plugins after the separator
+    const defaultCat = await page.$eval('.ysrp-cat.is-active', e => e.dataset.cat);
+    const favEmpty = await page.isVisible('.ysrp-plugins-empty');
+    await page.click('.ysrp-cat[data-cat="all"]');
+    const layout = await page.evaluate(() => {
+      const sep = document.querySelector('.ysrp-core-sep');
+      const cards = [...document.querySelectorAll('.ysrp-plugin')];
+      const after = c => Boolean(sep.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING);
+      return {
+        sepShown: Boolean(sep.offsetParent),
+        core: cards.filter(after).map(c => c.dataset.plugin).join(','),
+        coreFlag: cards.filter(after).every(c => c.classList.contains('is-core')) && !cards.filter(c => !after(c)).some(c => c.classList.contains('is-core'))
+      };
+    });
+    await page.fill('.ysrp-pane[data-pane="plugins"] .ysrp-search', '字幕');
     const searched = await visible();
-    await page.fill('.ysrp-search', '');
-    await page.selectOption('.ysrp-filter', 'disabled');
+    await page.fill('.ysrp-pane[data-pane="plugins"] .ysrp-search', '');
+    await page.selectOption('.ysrp-pane[data-pane="plugins"] .ysrp-filter', 'disabled');
     const disabledOnly = await visible();
     const emptyShown = await page.isVisible('.ysrp-plugins .ysrp-empty');
-    await page.selectOption('.ysrp-filter', 'all');
+    await page.selectOption('.ysrp-pane[data-pane="plugins"] .ysrp-filter', 'all');
+    // star + pin are saved to YSRP_Plugins; a pinned plugin moves to the top; Favorites lists the starred one
+    await page.click('.ysrp-plugin[data-plugin="Transcript"] .is-star');
+    await page.click('.ysrp-plugin[data-plugin="Transcript"] .is-pin');
+    const lists = await prefs();
+    const firstCard = await page.$eval('.ysrp-plugin', e => e.dataset.plugin);
+    await page.click('.ysrp-cat[data-cat="favorites"]');
+    const favorites = await visible();
+    await page.click('.ysrp-cat[data-cat="all"]');
+    // plugin settings dialog: immediate save, reset through the confirm dialog
     await page.click('.ysrp-plugin[data-plugin="BadgeToggle"] .ysrp-plugin-config');
-    const title = await page.textContent('.ysrp-dialog-title');
-    await page.click('.ysrp-dialog .ysrp-switch[data-setting="startHidden"]');
-    const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem('YSRP_Plugins')).plugins.BadgeToggle.startHidden);
+    const title = await page.textContent('.ysrp-plugin-dialog .ysrp-dialog-title');
+    await page.click('.ysrp-plugin-dialog .ysrp-switch[data-setting="startHidden"]');
+    const stored = async () => (await prefs()).plugins.BadgeToggle.startHidden;
     const afterToggle = await stored();
-    await page.click('.ysrp-dialog-footer .ysrp-btn');
+    await page.click('.ysrp-plugin-reset');
+    const confirmShown = await page.locator('.ysrp-dialog.is-confirm').count();
     const afterOneClick = await stored();
-    await page.click('.ysrp-dialog-footer .ysrp-btn');
+    await page.keyboard.press('Escape');
+    const escClosedConfirmOnly = await page.locator('.ysrp-dialog.is-confirm').count() === 0 && await page.locator('.ysrp-plugin-dialog').count() === 1;
+    const afterCancel = await stored();
+    await page.click('.ysrp-plugin-reset');
+    await page.click('.ysrp-confirm-ok');
     const afterReset = await stored();
-    const switchOn = await page.getAttribute('.ysrp-dialog .ysrp-switch[data-setting="startHidden"]', 'aria-checked');
+    const switchOn = await page.getAttribute('.ysrp-plugin-dialog .ysrp-switch[data-setting="startHidden"]', 'aria-checked');
     await page.keyboard.press('Escape');
     const dialogGone = await page.locator('.ysrp-dialog').count() === 0;
     const modalOpen = await page.isVisible('.ysrp-settings-container');
-    check('A-24', 'plugins tab: full-size dialog under html 10px, grouped nav, search and filter, config dialog edits and resets settings, Esc closes the dialog first',
-      width === 896 && groups === 2 && searched === 'Transcript' && disabledOnly === '' && emptyShown && title === '徽标开关' &&
-      afterToggle === false && afterOneClick === false && afterReset === true && switchOn === 'true' && dialogGone && modalOpen,
-      `width ${width}, groups ${groups}, search "${searched}", disabled "${disabledOnly}" empty ${emptyShown}, title ${title}, stored ${afterToggle}/${afterOneClick}/${afterReset}, switch ${switchOn}, dialog gone ${dialogGone}, modal open ${modalOpen}`);
+    const ok = size === '896x640' && navWidth === 224 && groups === 2 &&
+      /^Video Memory • v2\.2\.0 • \((?:[0-9a-f]{4,}|dev)\)$/.test(footer[0] || '') && footer[1] === 'Production • Userscript' &&
+      homeLink === 'https://github.com/0-V-linuxdo/Youtube-Memory' &&
+      defaultCat === 'favorites' && favEmpty && layout.sepShown && layout.core === 'Engine,PlayerBadge,Settings' && layout.coreFlag &&
+      searched === 'Transcript' && disabledOnly === '' && emptyShown &&
+      JSON.stringify(lists.starred) === '["Transcript"]' && JSON.stringify(lists.pinned) === '["Transcript"]' && firstCard === 'Transcript' && favorites === 'Transcript' &&
+      title === '徽标开关' && afterToggle === false && confirmShown === 1 && afterOneClick === false && escClosedConfirmOnly && afterCancel === false &&
+      afterReset === true && switchOn === 'true' && dialogGone && modalOpen;
+    check('A-24', 'plugins tab: 896x640 under html 10px, 224px nav, two-line footer, Favorites/All, search and filter, star/pin saved, settings dialog saves, confirmed reset, Esc closes the top dialog first', ok,
+      `size ${size}, nav ${navWidth}, groups ${groups}, footer ${JSON.stringify(footer)}, default ${defaultCat} empty ${favEmpty}, core "${layout.core}" sep ${layout.sepShown}, search "${searched}", disabled "${disabledOnly}" empty ${emptyShown}, starred ${JSON.stringify(lists.starred)} pinned ${JSON.stringify(lists.pinned)} first ${firstCard}, favorites "${favorites}", title ${title}, stored ${afterToggle}/${afterOneClick}/${afterCancel}/${afterReset} confirm ${confirmShown} esc ${escClosedConfirmOnly}, switch ${switchOn}, dialog gone ${dialogGone}, modal open ${modalOpen}`);
     await ctx.close();
-  }
+  },
+
+  async 'A-25'() {
+    // Every tab is assembled only from the N-5.2 parts; monochrome; colours follow the system scheme.
+    const ctx = await newContext();
+    const page = await seeded(ctx, {
+      daa25: { videoProgress: 30, saveDate: 10, videoName: 'Unknown Title', videoDuration: 120, videoNote: 'n' },
+      a25plain: { videoProgress: 10, saveDate: 20, videoName: 'Plain', originalTitle: 'Plain' }
+    });
+    await goto(page, 'v=a25look');
+    await sleep(2500);
+    await openSettings(page);
+    await sleep(800);
+    const records = await page.evaluate(() => {
+      const cards = [...document.querySelectorAll('.ysrp-record')];
+      const g = document.querySelector('.ysrp-records');
+      return {
+        n: cards.length,
+        cards: cards.every(c => c.classList.contains('ysrp-card') && c.querySelector(':scope > .ysrp-card-body .ysrp-card-top .ysrp-card-icon') && c.querySelector(':scope > .ysrp-card-sep + .ysrp-card-footer')),
+        cols: getComputedStyle(g).gridTemplateColumns.split(' ').length,
+        radius: [...new Set(cards.map(c => getComputedStyle(c).borderRadius))].join(','),
+        leftBar: cards.some(c => { const cs = getComputedStyle(c); return cs.borderLeftWidth !== cs.borderRightWidth || cs.borderLeftColor !== cs.borderRightColor; }),
+        inline: cards.some(c => c.querySelector('textarea, input, select, .ysrp-panel'))
+      };
+    });
+    // Note / link open nested dialogs outside the card.
+    await page.click('.ysrp-record[data-video-id="a25plain"] .is-note');
+    const noteDialogOutside = await page.evaluate(() => { const d = document.querySelector('.ysrp-note-dialog'); return Boolean(d) && !d.closest('.ysrp-record'); });
+    await page.keyboard.press('Escape');
+    await page.click('.ysrp-record[data-video-id="a25plain"] .is-link');
+    const linkDialogOutside = await page.evaluate(() => { const d = document.querySelector('.ysrp-link-dialog'); return Boolean(d) && !d.closest('.ysrp-record'); });
+    await page.keyboard.press('Escape');
+    const stillNoPanels = await page.$$eval('.ysrp-record', cards => cards.filter(c => c.querySelector('textarea, input, select, .ysrp-panel')).length);
+    // Visit every tab and collect what is on screen.
+    const tabs = {};
+    for (const id of ['records', 'storage', 'display', 'plugins', 'transcript', 'drive']) {
+      await page.click(`.ysrp-tab[data-tab-id="${id}"]`);
+      if (id === 'plugins') await page.click('.ysrp-cat[data-cat="all"]');
+      tabs[id] = await page.evaluate(pid => {
+        const pane = document.querySelector(`.ysrp-pane[data-pane="${pid}"]`);
+        return {
+          groups: pane.querySelectorAll('.ysrp-group').length,
+          rows: pane.querySelectorAll('.ysrp-srow').length,
+          radios: pane.querySelectorAll('input[type="radio"], input[type="checkbox"], .ysrp-choice').length,
+          cards: pane.querySelectorAll('.ysrp-card').length,
+          info: Boolean(document.querySelector('.ysrp-header .ysrp-info-hint'))
+        };
+      }, id);
+    }
+    const controls = await page.evaluate(() => ({
+      storage: document.querySelectorAll('.ysrp-pane[data-pane="storage"] .ysrp-srow select.ysrp-storage-mode').length,
+      language: document.querySelectorAll('.ysrp-pane[data-pane="display"] .ysrp-srow select.ysrp-language-select').length,
+      navIcons: [...document.querySelectorAll('.ysrp-tab')].map(t => `${t.dataset.tabId}:${[...t.querySelector('i').classList].find(c => c.startsWith('fa-') && c !== 'fa-solid')}`).join(',')
+    }));
+    // Monochrome: no inline colours, no multi-colour SVG logos, icon buttons only in the grey / primary tokens.
+    await page.click('.ysrp-tab[data-tab-id="records"]');
+    const mono = await page.evaluate(() => {
+      const scope = [document.querySelector('.ysrp-settings-container'), ...document.querySelectorAll('.ysrp-dialog-layer')];
+      const all = scope.flatMap(el => [el, ...el.querySelectorAll('*')]);
+      const probe = v => { const d = document.createElement('div'); d.style.color = `var(${v})`; document.body.appendChild(d); const c = getComputedStyle(d).color; d.remove(); return c; };
+      const allowed = new Set(['--ysrp-fg-primary', '--ysrp-fg-secondary', '--ysrp-fg-tertiary'].map(probe));
+      const ibtns = [...document.querySelectorAll('.ysrp-settings-container .ysrp-ibtn')];
+      return {
+        inlineColour: all.filter(el => /(^|;)\s*(color|background|background-color|fill|border-color)\s*:/i.test(el.getAttribute('style') || '')).length,
+        svgFill: document.querySelectorAll('.ysrp-settings-container svg [fill]').length,
+        offPalette: ibtns.filter(b => !allowed.has(getComputedStyle(b).color)).map(b => b.className),
+        ibtnCount: ibtns.length
+      };
+    });
+    // Colours follow the system scheme live.
+    const colours = async () => page.evaluate(() => ({
+      modal: getComputedStyle(document.querySelector('.ysrp-settings-container')).backgroundColor,
+      card: getComputedStyle(document.querySelector('.ysrp-record')).backgroundColor
+    }));
+    const light = await colours();
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await sleep(200);
+    const dark = await colours();
+    await page.emulateMedia({ colorScheme: 'light' });
+    const settingsTabsOk = ['storage', 'display', 'transcript', 'drive'].every(id => tabs[id].groups >= 1 && tabs[id].rows >= 1 && tabs[id].radios === 0 && tabs[id].cards === 0);
+    const ok = records.n === 3 && records.cards && records.cols === 2 && records.radius === '8px' && !records.leftBar && !records.inline &&
+      noteDialogOutside && linkDialogOutside && stillNoPanels === 0 &&
+      settingsTabsOk && tabs.storage.groups === 3 && tabs.plugins.cards === 6 && tabs.records.cards === 3 && Object.values(tabs).every(t => t.info) &&
+      controls.storage === 1 && controls.language === 1 &&
+      controls.navIcons === 'records:fa-clock-rotate-left,storage:fa-database,display:fa-palette,plugins:fa-plug,transcript:fa-closed-captioning,drive:fa-cloud' &&
+      mono.inlineColour === 0 && mono.svgFill === 0 && mono.offPalette.length === 0 && mono.ibtnCount > 0 &&
+      light.modal === 'rgb(255, 255, 255)' && light.card === 'rgb(244, 244, 245)' && dark.modal === 'rgb(14, 14, 16)' && dark.card === 'rgb(20, 20, 22)';
+    check('A-25', 'unified Void++ look: cards in a 2-column grid, no inline panels / capsules / left bars / colours, settings rows with drop-downs, theme follows the system', ok,
+      `records ${JSON.stringify(records)}, dialogs outside ${noteDialogOutside}/${linkDialogOutside}, tabs ${JSON.stringify(tabs)}, controls ${JSON.stringify(controls)}, mono ${JSON.stringify(mono)}, light ${JSON.stringify(light)}, dark ${JSON.stringify(dark)}`);
+    await ctx.close();
+  },
 };
 
 const allErrors = [];
@@ -802,8 +970,16 @@ await sleep(2500);
 await openSettings(page);
 for (const tab of ['records', 'storage', 'transcript', 'drive', 'plugins', 'display']) await page.click(`.ysrp-tab[data-tab-id="${tab}"]`);
 await page.click('.ysrp-tab[data-tab-id="records"]');
-await page.click('.ysrp-row .ysrp-ibtn.is-note');
-await page.click('.ysrp-row .ysrp-note-container .ysrp-ibtn');
+await page.click('.ysrp-record .ysrp-ibtn.is-note');
+await page.click('.ysrp-note-dialog .ysrp-note-save');
+await page.click('.ysrp-record .ysrp-ibtn.is-link');
+await page.keyboard.press('Escape');
+await page.click('.ysrp-record .ysrp-ibtn.is-delete');
+await page.click('.ysrp-confirm-cancel');
+await page.click('.ysrp-tab[data-tab-id="plugins"]');
+await page.click('.ysrp-cat[data-cat="all"]');
+await page.click('.ysrp-plugin[data-plugin="BadgeToggle"] .ysrp-plugin-config');
+await page.keyboard.press('Escape');
 await sleep(500);
 const ttErrors = page.errors.filter(e => /Trusted|TypeError|ReferenceError/.test(e));
 check('A-18', 'no Trusted Types / runtime errors with require-trusted-types-for', ttErrors.length === 0, ttErrors.join(' | '));

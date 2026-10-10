@@ -1,33 +1,30 @@
-// Record-row button registry (N-4.1: plugins contribute row buttons with an expandable panel).
+// Record-card control registry (N-4.1, N-5.4.2): plugins contribute icon buttons to each record card.
+// Buttons open nested dialogs (N-5.4.3: nothing ever expands inside a card).
 
 import { Emitter } from './events';
 import type { VideoRecord } from './records';
 
-/** Per-video UI state kept across list rebuilds (fixes R-Q6: open panels / note drafts survive). */
-export type RowUiState = Record<string, unknown>;
-
 export interface RowContext {
   videoId: string;
+  /** Record as it was when the card was built; use readRecord() for the latest. */
   record: VideoRecord;
   url: string;
   isCurrent: boolean;
-  ui: RowUiState;
-  /** Title currently shown in the row. */
+  /** Title currently shown on the card. */
   title(): string;
+  /** Re-render the card's marks / description from storage (e.g. after the note changed). */
+  refresh(): void;
 }
 
 export interface RowParts {
   button: HTMLElement;
-  panel?: HTMLElement;
   dispose?(): void;
 }
 
 export interface RowContribution {
   id: string;
-  /** Button order in the row's top bar (lower first). */
+  /** Position in the card's control group (lower first; delete is always last). */
   order: number;
-  /** Panel order below the top bar (lower first). */
-  panelOrder?: number;
   create(ctx: RowContext): RowParts | null;
 }
 

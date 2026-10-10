@@ -1,4 +1,4 @@
-// N-5.1.4 / D-12: stop page scrolling while the modal is open WITHOUT touching html/body overflow
+// N-5.3.4 / D-12: stop page scrolling while the modal is open WITHOUT touching html/body overflow
 // (replaces S-92/S-93). Wheel, touch and scroll keys are blocked unless a scrollable area inside the
 // modal can consume them; that area never chains the scroll to the page.
 
@@ -34,10 +34,11 @@ function canScroll(el: Element, dx: number, dy: number): boolean {
   return false;
 }
 
-/** Nearest element between target and root (inclusive) that can scroll in the direction. */
-function scrollerFor(target: EventTarget | null, root: Element, dx: number, dy: number): Element | null {
+/** Nearest element between target and its root (inclusive) that can scroll in the direction. */
+function scrollerFor(target: EventTarget | null, roots: Element[], dx: number, dy: number): Element | null {
   let el = target instanceof Element ? target : null;
-  if (!el || !root.contains(el)) return null;
+  const root = el ? roots.find(r => r.contains(el as Element)) : undefined;
+  if (!el || !root) return null;
   while (el) {
     if (canScroll(el, dx, dy)) return el;
     if (el === root) break;
@@ -52,32 +53,29 @@ export interface ScrollLock {
 }
 
 /**
- * @param getRoot the modal element (scrollable areas must be inside it)
- * @param getKeyTarget the element keyboard scrolling should move (the active pane)
+ * @param getRoots the modal and any nested dialog layers (scrollable areas must be inside one of them)
+ * @param getKeyTarget the element keyboard scrolling should move (the active pane or the top dialog)
  */
-export function createScrollLock(getRoot: () => Element | null, getKeyTarget: () => HTMLElement | null): ScrollLock {
+export function createScrollLock(getRoots: () => Element[], getKeyTarget: () => HTMLElement | null): ScrollLock {
   let locked = false;
   let touchX = 0;
   let touchY = 0;
 
   const onWheel = (ev: WheelEvent) => {
-    const root = getRoot();
-    if (!root) return;
-    if (!scrollerFor(ev.target, root, ev.deltaX, ev.deltaY)) ev.preventDefault();
+    if (!scrollerFor(ev.target, getRoots(), ev.deltaX, ev.deltaY)) ev.preventDefault();
   };
   const onTouchStart = (ev: TouchEvent) => {
     const t = ev.touches[0];
     if (t) { touchX = t.clientX; touchY = t.clientY; }
   };
   const onTouchMove = (ev: TouchEvent) => {
-    const root = getRoot();
     const t = ev.touches[0];
-    if (!root || !t) return;
+    if (!t) return;
     const dx = touchX - t.clientX;
     const dy = touchY - t.clientY;
     touchX = t.clientX;
     touchY = t.clientY;
-    if (!scrollerFor(ev.target, root, dx, dy)) ev.preventDefault();
+    if (!scrollerFor(ev.target, getRoots(), dx, dy)) ev.preventDefault();
   };
   const onKey = (ev: KeyboardEvent) => {
     if (!SCROLL_KEYS.has(ev.key) || ev.defaultPrevented) return;
@@ -86,8 +84,7 @@ export function createScrollLock(getRoot: () => Element | null, getKeyTarget: ()
     if ((ev.key === ' ' || ev.key === 'Spacebar') && target && target.closest('button, a, label, [role="button"], [role="switch"]')) return;
     ev.preventDefault();
     const pane = getKeyTarget();
-    const root = getRoot();
-    if (!pane || !root) return;
+    if (!pane) return;
     const page = Math.max(40, pane.clientHeight * 0.9);
     switch (ev.key) {
       case 'ArrowDown': pane.scrollTop += 40; break;

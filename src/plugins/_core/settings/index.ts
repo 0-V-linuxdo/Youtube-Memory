@@ -1,5 +1,5 @@
-// Settings core plugin: modal shell (N-5) with the Records, Storage, Display and Plugins tabs,
-// plus the core row buttons (note, link). Delete is built into every row.
+// Settings core plugin: modal shell (N-5.3) with the Records, Storage, Display and Plugins tabs,
+// plus the core record-card controls (note, link). Delete is built into every card.
 
 import { definePlugin } from '../../../api/plugins';
 import { setModalController } from '../../../api/tabs';
@@ -36,7 +36,7 @@ export default definePlugin({
     ctx.addTab(createRecordsTab(busy => modal.setBusy(busy)));
     ctx.addTab(createStorageTab());
     ctx.addTab(createDisplayTab());
-    ctx.addTab(createPluginsTab((content, onClose) => modal.openDialog(content, onClose)));
+    ctx.addTab(createPluginsTab());
     ctx.addRowButton(noteContribution);
     ctx.addRowButton(linkContribution);
   }

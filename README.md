@@ -7,9 +7,9 @@
 - **自动保存 / 恢复进度**：等待播放器就绪、自动避开广告；恢复后会多次确认位置，被 YouTube 拉回时会重新跳转。
 - **时间戳链接冲突提示**：链接里带 `t=` 且与已保存进度相差较大时，弹窗让你选择从哪里播放。
 - **播放器徽标**：在播放器上显示「上次保存」时间和同步状态。
-- **设置面板**：记录列表（搜索、重命名、备注、链接、删除）、存储后端（localStorage / GM 存储）切换与迁移、JSON 导入导出、显示选项、插件开关。
+- **设置面板（Void++ 风格）**：记录卡片（搜索筛选、笔记、链接、字幕，删除需确认）、存储后端（浏览器本地存储 / GM 存储）切换与迁移、JSON 导入导出、界面语言、插件收藏 / 置顶 / 开关与设置。
 - **启动时整理记录**：删除损坏的记录，补全缺失字段。
-- 中英双语界面，跟随系统深色 / 浅色主题。
+- 中英双语界面，单色配色，跟随系统深色 / 浅色主题。
 
 ## 插件
 
@@ -34,9 +34,9 @@
 需要 [Bun](https://bun.sh)。
 
 ```sh
-bun run build.ts        # 生成 userscript/*.user.js 与 *.meta.js
+bun run build.ts        # 生成 userscript/*.user.js 与 *.meta.js（--dev 为开发构建）
 npx tsc --noEmit        # 类型检查
 NODE_PATH=$(npm root -g) node tests/acceptance.mjs   # 验收测试（需全局 Playwright）
 ```
 
-源码结构：`src/api`（插件 API）、`src/utils`（工具）、`src/plugins/_core`（核心插件）、`src/plugins/*`（可选插件）。新增插件只需在 `src/plugins/` 下新建目录，构建时会自动注册。
+源码结构：`src/api`（插件 API 与界面部件 `ui.ts` / `dialogs.ts`）、`src/utils`（工具）、`src/plugins/_core`（核心插件）、`src/plugins/*`（可选插件）。新增插件只需在 `src/plugins/` 下新建目录，构建时会自动注册。

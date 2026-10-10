@@ -1,5 +1,6 @@
 // Build: scan src/plugins for plugin folders, generate the plugin list, bundle a single userscript file.
-// Usage: bun run build.ts            (full build)
+// Usage: bun run build.ts            (full production build)
+//        bun run build.ts --dev      (development build: the settings footer says "Development")
 //        bun run build.ts --gen-only (only regenerate src/generated/plugins.ts)
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -77,6 +78,21 @@ function generatePluginList(): void {
 generatePluginList();
 if (process.argv.includes('--gen-only')) process.exit(0);
 
+/* ------------------------------------------------------------------ build info (N-5.3.5 version footer) */
+
+function gitShortHash(): string {
+  try {
+    const proc = Bun.spawnSync(['git', 'rev-parse', '--short', 'HEAD'], { stdout: 'pipe', stderr: 'ignore' });
+    const hash = proc.success ? proc.stdout.toString().trim() : '';
+    return /^[0-9a-f]{4,40}$/.test(hash) ? hash : 'dev';
+  } catch {
+    return 'dev';
+  }
+}
+
+const COMMIT = gitShortHash();
+const BUILD_MODE = process.argv.includes('--dev') ? 'development' : 'production';
+
 /* ------------------------------------------------------------------ bundle */
 
 const result = await Bun.build({
@@ -85,7 +101,7 @@ const result = await Bun.build({
   format: 'iife',
   minify: false,
   sourcemap: 'none',
-  define: { __VERSION__: JSON.stringify(VERSION) },
+  define: { __VERSION__: JSON.stringify(VERSION), __COMMIT__: JSON.stringify(COMMIT), __BUILD_MODE__: JSON.stringify(BUILD_MODE) },
   plugins: [{
     name: 'css-as-text',
     setup(build) {
@@ -116,4 +132,4 @@ if (forbidden.test(output)) {
 mkdirSync(OUT_DIR, { recursive: true });
 writeFileSync(OUT_FILE, output);
 writeFileSync(META_FILE, header);
-console.log(`built ${OUT_FILE} (${(output.length / 1024).toFixed(1)} KiB), ${VERSION}`);
+console.log(`built ${OUT_FILE} (${(output.length / 1024).toFixed(1)} KiB), ${VERSION}, commit ${COMMIT}, ${BUILD_MODE}`);

@@ -13,7 +13,7 @@
 | C-14 … C-21 存储键、占位文字、DOM 类名、事件名 | `utils/constants.ts` | 常量；事件派发见 `api/events.ts` `dispatch()` |
 | C-22 … C-30 运行时配置 | `plugins/_core/engine/index.ts`、`plugins/transcript/service.ts`、`api/titles.ts` | 会话状态取代全局“已恢复”标志；字幕默认值 `DEFAULTS` |
 | C-31 … C-33 图标、DeArrow SVG | `utils/dom.ts` | `icon()`、`dearrowIcon()`（附录 A 路径逐字） |
-| C-34 … C-36 主题 | `api/theme.css` | CSS 变量 + `prefers-color-scheme`（N-5.3 色板取代） |
+| C-34 … C-36 主题 | `api/theme.css` | CSS 变量 + `prefers-color-scheme`（N-5.1 色板取代） |
 | C-37 时间格式化 | `utils/text.ts` | `formatTime()` |
 | C-38、C-39 等待元素 | `utils/dom.ts` | `waitFor()`（可选超时） |
 | C-40 … C-56 多语言 | `utils/i18n.ts` | `normalizePreference()`、`detectBrowserLanguage()`、`getPreference()`、`setPreference()`、`getLanguage()`、`interpolate()`、`pick()`、`tr()`、`extend()`、`t()`，内置 `language.*` 词条 |
@@ -65,7 +65,7 @@
 | S-80 … S-85 恢复 | `plugins/_core/engine/index.ts` | 被 N-2.4 取代：`decide()`、`continueRestore()` |
 | S-86 … S-89 徽标插入点 | `plugins/_core/playerBadge/index.ts` | `ensureBadge()` |
 | S-90、S-91 弹窗宿主与遮罩 | `utils/dom.ts`、`plugins/_core/settings/shell.ts` | `pageHost()`、`SettingsModal.ensureBuilt()` |
-| S-92、S-93 滚动锁定 | `plugins/_core/settings/scrollLock.ts` | 被 N-5.1.4 取代：`createScrollLock()` |
+| S-92、S-93 滚动锁定 | `plugins/_core/settings/scrollLock.ts` | 被 N-5.3.4 取代：`createScrollLock()` |
 | S-94、S-95 弹窗定位 | `plugins/_core/settings/style.css` | 固定居中（CSS，随视口自动适配，无需 resize 监听） |
 | S-96 … S-102 设置按钮开关 | `plugins/_core/playerBadge/index.ts`、`api/tabs.ts`、`settings/shell.ts` | `createBadge()`（pointerdown 捕获）、`openSettings()`、`SettingsModal.open()/close()` |
 
@@ -103,14 +103,14 @@
 
 | 规格条目 | 实现文件 | 主要函数 / 说明 |
 |---|---|---|
-| U-1、U-2 色板、图标 | `api/theme.css`、`utils/dom.ts` | N-5.3 色板取代 |
+| U-1、U-2 色板、图标 | `api/theme.css`、`utils/dom.ts` | N-5.1 色板与单色图标取代；DeArrow 彩色圆环改为单色 `wand-magic-sparkles` |
 | U-3 … U-7 本地化辅助 | `utils/i18n.ts` | `pick()`、`tr()` |
 | U-8 … U-13 语言状态、选项文案、语言变更重建 | `utils/i18n.ts`、`settings/displayTab.ts`、`settings/shell.ts` | `languageName()`、`createDisplayTab()`、`SettingsModal.rebuild()`（50 ms 防抖） |
 | U-14 … U-16 iOS / 分享探测 | `settings/storageTab.ts` | `isIOS()`、`canShareFiles` |
 | U-17 … U-19 标题比较 | `utils/text.ts` | `sameTitle()`、`isPlaceholderTitle()`、`normalizeTitle()` |
 | U-20 … U-28 DeArrow 获取 | `api/titles.ts` | `fetchDearrowTitle()` |
 | U-29 … U-35 可用性缓存、持久化、ready 事件 | `settings/recordsTab.ts` | `availability`、`persistDearrow()`、`RecordRow.applyDearrow()`、`RecordsList`（事件监听） |
-| U-36、U-37 滚动条样式 | `settings/style.css` | N-5.3.9 |
+| U-36、U-37 滚动条样式 | `api/ui.css` | N-5.2.16（滑块 border-l2、轨道透明） |
 | U-38 … U-50 弹窗创建、样式、开关 | `settings/shell.ts`、`settings/style.css` | `SettingsModal.open()/close()/ensureBuilt()`；N-5 取代布局与尺寸 |
 | U-51 … U-56 头部 | `settings/shell.ts` | `refreshHeader()`、`setBusy()`、`storageModeLabel()` |
 | U-57 … U-61 标签栏 | `settings/shell.ts`、`api/tabs.ts` | `renderNav()`、`activate()`、`registerTab()` |
@@ -148,10 +148,10 @@
 | R-10 … R-19 重建、排序、空状态 | `settings/recordsTab.ts` | `RecordsList.rebuild()`（D-5 排序） |
 | R-20 … R-29 行布局、百分比、标题 | `settings/recordsTab.ts` | `RecordRow` 构造、`progressText()`、`initTitles()` |
 | R-30 … R-48 DeArrow 切换、原标题 | `settings/recordsTab.ts`、`api/titles.ts` | `initTitles()`、`applyDearrow()`、`markMissing()`、`renderTitle()`、`toggleDearrow()`、`persistDearrow()` |
-| R-49 … R-62 字幕按钮与面板 | `plugins/transcript/index.ts` | `createRowParts()` |
-| R-63 … R-73 笔记 | `settings/rowParts.ts` | `noteContribution` |
-| R-74 … R-78 链接 | `settings/rowParts.ts` | `linkContribution`、`copyText()` |
-| R-79、R-80 删除 | `settings/recordsTab.ts` | `RecordRow.delete()` |
+| R-49 … R-62 字幕按钮与获取 | `plugins/transcript/index.ts` | `openTranscriptDialog()`（N-5.4.6 子弹窗取代面板） |
+| R-63 … R-73 笔记 | `settings/rowParts.ts` | `noteContribution`、`openNoteDialog()`（N-5.4.5 子弹窗取代面板，保存规则不变） |
+| R-74 … R-78 链接 | `settings/rowParts.ts`、`api/ui.ts` | `linkContribution`、`openLinkDialog()`、`copyText()`（N-5.4.4） |
+| R-79、R-80 删除 | `settings/recordsTab.ts`、`api/dialogs.ts` | `RecordCard.confirmDelete()`（N-5.4.7 确认弹窗） |
 | R-81 … R-84 实时更新 | `settings/recordsTab.ts` | `RecordsList` 构造中的三个监听 |
 
 **1.4 已知问题处理**
@@ -161,18 +161,18 @@
 | R-Q1、R-Q2 百分比 | N-2.6 + 0–100 限制 |
 | R-Q3 未排序 | D-5 |
 | R-Q4 计数不一致 | 统一为有效行数 |
-| R-Q5 无空状态、删除无确认 | 增加空状态；删除确认**保留不加**（A-14/A-21 要求一次点击即删除） |
+| R-Q5 无空状态、删除无确认 | 增加空状态；删除改为经确认弹窗（N-5.4.7，新版 A-14 要求） |
 | R-Q6 重建丢失状态 | 每视频界面状态跨重建保留 |
 | R-Q7 连续重建 | 原地更新 |
 | R-Q8 状态文字被截断 | 不再截前缀 |
-| R-Q9 颜色被忽略 | 成功/错误分别着色（N-5.3.1 只保留这两种） |
+| R-Q9 颜色被忽略 | 成功/错误分别着色（N-5.1 只保留这两种） |
 | R-Q10 首次显示“重新获取” | 首次显示“正在获取…” |
 | R-Q11 缓存载入不设不透明度 | `show()` 统一设置 |
 | R-Q12 DeArrow 出错永久 pending | 出错按“无标题”处理并移除按钮（fetch 内部已把错误变为 null） |
 | R-Q13 原标题失败写 null | 不写 |
 | R-Q14 残缺记录 | 记录不存在时不写笔记 |
 | R-Q15 剪贴板无回退/无反馈 | `copyText()` 回退 + 失败提示 |
-| R-Q16 提示文字 | 字幕按钮提示改为“显示字幕/隐藏字幕”；链接提示**保留**固定文本（R-74） |
+| R-Q16 提示文字 | 每个图标按钮都有 aria-label 与同名提示（N-5.2.3）；笔记按钮按有无笔记显示“添加笔记/编辑笔记” |
 | R-Q17 指示器不可见 | 300 ms |
 | R-Q18 选择器未转义 | 不再拼接选择器，用 `Map` 查找行 |
 | R-Q19 删除不清缓存 | 删除时清字幕缓存 |
@@ -182,9 +182,9 @@
 
 | 规格条目 | 实现文件 | 主要函数 / 说明 |
 |---|---|---|
-| T-1 … T-14 配色、按钮装饰、焦点环、状态消息 | `settings/ui.ts`、`settings/style.css` | `button()`、`messageLine()`；N-5.3 取代配色 |
+| T-1 … T-14 配色、按钮装饰、焦点环、状态消息 | `api/ui.ts`、`api/ui.css` | `button()`、`messageLine()`；N-5.2.4 / N-5.7.5 取代配色 |
 | T-15 … T-19 标签容器 | `settings/storageTab.ts` | `createStorageTab()` |
-| T-20 … T-45 后端卡片与迁移 | `settings/storageTab.ts`、`settings/ui.ts`、`utils/storage.ts` | `choiceGroup()`、`switchMode()` |
+| T-20 … T-45 后端选择与迁移 | `settings/storageTab.ts`、`api/ui.ts`、`utils/storage.ts` | `selectControl()`（N-5.7.1 下拉框取代单选卡片）、确认弹窗、`switchMode()` |
 | T-46 … T-62 导出 | `settings/storageTab.ts` | `exportFileName()`、`downloadFile()`、分享分支 |
 | T-63 … T-84 导入 | `settings/storageTab.ts`、`utils/storage.ts` | `runImport()`、`importData()` |
 | T-85 … T-87 联动 | `settings/recordsTab.ts`、`settings/shell.ts` | `bulk` 变更触发列表重建；语言切换整体重建 |
@@ -207,7 +207,7 @@
 | 12 文件名含冒号 | **保留**（T-56 规定的对外格式） |
 | 13 报错晦涩 | `copyText()` 回退与明确的“剪贴板不可用” |
 | 14 消息不消失 | **保留**（T-14） |
-| 15 焦点环颜色 | 单色焦点环（N-5.3） |
+| 15 焦点环颜色 | 单色焦点环（border-l2，N-5.2） |
 | 16 键盘可达性 | 原生复选框、可聚焦的文件选择框；单选卡片为 label |
 | 17 焦点环覆盖内阴影 | 文本域不再使用内阴影 |
 | 18 标题追加两次 | 只追加一次 |
@@ -220,7 +220,7 @@
 
 | 规格条目 | 实现文件 | 主要函数 / 说明 |
 |---|---|---|
-| L-1 … L-5 卡片通用样式 | `settings/ui.ts`、`settings/style.css` | `card()`、`infoRow()` |
+| L-1 … L-5 卡片通用样式 | `api/ui.ts`、`api/ui.css` | N-5.7 改为分组标题 + 设置行：`group()`、`settingsRow()` |
 | L-6 … L-26 字幕设置卡片与保存 | `plugins/transcript/index.ts`、`plugins/transcript/service.ts` | `renderTab()`、`updateSettings()`、`secretInput()` |
 | L-27 … L-32 状态与提示卡片 | `plugins/transcript/index.ts` | `renderTab()` 中的 `update()` |
 | L-33 … L-50 界面语言 | `settings/displayTab.ts`、`utils/i18n.ts` | `createDisplayTab()`、`setPreference()` |
@@ -283,11 +283,39 @@
 | N-4.5 设置项 | `api/plugins.ts`、`settings/pluginsTab.ts` | `SettingDef`、`getSetting()`、`settings.set/reset`、`settingControl()` |
 | N-4.6 插件清单 | `plugins/_core/engine`、`_core/playerBadge`、`_core/settings`、`badgeToggle`、`transcript`、`driveSync` | 各自 `index.ts` |
 | N-4.7 字幕插件关闭 | `plugins/transcript/index.ts`、`api/tabs.ts`、`api/rows.ts` | 标签与行按钮随插件注销 |
-| N-5.1 外壳 | `settings/shell.ts`、`settings/scrollLock.ts`、`settings/style.css` | `open()/close()`、Esc/遮罩/✕、`createScrollLock()` |
-| N-5.2 布局 | `settings/shell.ts`、`settings/style.css` | `renderNav()`、`refreshHeader()`、窄屏媒体查询 |
-| N-5.3 配色与控件 | `api/theme.css`、`settings/style.css`、`settings/ui.ts` | |
-| N-5.4 插件标签 | `settings/pluginsTab.ts` | `createPluginsTab()` |
-| N-5.5 插件设置子弹窗 | `settings/pluginsTab.ts`、`settings/shell.ts` | `openPluginDialog()`、`SettingsModal.openDialog()` |
+| N-5.1 颜色、单色图标、字体 | `api/theme.css`、`utils/dom.ts` | 11 个颜色令牌 + 图标块底色，`prefers-color-scheme` 实时切换；`icon()` 只继承文字色；DeArrow 改为 `wand-magic-sparkles`，显示原标题时 `.is-off`（0.4） |
+| N-5.2.1 卡片 | `api/ui.ts`、`api/ui.css` | `card()`、`cardMark()`：图标块、标题（提示框）、小标记、控件组、两行说明、分隔线、页脚（空时 `&nbsp;`） |
+| N-5.2.2 卡片网格 | `api/ui.ts`、`api/ui.css` | `grid()`：`repeat(2, 1fr)`、间距 12px、≤640px 单列 |
+| N-5.2.3 图标按钮 | `api/ui.ts` | `iconButton()`：24px、`aria-label` + 同名 `title`、`.is-active` |
+| N-5.2.4 普通按钮 | `api/ui.ts`、`api/ui.css` | `button({variant: primary/secondary/tertiary/danger, small})` |
+| N-5.2.5 开关 | `api/ui.ts` | `switchControl()`：`role="switch"`、`aria-checked`、150ms 过渡 |
+| N-5.2.6 输入框与下拉框 | `api/ui.ts` | `textInput()`、`textArea()`、`selectControl()`（右侧箭头）、`secretInput()` |
+| N-5.2.7 设置行 | `api/ui.ts` | `settingsRow()`：右侧控件 / 下方整行内容 |
+| N-5.2.8 分组标题 | `api/ui.ts` | `group()`；组间 1px 分隔线与 16px 间距 |
+| N-5.2.9 搜索筛选栏 | `api/ui.ts` | `searchBar()`：输入框占满、筛选下拉 120px |
+| N-5.2.10 分类标签条 | `api/ui.ts` | `categoryStrip()`：三级小按钮、选中项 2px 下划线 |
+| N-5.2.11 子弹窗 | `api/dialogs.ts` | `openDialog({size: sm/md/lg})`：透明层、✕、Esc/点外面只关最上层 |
+| N-5.2.12 字段 | `api/ui.ts` | `field()` |
+| N-5.2.13 确认弹窗 | `api/dialogs.ts` | `confirmDialog()`：小号、取消 + 主按钮/危险按钮 |
+| N-5.2.14 信息提示 | `api/ui.ts` | `infoHint()` |
+| N-5.2.15 空状态 | `api/ui.ts` | `emptyState()` |
+| N-5.2.16 滚动区域 | `settings/style.css`、`api/ui.css` | `.ysrp-pane` 左右各延伸 20px；细滚动条 |
+| N-5.3.1 … N-5.3.4 外壳、关闭、滚动 | `settings/shell.ts`、`settings/scrollLock.ts`、`settings/style.css` | `open()/close()`；Esc 由 `api/dialogs.ts` 先关子弹窗；`createScrollLock()` 也放行子弹窗内的滚动 |
+| N-5.3.5 左栏导航与版本信息 | `settings/shell.ts`、`build.ts`、`utils/constants.ts` | `renderNav()`、`versionFooter()`；`git rev-parse --short HEAD` → `__COMMIT__`（失败为 `dev`），`--dev` → “Development” |
+| N-5.3.6 右栏标题行 | `settings/shell.ts`、`api/tabs.ts` | `refreshHeader()`；`TabDef.info()` 信息提示、存储标记、刷新图标 |
+| N-5.3.7 窄屏 | `settings/style.css`、`api/ui.css` | 媒体查询 |
+| N-5.4 记录标签 | `settings/recordsTab.ts`、`settings/rowParts.ts`、`api/rows.ts` | `RecordsList`（搜索/筛选/空状态）、`RecordCard`（图标、标记、控件组、说明、页脚、实时更新）、`progressText()`、`isFinished()` |
+| N-5.4.4 / N-5.4.5 链接、笔记子弹窗 | `settings/rowParts.ts` | `openLinkDialog()`、`openNoteDialog()`（`Ctrl/⌘+Enter` 保存） |
+| N-5.4.6 字幕子弹窗 | `plugins/transcript/index.ts` | `openTranscriptDialog()` |
+| N-5.4.7 删除确认 | `settings/recordsTab.ts` | `RecordCard.confirmDelete()` |
+| N-5.5 插件标签 | `settings/pluginsTab.ts`、`api/pluginSettings.ts`、`api/plugins.ts` | 分类条、搜索筛选、置顶排序、核心分隔线；`setListed('starred' / 'pinned')`；`hasFailed()` 启动失败标记 |
+| N-5.6 插件设置子弹窗 | `settings/pluginsTab.ts` | `openPluginDialog()`、`settingRow()`；重置经 `confirmDialog()` |
+| N-5.7.1 存储标签 | `settings/storageTab.ts` | 三组设置行；迁移与覆盖导入各有确认弹窗 |
+| N-5.7.2 字幕标签 | `plugins/transcript/index.ts` | `renderTab()`：“接口”“当前视频”两组 |
+| N-5.7.3 云同步标签 | `plugins/driveSync/index.ts` | “Google Drive”“如何获取凭据”两组 |
+| N-5.7.4 界面标签 | `settings/displayTab.ts` | 设置行 + 下拉框（自动 / 中文 / English） |
+| N-5.7.5 结果消息 | `api/ui.ts` | `messageLine()` |
+| N-5.8 时间戳选择弹窗外观 | `plugins/_core/playerBadge/resumeDialog.ts`、`playerBadge/style.css` | 子弹窗样式，宽 `min(448px, 播放器宽 − 32px)`，主/次按钮，无 ✕ |
 | N-6 💾 徽标开关 | `plugins/badgeToggle/index.ts`、`plugins/badgeToggle/style.css` | |
 | N-7.1 凭据 | `plugins/driveSync/drive.ts` | `readCredentials()`、`saveCredentials()`、`hasCredentials()` |
 | N-7.2 访问令牌 | `plugins/driveSync/drive.ts` | `DriveClient.accessToken()`、`call()`（401 重试） |
@@ -331,7 +359,7 @@
 | D-10 | `plugins/badgeToggle/` |
 | D-11 | `settings/shell.ts`、`settings/style.css` |
 | D-12 | `settings/scrollLock.ts`（不改 html/body overflow） |
-| D-13 | `rowParts.ts` / 字幕面板默认收起；`.ysrp-url` 单行 |
+| D-13 | 被 N-5.4.3 取代：卡片内不再有任何面板，链接/笔记/字幕都在子弹窗里（`rowParts.ts`、`transcript/index.ts`） |
 
 ## 第三部分 · 验收清单
 
@@ -349,12 +377,13 @@
 | A-11 | 读取-合并-写回 | ✓ |
 | A-12 | `ensureBadge()` + 观察器 | ✓ |
 | A-13、A-13b | `shell.ts`、`scrollLock.ts` | ✓ |
-| A-14 | `recordsTab.ts`、`rowParts.ts` | ✓ |
-| A-15 | `storageTab.ts`、`utils/storage.ts` | ✓ |
+| A-14 | `recordsTab.ts`、`rowParts.ts`、`api/ui.ts`（`card()`、`searchBar()`）、`api/dialogs.ts` | ✓ |
+| A-15 | `storageTab.ts`、`utils/storage.ts`、`confirmDialog()` | ✓ |
 | A-16 | `plugins/transcript/*` | ✓ |
 | A-17 | `displayTab.ts`、`i18n.ts`、`shell.rebuild()` | ✓ |
 | A-18 | 全部（DOM API） | ✓ |
 | A-19 | `pluginsTab.ts`、`setPluginEnabled()` | ✓ |
 | A-20 | `plugins/badgeToggle/` | ✓ |
 | A-21、A-22、A-23 | `plugins/driveSync/*` | ✓ |
-| A-24 | `pluginsTab.ts`、`shell.openDialog()`、px 尺寸 | ✓ |
+| A-24 | `pluginsTab.ts`、`api/pluginSettings.ts`（`starred`/`pinned`）、`api/dialogs.ts`、`shell.ts`（版本页脚）、`build.ts`（提交哈希） | ✓ |
+| A-25 | `api/theme.css`、`api/ui.css`、`api/ui.ts`、各标签文件 | ✓ |

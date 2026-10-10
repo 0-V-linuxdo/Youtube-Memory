@@ -113,7 +113,7 @@ export class PluginContext {
       settingsChanged.emit({ plugin: this.plugin.name, key });
     },
     reset: (): void => {
-      // Defaults are written explicitly so the stored value reflects the reset (N-5.5.5).
+      // Defaults are written explicitly so the stored value reflects the reset (N-5.6).
       for (const [key, def] of Object.entries(this.plugin.settings || {})) setStoredValue(this.plugin.name, key, def.default);
       for (const key of Object.keys(this.plugin.settings || {})) this.notify(key, getSetting(this.plugin, key));
       settingsChanged.emit({ plugin: this.plugin.name, key: '*' });
@@ -156,6 +156,12 @@ export const settingsChanged = new Emitter<{ plugin: string; key: string }>();
 const registry: PluginDef[] = [];
 const running = new Map<string, PluginContext>();
 const contexts = new Map<string, PluginContext>();
+const failed = new Set<string>();
+
+/** N-5.5.3: enabled but its start() threw. */
+export function hasFailed(name: string): boolean {
+  return failed.has(name);
+}
 
 export function listPlugins(): PluginDef[] {
   return registry.slice();
@@ -189,11 +195,13 @@ function startPlugin(plugin: PluginDef): void {
   if (running.has(plugin.name)) return;
   const ctx = new PluginContext(plugin);
   running.set(plugin.name, ctx);
+  failed.delete(plugin.name);
   try {
     plugin.start(ctx);
   } catch (err) {
     // N-4.3: a failing plugin is logged and does not affect the others.
     console.error(`[Video Memory] Plugin ${plugin.name} failed to start:`, err);
+    failed.add(plugin.name);
   }
 }
 
@@ -201,6 +209,7 @@ function stopPlugin(plugin: PluginDef): void {
   const ctx = running.get(plugin.name);
   if (!ctx) return;
   running.delete(plugin.name);
+  failed.delete(plugin.name);
   try { plugin.stop?.(ctx); } catch (err) { console.error(`[Video Memory] Plugin ${plugin.name} failed to stop:`, err); }
   ctx.dispose();
 }
