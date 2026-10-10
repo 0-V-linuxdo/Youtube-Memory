@@ -1,14 +1,15 @@
 // ==UserScript==
-// @name         [Youtube] Video Memory [20261010] v2.1.0
+// @name         [Youtube] Video Memory [20261010] v2.2.0
 // @namespace    0_V userscripts/Youtube Save & Resume Progress
-// @description  Save & resume YouTube playback progress: per-video sessions that survive in-site navigation, ads, slow loads and multiple tabs. Records list with DeArrow titles, notes and transcripts; localStorage / GM storage with import & export; plugins for a badge toggle and Google Drive sync; Chinese / English UI.
-// @version      [20261010] v2.1.0
-// @update-log   [20261010] v2.1.0 · Rebuilt on a plugin architecture (after void++): TypeScript sources, a Plugins tab, the 💾 badge toggle built in, and Google Drive sync back as a plugin.
+// @version      [20261010] v2.2.0
+// @description  Save & resume YouTube playback progress reliably (waits for the player, skips ads, per-video sessions), timestamp-link choice dialog, records/storage/transcript settings, void++-style plugins, 💾 badge toggle and optional Google Drive sync.
+// @update-log   [20261010] v2.2.0 · Clean-room rewrite: new progress engine (no lost progress), &t= choice dialog, void++-style plugin architecture and settings UI, 💾 badge toggle plugin, per-video Google Drive sync, page scrollbar kept while the dialog is open.
 // @author       0_V
 // @license      MIT
+// @match        *://*.youtube.com/*
+// @icon         https://github.com/0-V-linuxdo/Youtube-Memory/raw/refs/heads/main/main_icon/main_icon.svg
 // @homepageURL  https://github.com/0-V-linuxdo/Youtube-Memory
 // @supportURL   https://github.com/0-V-linuxdo/Youtube-Memory/issues
-// @match        *://*.youtube.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
@@ -16,85 +17,23 @@
 // @grant        GM_xmlhttpRequest
 // @connect      oauth2.googleapis.com
 // @connect      www.googleapis.com
-// @icon         https://github.com/0-V-linuxdo/Youtube-Memory/raw/refs/heads/main/main_icon/main_icon.svg
 // ==/UserScript==
 
-/**
- * [Youtube] Video Memory [20261010] v2.1.0
- * (c) 2025 0-V-linuxdo · MIT License
- * Source: https://github.com/0-V-linuxdo/Youtube-Memory (src/, built with `bun run build`)
- * Behaviour spec: docs/functional-spec.md
+/*
+ * Based on "Youtube Save/Resume Progress" by Costin Alexandru Sandu
+ * (https://greasyfork.org/scripts/487305, v1.5.1). Thank you!
+ *
+ * Generated file — edit the TypeScript sources under src/ and run `bun run build`.
+ * 本文件由 src/ 下的 TypeScript 源码经 `bun run build` 生成，请勿直接修改。
+ * YouTube enforces Trusted Types: never assign innerHTML / outerHTML; build the UI with DOM APIs.
+ * YouTube 启用了 Trusted Types：禁止给 innerHTML / outerHTML 赋值，只能用 DOM API 构建界面。
  */
+
+'use strict';
 (() => {
-  // src/api/RecordActions.ts
-  var actions = new Map;
-  var listeners = new Set;
-  var version = 0;
-  function addRecordAction(action) {
-    actions.set(action.id, action);
-    version++;
-    for (const listener of listeners)
-      listener();
-  }
-  function removeRecordAction(id) {
-    if (!actions.delete(id))
-      return;
-    version++;
-    for (const listener of listeners)
-      listener();
-  }
-  function getRecordActions() {
-    return [...actions.values()].sort((a, b) => a.order - b.order);
-  }
-  function onRecordActionsChange(listener) {
-    listeners.add(listener);
-    return () => listeners.delete(listener);
-  }
-
-  // src/utils/Logger.ts
-  class Logger {
-    name;
-    constructor(name) {
-      this.name = name;
-    }
-    prefix() {
-      return `[Video Memory] ${this.name}:`;
-    }
-    info(...args) {
-      console.info(this.prefix(), ...args);
-    }
-    warn(...args) {
-      console.warn(this.prefix(), ...args);
-    }
-    error(...args) {
-      console.error(this.prefix(), ...args);
-    }
-  }
-
-  // src/api/RestoreHooks.ts
-  var logger = new Logger("RestoreHooks");
-  var hooks = new Map;
-  function addRestoreHook(owner, hook) {
-    hooks.set(owner, hook);
-  }
-  function removeRestoreHook(owner) {
-    hooks.delete(owner);
-  }
-  function runRestoreHooks(videoId) {
-    const pending = [];
-    for (const [owner, hook] of hooks) {
-      try {
-        const result = hook(videoId);
-        if (result)
-          pending.push(result.catch((err) => logger.warn(`${owner} failed`, err)));
-      } catch (err) {
-        logger.warn(`${owner} failed`, err);
-      }
-    }
-    return pending;
-  }
-
   // src/utils/constants.ts
+  var VERSION = "[20261010] v2.2.0";
+  var VERSION_SHORT = (VERSION.match(/v[\d.]+/) || [VERSION])[0];
   var RECORD_PREFIX = "Youtube_SaveResume_Progress-";
   var KEY_STORAGE_MODE = "YSRP_StorageMode";
   var KEY_TRANSCRIPT = "YSRP_TranscriptSettings";
@@ -103,2689 +42,4823 @@
   var KEY_DRIVE = "YSRP_DriveSettings";
   var KEY_DRIVE_FULL_SYNC = "YSRP_DriveFullSyncDone";
   var UNKNOWN_TITLE = "Unknown Title";
-  var PLACEHOLDER_TITLES = new Set(["unknown title", "正在获取标题…"]);
-  var EVT_RECORD = "ysrp-record-updated";
-  var EVT_VIDEO = "ysrp-current-video-status";
-  var EVT_TITLE = "ysrp-dearrow-title-ready";
-  var EVT_LANG = "ysrp-language-changed";
+  var LEGACY_LOADING_TITLE = "正在获取标题…";
+  var EVT_LANGUAGE = "ysrp-language-changed";
+  var EVT_VIDEO_STATUS = "ysrp-current-video-status";
+  var EVT_DEARROW_READY = "ysrp-dearrow-title-ready";
+  var EVT_RECORD_UPDATED = "ysrp-record-updated";
   var EVT_DRIVE_STATUS = "ysrp-drive-sync-status";
-  var TICK_MS = 500;
-  var SAVE_THROTTLE_MS = 1500;
-  var MIN_SAVE_DELTA = 0.5;
-  var MIN_RESTORE_POSITION = 1;
-  var END_GUARD_SECONDS = 5;
-  var RESTORE_TOLERANCE = 3;
-  var RESTORE_MAX_ATTEMPTS = 8;
-  var RESTORE_TIMEOUT_MS = 15000;
-  var RESTORE_RETRY_MS = 1200;
-  var RESUMED_NOTICE_MS = 3000;
-  var BEFORE_RESTORE_TIMEOUT_MS = 4000;
-  var FONT_AWESOME_CSS = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css";
-  var DEARROW_API = "https://sponsor.ajay.app/api/branding?videoID=";
-  var OEMBED_API = "https://www.youtube.com/oembed?format=json&url=";
-  var DEARROW_TTL_MS = 6 * 60 * 60 * 1000;
-  var Devs = {
-    V: "0_V"
-  };
+  var CLS_BADGE_CONTAINER = "last-save-info-container";
+  var CLS_BADGE_INNER = "last-save-info";
+  var CLS_BADGE_TEXT = "last-save-info-text";
+  var CLS_SETTINGS_BUTTON = "ysrp-settings-button";
+  var CLS_MODAL = "ysrp-settings-container";
+  var CLS_MODAL_BODY = "ysrp-settings-container-body";
+  var CLS_BACKDROP = "ysrp-backdrop";
+  var FONT_AWESOME_URL = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css";
+  var HOMEPAGE_URL = "https://github.com/0-V-linuxdo/Youtube-Memory";
+  var OEMBED_URL = "https://www.youtube.com/oembed?format=json&url=";
+  var DEARROW_URL = "https://sponsor.ajay.app/api/branding?videoID=";
+  var watchUrl = (videoId) => `https://www.youtube.com/watch?v=${videoId}`;
 
   // src/utils/storage.ts
-  var hasGM = typeof GM_getValue === "function" && typeof GM_setValue === "function" && typeof GM_deleteValue === "function" && typeof GM_listValues === "function";
-  function readSetting(key) {
-    let value = null;
+  var gmAvailable = typeof GM_getValue === "function" && typeof GM_setValue === "function" && typeof GM_listValues === "function" && typeof GM_deleteValue === "function";
+  function ls() {
     try {
-      value = window.localStorage.getItem(key);
-    } catch {}
-    if ((value === null || value === "") && hasGM) {
-      try {
-        value = GM_getValue(key, null);
-      } catch {}
-    }
-    if (value === undefined || value === null)
+      return window.localStorage;
+    } catch {
       return null;
-    return typeof value === "string" ? value : JSON.stringify(value);
+    }
+  }
+  var localBackend = {
+    mode: "local",
+    get(key) {
+      try {
+        return ls()?.getItem(key) ?? null;
+      } catch {
+        return null;
+      }
+    },
+    set(key, value) {
+      const s = ls();
+      if (!s)
+        throw new Error("localStorage is not available");
+      s.setItem(key, value);
+    },
+    remove(key) {
+      try {
+        ls()?.removeItem(key);
+      } catch {}
+    },
+    keys() {
+      try {
+        const s = ls();
+        if (!s)
+          return [];
+        const out = [];
+        for (let i = 0;i < s.length; i++) {
+          const k = s.key(i);
+          if (k !== null)
+            out.push(k);
+        }
+        return out;
+      } catch {
+        return [];
+      }
+    }
+  };
+  var gmBackend = {
+    mode: "gm",
+    get(key) {
+      if (!gmAvailable)
+        return null;
+      try {
+        const v = GM_getValue(key);
+        return v === undefined ? null : v;
+      } catch {
+        return null;
+      }
+    },
+    set(key, value) {
+      if (!gmAvailable)
+        throw new Error("GM storage is not available");
+      GM_setValue(key, value);
+    },
+    remove(key) {
+      if (!gmAvailable)
+        return;
+      try {
+        GM_deleteValue(key);
+      } catch {}
+    },
+    keys() {
+      if (!gmAvailable)
+        return [];
+      try {
+        return GM_listValues() || [];
+      } catch {
+        return [];
+      }
+    }
+  };
+  function backendFor(mode) {
+    return mode === "gm" ? gmBackend : localBackend;
+  }
+  function listPrefixed(backend, prefix = RECORD_PREFIX) {
+    const out = [];
+    for (const k of backend.keys()) {
+      if (k.startsWith(prefix))
+        out.push([k, backend.get(k)]);
+    }
+    return out;
+  }
+  function gmGetRaw(key) {
+    if (typeof GM_getValue !== "function")
+      return null;
+    try {
+      const v = GM_getValue(key);
+      return v === undefined ? null : v;
+    } catch {
+      return null;
+    }
+  }
+  function gmSetRaw(key, value) {
+    if (typeof GM_setValue !== "function")
+      return false;
+    try {
+      GM_setValue(key, value);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  function readSetting(key) {
+    const local = localBackend.get(key);
+    if (typeof local === "string" && local !== "")
+      return local;
+    const gm = gmGetRaw(key);
+    if (gm === null || gm === undefined || gm === "")
+      return null;
+    return typeof gm === "string" ? gm : JSON.stringify(gm);
   }
   function writeSetting(key, value) {
+    let ok = false;
     try {
-      window.localStorage.setItem(key, value);
+      localBackend.set(key, value);
+      ok = true;
     } catch {}
-    if (hasGM) {
-      try {
-        GM_setValue(key, value);
-      } catch {}
-    }
+    if (gmSetRaw(key, value))
+      ok = true;
+    return ok;
   }
-  function readJsonSetting(key) {
-    const raw = readSetting(key);
-    if (!raw)
-      return null;
-    try {
-      const parsed = JSON.parse(raw);
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
-    } catch {
-      return null;
-    }
+  function readSecretSetting(key) {
+    const gm = gmGetRaw(key);
+    if (gm !== null && gm !== undefined && gm !== "")
+      return typeof gm === "string" ? gm : JSON.stringify(gm);
+    const local = localBackend.get(key);
+    return typeof local === "string" && local !== "" ? local : null;
   }
-  function readSecret(key) {
-    if (hasGM) {
-      try {
-        const value = GM_getValue(key, null);
-        if (value !== null && value !== undefined && value !== "")
-          return typeof value === "string" ? value : JSON.stringify(value);
-      } catch {}
-    }
-    try {
-      return window.localStorage.getItem(key);
-    } catch {
-      return null;
-    }
-  }
-  function writeSecret(key, value) {
-    if (hasGM) {
-      try {
-        GM_setValue(key, value);
-        return;
-      } catch {}
-    }
-    try {
-      window.localStorage.setItem(key, value);
-    } catch {}
-  }
-
-  // src/utils/types.ts
-  function definePlugin(p) {
-    return p;
-  }
-
-  // src/api/Settings.ts
-  function load() {
-    const stored = readJsonSetting(KEY_PLUGINS);
-    const plugins = stored?.plugins && typeof stored.plugins === "object" ? stored.plugins : {};
-    return { plugins };
-  }
-  var data = load();
-  var listeners2 = new Set;
-  function save() {
-    writeSetting(KEY_PLUGINS, JSON.stringify(data));
-  }
-  function getPluginSettings(name) {
-    return data.plugins[name];
-  }
-  function setPluginSetting(name, key, value) {
-    const bag = data.plugins[name] ??= {};
-    if (bag[key] === value)
+  function writeSecretSetting(key, value) {
+    if (gmSetRaw(key, value)) {
+      localBackend.remove(key);
       return;
-    bag[key] = value;
-    save();
-    for (const listener of listeners2)
-      listener(name, key);
+    }
+    localBackend.set(key, value);
   }
-  function onPluginSettingChange(listener) {
-    listeners2.add(listener);
-    return () => listeners2.delete(listener);
+  var currentMode = null;
+  function detectMode() {
+    let stored = localBackend.get(KEY_STORAGE_MODE);
+    if (gmAvailable && (stored === null || stored === ""))
+      stored = gmBackend.get(KEY_STORAGE_MODE);
+    return stored === "gm" && gmAvailable ? "gm" : "local";
   }
-  function defaultValue(def) {
-    if (def.type === 3 /* SELECT */)
-      return (def.options.find((o) => o.default) ?? def.options[0])?.value;
-    if ("default" in def && def.default !== undefined)
-      return def.default;
-    return def.type === 2 /* BOOLEAN */ ? false : def.type === 1 /* NUMBER */ ? 0 : "";
+  function persistMode(mode) {
+    try {
+      localBackend.set(KEY_STORAGE_MODE, mode);
+    } catch {}
+    if (gmAvailable) {
+      try {
+        gmBackend.set(KEY_STORAGE_MODE, mode);
+      } catch {}
+    }
   }
-  function definePluginSettings(def) {
-    const settings = {
-      def,
-      pluginName: "",
-      store: new Proxy({}, {
-        get(_, key) {
-          const stored = data.plugins[settings.pluginName]?.[key];
-          return stored !== undefined ? stored : def[key] ? defaultValue(def[key]) : undefined;
-        },
-        set(_, key, value) {
-          setPluginSetting(settings.pluginName, key, value);
-          return true;
+  function getMode() {
+    if (!currentMode) {
+      currentMode = detectMode();
+      persistMode(currentMode);
+    }
+    return currentMode;
+  }
+  function activeBackend() {
+    return backendFor(getMode());
+  }
+  function switchMode(target, options = {}) {
+    const migrate = options.migrate !== false;
+    const clearSource = options.clearSource !== false;
+    if (target !== "local" && target !== "gm")
+      return { ok: false, moved: 0, error: "invalid mode" };
+    const from = getMode();
+    if (from === target)
+      return { ok: true, moved: 0 };
+    if (target === "gm" && !gmAvailable)
+      return { ok: false, moved: 0, error: "GM storage is not available" };
+    const src = backendFor(from);
+    const dst = backendFor(target);
+    let moved = 0;
+    if (migrate) {
+      const entries = listPrefixed(src);
+      const failures = [];
+      for (const [key, value] of entries) {
+        const text = typeof value === "string" ? value : JSON.stringify(value);
+        try {
+          dst.set(key, text);
+          const back = dst.get(key);
+          if ((typeof back === "string" ? back : JSON.stringify(back)) !== text)
+            failures.push(key);
+        } catch (err) {
+          failures.push(key);
         }
-      })
-    };
-    return settings;
+      }
+      if (failures.length) {
+        return { ok: false, moved: 0, error: `${failures.length} record(s) could not be written to the target backend` };
+      }
+      moved = entries.length;
+      if (clearSource)
+        for (const [key] of entries)
+          src.remove(key);
+    }
+    currentMode = target;
+    persistMode(target);
+    return { ok: true, moved };
+  }
+  function exportData() {
+    const entries = {};
+    for (const [k, v] of listPrefixed(activeBackend()))
+      entries[k] = v;
+    return { version: "1", exportedAt: Date.now(), storageMode: getMode(), entries };
+  }
+  function importData(payload, options = {}) {
+    if (!payload || typeof payload !== "object" || !("entries" in payload))
+      throw new Error("Invalid import payload");
+    const entries = payload.entries;
+    if (!entries || typeof entries !== "object" || Array.isArray(entries))
+      throw new Error("Invalid import payload");
+    const pairs = Object.entries(entries).filter(([k]) => k.startsWith(RECORD_PREFIX));
+    const backend = activeBackend();
+    if (options.overwrite) {
+      if (!pairs.length)
+        throw new Error("No records to import; existing records were kept");
+      for (const [k] of listPrefixed(backend))
+        backend.remove(k);
+    }
+    let count = 0;
+    for (const [key, value] of pairs) {
+      if (value === null || value === undefined)
+        continue;
+      const text = typeof value === "string" ? value : JSON.stringify(value);
+      try {
+        backend.set(key, text);
+        count++;
+      } catch (err) {
+        console.error("[Video Memory] Import write failed:", key, err);
+      }
+    }
+    return count;
   }
 
-  // src/api/SettingsTabs.ts
-  var tabs = new Map;
-  var listeners3 = new Set;
-  function addSettingsTab(tab) {
-    tabs.set(tab.id, tab);
-    for (const listener of listeners3)
-      listener();
+  // src/api/events.ts
+  class Emitter {
+    handlers = new Set;
+    on(fn) {
+      this.handlers.add(fn);
+      return () => {
+        this.handlers.delete(fn);
+      };
+    }
+    emit(value) {
+      for (const fn of Array.from(this.handlers)) {
+        try {
+          fn(value);
+        } catch (err) {
+          console.error("[Video Memory] listener failed:", err);
+        }
+      }
+    }
   }
-  function removeSettingsTab(id) {
-    if (!tabs.delete(id))
-      return;
-    for (const listener of listeners3)
-      listener();
-  }
-  function getSettingsTabs() {
-    const rank = (g) => g === "general" ? 0 : 1;
-    return [...tabs.values()].sort((a, b) => rank(a.group) - rank(b.group) || a.order - b.order);
-  }
-  function onSettingsTabsChange(listener) {
-    listeners3.add(listener);
-    return () => listeners3.delete(listener);
-  }
-
-  // src/utils/misc.ts
-  function emit(name, detail) {
+  function dispatch(name, detail) {
     try {
       document.dispatchEvent(new CustomEvent(name, { detail }));
     } catch {}
   }
-  function on(name, handler) {
-    const listener = (event) => handler(event.detail);
-    document.addEventListener(name, listener);
-    return () => document.removeEventListener(name, listener);
+
+  // src/api/records.ts
+  var recordChanges = new Emitter;
+  var recordKey = (videoId) => RECORD_PREFIX + videoId;
+  function parseRecord(raw) {
+    if (raw === null || raw === undefined)
+      return null;
+    if (typeof raw === "object")
+      return Array.isArray(raw) ? null : { ...raw };
+    if (typeof raw !== "string")
+      return null;
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed === null)
+        return {};
+      return typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
   }
-  function formatTime(seconds) {
-    const total = Math.max(0, Math.floor(Number(seconds) || 0));
-    const h = Math.floor(total / 3600);
-    const m = Math.floor(total % 3600 / 60);
-    const ss = String(total % 60).padStart(2, "0");
-    return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+  function readRecord(videoId) {
+    if (!videoId)
+      return null;
+    return parseRecord(activeBackend().get(recordKey(videoId)));
   }
-  var normTitle = (text) => String(text == null ? "" : text).replace(/\s+/g, " ").trim();
-  var sameTitle = (a, b) => Boolean(a) && Boolean(b) && normTitle(a).toLowerCase() === normTitle(b).toLowerCase();
-  var isPlaceholderTitle = (text) => !normTitle(text) || PLACEHOLDER_TITLES.has(normTitle(text).toLowerCase());
-  var errorMessage = (err) => err instanceof Error ? err.message : String(err);
-  var runtime = (() => {
-    const ua = String(navigator.userAgent || "").toLowerCase();
-    const isIOS = /\b(ipad|iphone|ipod)\b/.test(ua) || ua.includes("mac") && typeof navigator.maxTouchPoints === "number" && navigator.maxTouchPoints > 1;
-    let canShareFile = false;
-    if (isIOS && typeof File === "function" && typeof navigator.share === "function") {
-      canShareFile = true;
-      if (typeof navigator.canShare === "function") {
+  function writeRecord(videoId, record, kind = "content") {
+    if (!videoId)
+      throw new Error("Missing video id");
+    const next = { ...record };
+    if (kind === "content")
+      next.updatedAt = Date.now();
+    activeBackend().set(recordKey(videoId), JSON.stringify(next));
+    recordChanges.emit({ videoId, kind, record: next });
+    return next;
+  }
+  function updateRecord(videoId, updater, kind = "content") {
+    const current = readRecord(videoId);
+    const next = updater(current ? { ...current } : null);
+    if (!next)
+      return null;
+    return writeRecord(videoId, next, kind);
+  }
+  function removeRecord(videoId, kind = "delete") {
+    if (!videoId)
+      return;
+    activeBackend().remove(recordKey(videoId));
+    recordChanges.emit({ videoId, kind, record: null });
+  }
+  function listRecords() {
+    return listPrefixed(activeBackend()).map(([key, raw]) => ({
+      videoId: key.slice(RECORD_PREFIX.length),
+      key,
+      raw,
+      record: parseRecord(raw)
+    }));
+  }
+  function countRecords() {
+    return listRecords().filter((e) => e.record !== null).length;
+  }
+  function cleanupRecords() {
+    const backend = activeBackend();
+    for (const entry of listRecords()) {
+      try {
+        const rec = entry.record;
+        if (!rec || typeof rec !== "object") {
+          backend.remove(entry.key);
+          continue;
+        }
+        let dirty = typeof entry.raw !== "string";
+        if (typeof rec.videoName !== "string" || !rec.videoName.trim()) {
+          rec.videoName = UNKNOWN_TITLE;
+          dirty = true;
+        } else if (rec.videoName.trim() !== rec.videoName) {
+          rec.videoName = rec.videoName.trim();
+          dirty = true;
+        }
+        if (dirty) {
+          try {
+            backend.set(entry.key, JSON.stringify(rec));
+          } catch {}
+        }
+      } catch {
+        backend.remove(entry.key);
+      }
+    }
+  }
+
+  // src/utils/dom.ts
+  var RESERVED = new Set(["class", "style", "text", "attrs", "dataset", "on"]);
+  function appendChildren(el, children) {
+    for (const child of children) {
+      if (child === null || child === undefined || child === false)
+        continue;
+      if (Array.isArray(child))
+        appendChildren(el, child);
+      else if (child instanceof Node)
+        el.appendChild(child);
+      else
+        el.appendChild(document.createTextNode(String(child)));
+    }
+  }
+  function h(tag, props, ...children) {
+    const el = document.createElement(tag);
+    if (props) {
+      if (props.class)
+        el.className = props.class;
+      if (props.style)
+        el.setAttribute("style", props.style);
+      if (props.text !== undefined)
+        el.textContent = props.text;
+      if (props.attrs) {
+        for (const [k, v] of Object.entries(props.attrs)) {
+          if (v === null || v === undefined || v === false)
+            continue;
+          el.setAttribute(k, v === true ? "" : String(v));
+        }
+      }
+      if (props.dataset)
+        for (const [k, v] of Object.entries(props.dataset))
+          el.dataset[k] = v;
+      if (props.on)
+        for (const [type, fn] of Object.entries(props.on))
+          el.addEventListener(type, fn);
+      for (const [k, v] of Object.entries(props)) {
+        if (RESERVED.has(k) || v === undefined)
+          continue;
+        if (k === "innerHTML" || k === "outerHTML")
+          throw new Error("innerHTML is not allowed (Trusted Types)");
+        el[k] = v;
+      }
+    }
+    appendChildren(el, children);
+    return el;
+  }
+  function icon(name, extraClass = "") {
+    const i = document.createElement("i");
+    if (name)
+      i.className = `fa-solid fa-${name}${extraClass ? ` ${extraClass}` : ""}`;
+    i.setAttribute("aria-hidden", "true");
+    return i;
+  }
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var DEARROW_PATHS = [
+    ["#1213BD", "M36 18.302c0 4.981-2.46 9.198-5.655 12.462s-7.323 5.152-12.199 5.152s-9.764-1.112-12.959-4.376S0 23.283 0 18.302s2.574-9.38 5.769-12.644S13.271 0 18.146 0s9.394 2.178 12.589 5.442C33.931 8.706 36 13.322 36 18.302z"],
+    ["#88c9f9", "m 30.394282,18.410186 c 0,3.468849 -1.143025,6.865475 -3.416513,9.137917 -2.273489,2.272442 -5.670115,2.92874 -9.137918,2.92874 -3.467803,0 -6.373515,-1.147212 -8.6470033,-3.419654 -2.2734888,-2.272442 -3.5871299,-5.178154 -3.5871299,-8.647003 0,-3.46885 0.9420533,-6.746149 3.2144954,-9.0196379 2.2724418,-2.2734888 5.5507878,-3.9513905 9.0196378,-3.9513905 3.46885,0 6.492841,1.9322561 8.76633,4.204698 2.273489,2.2724424 3.788101,5.2974804 3.788101,8.7663304 z"],
+    ["#0a62a5", "m 23.95823,17.818306 c 0,3.153748 -2.644888,5.808102 -5.798635,5.808102 -3.153748,0 -5.599825,-2.654354 -5.599825,-5.808102 0,-3.153747 2.446077,-5.721714 5.599825,-5.721714 3.153747,0 5.798635,2.567967 5.798635,5.721714 z"]
+  ];
+  function dearrowIcon(size = 20) {
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 36 36");
+    svg.setAttribute("width", String(size));
+    svg.setAttribute("height", String(size));
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    svg.setAttribute("role", "img");
+    for (const [fill, d] of DEARROW_PATHS) {
+      const path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("fill", fill);
+      path.setAttribute("d", d);
+      svg.appendChild(path);
+    }
+    return svg;
+  }
+  function clear(el) {
+    while (el.firstChild)
+      el.removeChild(el.firstChild);
+  }
+  function addStyle(css, id) {
+    const style = document.createElement("style");
+    if (id)
+      style.id = id;
+    style.textContent = css;
+    (document.head || document.documentElement).appendChild(style);
+    return style;
+  }
+  function pageHost() {
+    return document.querySelector("ytd-app #content") || document.getElementById("content") || document.getElementById("page-manager") || document.body;
+  }
+  function swallow(ev) {
+    ev.preventDefault();
+    ev.stopImmediatePropagation();
+    ev.stopPropagation();
+  }
+
+  // src/api/hooks.ts
+  var hooks = new Set;
+  function addBeforeRestoreHook(fn) {
+    hooks.add(fn);
+    return () => {
+      hooks.delete(fn);
+    };
+  }
+  function runBeforeRestoreHooks(videoId, timeoutMs, onWaiting) {
+    const pending = [];
+    for (const fn of hooks) {
+      try {
+        const out = fn(videoId);
+        if (out && typeof out.then === "function") {
+          pending.push(out.catch((err) => console.warn("[Video Memory] before-restore hook failed:", err)));
+        }
+      } catch (err) {
+        console.warn("[Video Memory] before-restore hook failed:", err);
+      }
+    }
+    if (!pending.length)
+      return Promise.resolve();
+    onWaiting();
+    return new Promise((resolve) => {
+      const timer = window.setTimeout(resolve, timeoutMs);
+      Promise.allSettled(pending).then(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+  // src/api/pluginSettings.ts
+  var cache = null;
+  function load() {
+    if (cache)
+      return cache;
+    let parsed = null;
+    try {
+      const raw = readSetting(KEY_PLUGINS);
+      parsed = raw ? JSON.parse(raw) : null;
+    } catch {
+      parsed = null;
+    }
+    const plugins = parsed && typeof parsed === "object" && parsed.plugins;
+    cache = { plugins: plugins && typeof plugins === "object" ? { ...plugins } : {} };
+    return cache;
+  }
+  function save() {
+    writeSetting(KEY_PLUGINS, JSON.stringify(load()));
+  }
+  function storedValue(plugin, key) {
+    return load().plugins[plugin]?.[key];
+  }
+  function setStoredValue(plugin, key, value) {
+    const data = load();
+    data.plugins[plugin] = { ...data.plugins[plugin] || {}, [key]: value };
+    save();
+  }
+
+  // src/api/rows.ts
+  var contributions = new Map;
+  var rowsChanged = new Emitter;
+  function registerRowButton(def) {
+    contributions.set(def.id, def);
+    rowsChanged.emit();
+    return () => {
+      if (contributions.get(def.id) === def) {
+        contributions.delete(def.id);
+        rowsChanged.emit();
+      }
+    };
+  }
+  function listRowButtons() {
+    return Array.from(contributions.values()).sort((a, b) => a.order - b.order);
+  }
+
+  // src/api/tabs.ts
+  var tabs = new Map;
+  var tabsChanged = new Emitter;
+  function registerTab(def) {
+    tabs.set(def.id, def);
+    tabsChanged.emit();
+    return () => {
+      if (tabs.get(def.id) === def) {
+        tabs.delete(def.id);
+        tabsChanged.emit();
+      }
+    };
+  }
+  function getTab(id) {
+    return tabs.get(id);
+  }
+  function listTabs() {
+    const groupRank = { main: 0, plugins: 1 };
+    return Array.from(tabs.values()).sort((a, b) => groupRank[a.group] - groupRank[b.group] || a.order - b.order);
+  }
+  var controller = null;
+  function setModalController(c) {
+    controller = c;
+  }
+  function openSettings(tabId) {
+    controller?.open(tabId);
+  }
+  function isSettingsOpen() {
+    return Boolean(controller?.isOpen());
+  }
+  function refreshSettingsHeader() {
+    controller?.refreshHeader();
+  }
+
+  // src/api/plugins.ts
+  function definePlugin(def) {
+    return def;
+  }
+
+  class PluginContext {
+    plugin;
+    disposers = [];
+    settingListeners = new Set;
+    constructor(plugin) {
+      this.plugin = plugin;
+    }
+    onDispose(fn) {
+      this.disposers.push(fn);
+    }
+    listen(target, type, fn, opts) {
+      target.addEventListener(type, fn, opts);
+      this.onDispose(() => target.removeEventListener(type, fn, opts));
+    }
+    interval(fn, ms) {
+      const id = window.setInterval(fn, ms);
+      this.onDispose(() => clearInterval(id));
+      return id;
+    }
+    timeout(fn, ms) {
+      const id = window.setTimeout(fn, ms);
+      this.onDispose(() => clearTimeout(id));
+      return id;
+    }
+    observe(target, options, fn) {
+      const obs = new MutationObserver(fn);
+      obs.observe(target, options);
+      this.onDispose(() => obs.disconnect());
+      return obs;
+    }
+    addStyle(css) {
+      const style = addStyle(css);
+      style.dataset.ysrpPlugin = this.plugin.name;
+      this.onDispose(() => style.remove());
+      return style;
+    }
+    addTab(def) {
+      this.onDispose(registerTab(def));
+    }
+    addRowButton(def) {
+      this.onDispose(registerRowButton(def));
+    }
+    beforeRestore(fn) {
+      this.onDispose(addBeforeRestoreHook(fn));
+    }
+    own(el) {
+      this.onDispose(() => el.remove());
+      return el;
+    }
+    settings = {
+      get: (key) => getSetting(this.plugin, key),
+      set: (key, value) => {
+        setStoredValue(this.plugin.name, key, value);
+        this.notify(key, value);
+        settingsChanged.emit({ plugin: this.plugin.name, key });
+      },
+      reset: () => {
+        for (const [key, def] of Object.entries(this.plugin.settings || {}))
+          setStoredValue(this.plugin.name, key, def.default);
+        for (const key of Object.keys(this.plugin.settings || {}))
+          this.notify(key, getSetting(this.plugin, key));
+        settingsChanged.emit({ plugin: this.plugin.name, key: "*" });
+      },
+      onChange: (fn) => {
+        this.settingListeners.add(fn);
+        this.onDispose(() => this.settingListeners.delete(fn));
+      }
+    };
+    notify(key, value) {
+      for (const fn of Array.from(this.settingListeners)) {
         try {
-          canShareFile = navigator.canShare({ files: [new File(["{}"], "probe.json", { type: "application/json" })] });
-        } catch {
-          canShareFile = false;
+          fn(key, value);
+        } catch (err) {
+          console.error(`[Video Memory] ${this.plugin.name} setting listener failed:`, err);
         }
       }
     }
-    return { isIOS, canShareFile };
-  })();
+    dispose() {
+      const list = this.disposers.splice(0).reverse();
+      for (const fn of list) {
+        try {
+          fn();
+        } catch (err) {
+          console.error(`[Video Memory] ${this.plugin.name} cleanup failed:`, err);
+        }
+      }
+    }
+  }
+  function getSetting(plugin, key) {
+    const def = plugin.settings?.[key];
+    const stored = storedValue(plugin.name, key);
+    if (stored === undefined || stored === null)
+      return def ? def.default : undefined;
+    if (def && typeof def.default === "boolean")
+      return Boolean(stored);
+    if (def && typeof def.default === "number") {
+      const n = Number(stored);
+      return Number.isFinite(n) ? n : def.default;
+    }
+    return stored;
+  }
+  var pluginsChanged = new Emitter;
+  var settingsChanged = new Emitter;
+  var registry = [];
+  var running = new Map;
+  var contexts = new Map;
+  function listPlugins() {
+    return registry.slice();
+  }
+  function findPlugin(name) {
+    return registry.find((p) => p.name === name);
+  }
+  function isEnabled(plugin) {
+    if (plugin.required)
+      return true;
+    const stored = storedValue(plugin.name, "enabled");
+    return typeof stored === "boolean" ? stored : plugin.enabledByDefault !== false;
+  }
+  function settingsContext(plugin) {
+    return running.get(plugin.name) || contexts.get(plugin.name) || (() => {
+      const ctx = new PluginContext(plugin);
+      contexts.set(plugin.name, ctx);
+      return ctx;
+    })();
+  }
+  function startPlugin(plugin) {
+    if (running.has(plugin.name))
+      return;
+    const ctx = new PluginContext(plugin);
+    running.set(plugin.name, ctx);
+    try {
+      plugin.start(ctx);
+    } catch (err) {
+      console.error(`[Video Memory] Plugin ${plugin.name} failed to start:`, err);
+    }
+  }
+  function stopPlugin(plugin) {
+    const ctx = running.get(plugin.name);
+    if (!ctx)
+      return;
+    running.delete(plugin.name);
+    try {
+      plugin.stop?.(ctx);
+    } catch (err) {
+      console.error(`[Video Memory] Plugin ${plugin.name} failed to stop:`, err);
+    }
+    ctx.dispose();
+  }
+  function startPlugins(plugins) {
+    registry.push(...plugins);
+    const ordered = [...plugins.filter((p) => p.required), ...plugins.filter((p) => !p.required)];
+    for (const plugin of ordered) {
+      if (isEnabled(plugin))
+        startPlugin(plugin);
+    }
+    pluginsChanged.emit();
+  }
+  function setPluginEnabled(name, enabled) {
+    const plugin = findPlugin(name);
+    if (!plugin || plugin.required)
+      return;
+    setStoredValue(name, "enabled", enabled);
+    if (enabled)
+      startPlugin(plugin);
+    else
+      stopPlugin(plugin);
+    pluginsChanged.emit();
+  }
+
+  // src/api/theme.css
+  var theme_default = `/* N-5.3.1 monochrome palette, follows the system light/dark scheme live (fixes C-Q4/U-Q6). */
+:root {
+  --ysrp-bg: #ffffff;
+  --ysrp-nav-bg: #f7f7f7;
+  --ysrp-card: #fafafa;
+  --ysrp-layer: #f0f0f0;
+  --ysrp-border: rgba(0, 0, 0, .08);
+  --ysrp-border-strong: rgba(0, 0, 0, .16);
+  --ysrp-text: #0d0d0d;
+  --ysrp-text-2: #5e5e5e;
+  --ysrp-text-3: #8f8f8f;
+  --ysrp-hover: rgba(0, 0, 0, .05);
+  --ysrp-error: #d93025;
+  --ysrp-success: #188038;
+  --ysrp-backdrop: rgba(0, 0, 0, .4);
+  --ysrp-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ysrp-bg: #1a1a1a;
+    --ysrp-nav-bg: #161616;
+    --ysrp-card: #212121;
+    --ysrp-layer: #2a2a2a;
+    --ysrp-border: rgba(255, 255, 255, .08);
+    --ysrp-border-strong: rgba(255, 255, 255, .16);
+    --ysrp-text: #fafafa;
+    --ysrp-text-2: #a3a3a3;
+    --ysrp-text-3: #737373;
+    --ysrp-hover: rgba(255, 255, 255, .06);
+    --ysrp-error: #f28b82;
+    --ysrp-success: #81c995;
+    --ysrp-backdrop: rgba(0, 0, 0, .6);
+  }
+}
+`;
 
   // src/utils/i18n.ts
-  function detectBrowserLanguage() {
-    const candidates = [].concat(navigator.languages || [], navigator.language || []).filter(Boolean);
-    return candidates.length && String(candidates[0]).toLowerCase().startsWith("zh") ? "zh" : "en";
-  }
-  function normalizeLanguagePreference(value) {
-    const raw = String(value || "").trim().toLowerCase();
-    if (raw.startsWith("zh"))
+  var LANGUAGE_OPTIONS = ["auto", "zh", "en"];
+  function normalizePreference(value) {
+    const s = String(value ?? "").trim().toLowerCase();
+    if (s === "auto")
+      return "auto";
+    if (s.startsWith("zh"))
       return "zh";
-    if (raw.startsWith("en"))
+    if (s.startsWith("en"))
       return "en";
     return "auto";
   }
-  var preference = normalizeLanguagePreference(readSetting(KEY_LANGUAGE));
-  var languagePreference = () => preference;
-  var resolvedLanguage = () => preference === "auto" ? detectBrowserLanguage() : preference;
-  function t(en, zh, params) {
-    let text = resolvedLanguage() === "zh" ? zh : en;
-    if (params) {
-      text = text.replace(/\{(\w+)\}/g, (_, key) => Object.prototype.hasOwnProperty.call(params, key) ? String(params[key]) : "");
+  function detectBrowserLanguage() {
+    const candidates = [];
+    try {
+      const nav = navigator;
+      if (Array.isArray(nav.languages))
+        candidates.push(...nav.languages);
+      if (nav.language)
+        candidates.push(nav.language);
+      if (nav.userLanguage)
+        candidates.push(nav.userLanguage);
+    } catch {}
+    for (const c of candidates) {
+      const s = String(c || "").trim().toLowerCase();
+      if (!s)
+        continue;
+      if (s.startsWith("zh"))
+        return "zh";
+      if (s.startsWith("en"))
+        return "en";
     }
-    return text;
+    return "en";
   }
-  function setLanguagePreference(value) {
-    const next = normalizeLanguagePreference(value);
+  var preference = normalizePreference(readSetting(KEY_LANGUAGE));
+  function getPreference() {
+    return preference;
+  }
+  function getLanguage() {
+    return preference === "auto" ? detectBrowserLanguage() : preference;
+  }
+  function setPreference(value) {
+    const next = normalizePreference(value);
     if (next === preference)
       return false;
     preference = next;
     writeSetting(KEY_LANGUAGE, next);
-    emit(EVT_LANG, { preference: next, resolved: resolvedLanguage() });
+    try {
+      document.dispatchEvent(new CustomEvent(EVT_LANGUAGE, { detail: { preference: next, resolved: getLanguage() } }));
+    } catch {}
     return true;
   }
-
-  // src/api/Store.ts
-  var logger2 = new Logger("Store");
-  var backends = {
-    local: {
-      available: true,
-      get(key) {
-        try {
-          return window.localStorage.getItem(key);
-        } catch {
-          return null;
-        }
-      },
-      set(key, value) {
-        window.localStorage.setItem(key, value);
-      },
-      remove(key) {
-        try {
-          window.localStorage.removeItem(key);
-        } catch {}
-      },
-      keys() {
-        try {
-          const out = [];
-          for (let i = 0;i < window.localStorage.length; i++)
-            out.push(window.localStorage.key(i));
-          return out;
-        } catch {
-          return [];
-        }
+  function interpolate(text, params) {
+    if (!params)
+      return text;
+    return text.replace(/\{([^{}]*)\}/g, (_m, name) => {
+      const key = name.trim();
+      if (!key || !(key in params))
+        return "";
+      const v = params[key];
+      return v === null || v === undefined ? "" : String(v);
+    });
+  }
+  function resolveValue(v, params) {
+    let out = v;
+    if (typeof out === "function") {
+      try {
+        out = out(params || {});
+      } catch {
+        out = "";
+      }
+    }
+    return typeof out === "string" ? out : null;
+  }
+  function pick(obj, params) {
+    if (!obj || typeof obj !== "object")
+      return "";
+    const lang = getLanguage();
+    const order = lang === "zh" ? ["zh", "en"] : ["en", "zh"];
+    for (const l of order) {
+      const s = resolveValue(obj[l], params);
+      if (s)
+        return interpolate(s, params);
+    }
+    return "";
+  }
+  function tr(en, zh, params) {
+    return pick({ en, zh }, params);
+  }
+  var tables = { en: {}, zh: {} };
+  function deepMerge(target, source) {
+    for (const [k, v] of Object.entries(source)) {
+      if (v && typeof v === "object" && !Array.isArray(v)) {
+        if (!target[k] || typeof target[k] !== "object")
+          target[k] = {};
+        deepMerge(target[k], v);
+      } else {
+        target[k] = v;
+      }
+    }
+  }
+  function extend(bundle) {
+    for (const [lang, table] of Object.entries(bundle)) {
+      deepMerge(tables[lang.toLowerCase().startsWith("zh") ? "zh" : "en"], table);
+    }
+  }
+  function lookup(table, path) {
+    let cur = table;
+    for (const part of path.split(".")) {
+      if (!cur || typeof cur !== "object")
+        return null;
+      cur = cur[part];
+    }
+    return typeof cur === "string" && cur !== "" ? cur : null;
+  }
+  function t(path, fallback, params) {
+    if (!path)
+      return fallback !== undefined ? interpolate(fallback, params) : path;
+    const lang = getLanguage();
+    const hit = lookup(tables[lang], path) ?? lookup(tables.en, path) ?? lookup(tables.zh, path);
+    if (hit !== null)
+      return interpolate(hit, params);
+    if (fallback !== undefined)
+      return interpolate(fallback, params);
+    return path;
+  }
+  extend({
+    en: {
+      language: {
+        tabLabel: "Display",
+        heading: "Language",
+        description: "Choose how the script UI should appear.",
+        options: { auto: "Auto", zh: "Chinese", en: "English" },
+        optionHints: { auto: "Match the browser language automatically.", zh: "Always use Simplified Chinese.", en: "Always use English." },
+        badges: { auto: "Auto", zh: "ZH", en: "EN" }
       }
     },
-    gm: {
-      available: hasGM,
-      get(key) {
-        if (!hasGM)
-          return null;
-        try {
-          const value = GM_getValue(key, null);
-          if (value === null || value === undefined)
-            return null;
-          return typeof value === "string" ? value : JSON.stringify(value);
-        } catch {
-          return null;
-        }
-      },
-      set(key, value) {
-        if (!hasGM)
-          throw new Error("GM storage is not available");
-        GM_setValue(key, value);
-      },
-      remove(key) {
-        if (hasGM) {
-          try {
-            GM_deleteValue(key);
-          } catch {}
-        }
-      },
-      keys() {
-        if (!hasGM)
-          return [];
-        try {
-          return GM_listValues() || [];
-        } catch {
-          return [];
-        }
+    zh: {
+      language: {
+        tabLabel: "界面",
+        heading: "界面语言",
+        description: "为脚本 UI 选择显示语言。",
+        options: { auto: "自动", zh: "中文", en: "英文" },
+        optionHints: { auto: "自动跟随浏览器语言。", zh: "始终使用简体中文。", en: "始终使用英文。" },
+        badges: { auto: "自动", zh: "中文", en: "英文" }
       }
     }
-  };
-  var mode = null;
-  var listeners4 = new Set;
-  function notify(change) {
-    for (const listener of listeners4) {
-      try {
-        listener(change);
-      } catch (err) {
-        logger2.error("change listener failed", err);
-      }
-    }
+  });
+  function languageName(code) {
+    return code === "zh" ? tr("Chinese", "中文") : tr("English", "英文");
   }
-  function getMode() {
-    if (!mode)
-      mode = readSetting(KEY_STORAGE_MODE) === "gm" && hasGM ? "gm" : "local";
-    return mode;
+
+  // src/utils/text.ts
+  function formatTime(value) {
+    let seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds < 0)
+      seconds = 0;
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor(seconds % 3600 / 60);
+    const s = Math.floor(seconds % 60);
+    const ss = String(s).padStart(2, "0");
+    return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
   }
-  var backend = () => backends[getMode()];
-  var keyOf = (id) => RECORD_PREFIX + id;
-  function parse(raw) {
+  function normalizeTitle(value) {
+    if (value === null || value === undefined)
+      return "";
+    return String(value).replace(/\s+/g, " ").trim();
+  }
+  function sameTitle(a, b) {
+    const x = normalizeTitle(a).toLowerCase();
+    const y = normalizeTitle(b).toLowerCase();
+    return Boolean(x) && Boolean(y) && x === y;
+  }
+  function isPlaceholderTitle(value) {
+    const s = normalizeTitle(value).toLowerCase();
+    return !s || s === UNKNOWN_TITLE.toLowerCase() || s === LEGACY_LOADING_TITLE;
+  }
+  function errorMessage(err) {
+    if (err && typeof err === "object" && "message" in err && err.message)
+      return String(err.message);
+    return err === undefined || err === null ? "" : String(err);
+  }
+  function parseTimeParam(raw) {
     if (raw === null || raw === undefined)
       return null;
-    try {
-      const obj = JSON.parse(raw);
-      return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : null;
-    } catch {
+    const s = String(raw).trim().toLowerCase();
+    if (!s)
       return null;
-    }
-  }
-  function rawEntries(be) {
-    return be.keys().filter((k) => typeof k === "string" && k.startsWith(RECORD_PREFIX)).map((k) => [k, be.get(k)]).filter((entry) => entry[1] !== null && entry[1] !== undefined);
-  }
-  function onRecordChange(listener) {
-    listeners4.add(listener);
-    return () => listeners4.delete(listener);
-  }
-  function get(id) {
-    return id ? parse(backend().get(keyOf(id))) : null;
-  }
-  function update(id, mutate, options = {}) {
-    const key = keyOf(id);
-    const current = parse(backend().get(key)) || {};
-    const next = mutate({ ...current }) || current;
-    if (options.touch !== false)
-      next.updatedAt = Date.now();
-    backend().set(key, JSON.stringify(next));
-    notify({ id, type: "set", source: options.source ?? "local" });
-    return next;
-  }
-  function updateIfExists(id, mutate, options) {
-    if (!get(id))
+    if (/^\d+(\.\d+)?s?$/.test(s))
+      return parseFloat(s);
+    const m = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?$/.exec(s);
+    if (!m || !m[1] && !m[2] && !m[3])
       return null;
-    try {
-      return update(id, mutate, options);
-    } catch (err) {
-      logger2.error("update failed", err);
-      return null;
-    }
-  }
-  function remove(id) {
-    backend().remove(keyOf(id));
-    notify({ id, type: "remove", source: "local" });
-  }
-  function list() {
-    const out = [];
-    for (const [key, raw] of rawEntries(backend())) {
-      const rec = parse(raw);
-      if (rec)
-        out.push({ id: key.slice(RECORD_PREFIX.length), rec });
-    }
-    return out;
-  }
-  function setMode(next) {
-    if (!backends[next]?.available)
-      throw new Error(`Storage "${next}" is not available`);
-    const current = getMode();
-    if (current === next)
-      return 0;
-    const src = backends[current];
-    const dst = backends[next];
-    const items = rawEntries(src);
-    for (const [k, v] of items)
-      dst.set(k, v);
-    for (const [k] of items)
-      src.remove(k);
-    mode = next;
-    writeSetting(KEY_STORAGE_MODE, next);
-    notify({ id: null, type: "bulk", source: "local" });
-    return items.length;
-  }
-  function exportAll() {
-    const entries = {};
-    for (const [k, v] of rawEntries(backend()))
-      entries[k] = v;
-    return { version: "1", exportedAt: Date.now(), storageMode: getMode(), entries };
-  }
-  function importPayload(payload, options = {}) {
-    const entries = payload?.entries;
-    if (!payload || typeof payload !== "object" || !entries || typeof entries !== "object") {
-      throw new Error(t("Invalid import payload", "导入内容格式无效"));
-    }
-    const be = backend();
-    if (options.overwrite)
-      for (const [k] of rawEntries(be))
-        be.remove(k);
-    let count = 0;
-    for (const [k, v] of Object.entries(entries)) {
-      if (!k.startsWith(RECORD_PREFIX) || v === null || v === undefined)
-        continue;
-      const text = typeof v === "string" ? v : JSON.stringify(v);
-      if (options.accept) {
-        const incoming = parse(text);
-        if (!incoming || !options.accept(k.slice(RECORD_PREFIX.length), incoming, parse(be.get(k))))
-          continue;
-      }
-      be.set(k, text);
-      count++;
-    }
-    notify({ id: null, type: "bulk", source: options.source ?? "local" });
-    return count;
-  }
-  function cleanup() {
-    const be = backend();
-    for (const [key, raw] of rawEntries(be)) {
-      const rec = parse(raw);
-      if (!rec) {
-        be.remove(key);
-        continue;
-      }
-      const name = typeof rec.videoName === "string" && rec.videoName.trim() ? rec.videoName.trim() : UNKNOWN_TITLE;
-      if (name !== rec.videoName) {
-        rec.videoName = name;
-        try {
-          be.set(key, JSON.stringify(rec));
-        } catch {}
-      }
-    }
+    return Number(m[1] || 0) * 3600 + Number(m[2] || 0) * 60 + Number(m[3] || 0);
   }
 
-  // src/utils/css.ts
-  var active = new Map;
-  function root() {
-    return document.head || document.documentElement;
-  }
-  function registerStyle(name, css) {
-    const existing = active.get(name);
-    if (existing?.isConnected) {
-      if (existing.textContent !== css)
-        existing.textContent = css;
-      return;
-    }
-    const el = document.createElement("style");
-    el.dataset.ysrp = name;
-    el.textContent = css;
-    root().appendChild(el);
-    active.set(name, el);
-  }
-  function unregisterStyle(name) {
-    active.get(name)?.remove();
-    active.delete(name);
-  }
-  function ensureFontAwesome() {
-    if (document.getElementById("ysrp-fontawesome"))
-      return;
-    const link = document.createElement("link");
-    link.id = "ysrp-fontawesome";
-    link.rel = "stylesheet";
-    link.href = FONT_AWESOME_CSS;
-    root().appendChild(link);
-  }
-
-  // src/utils/dom.ts
-  function h(tag, props, ...children) {
-    const node = document.createElement(tag);
-    if (props) {
-      for (const [key, value] of Object.entries(props)) {
-        if (value === null || value === undefined || value === false)
-          continue;
-        if (key === "class")
-          node.className = String(value);
-        else if (key === "style")
-          Object.assign(node.style, value);
-        else if (key === "text")
-          node.textContent = String(value);
-        else if (key === "dataset")
-          Object.assign(node.dataset, value);
-        else if (key.startsWith("on") && typeof value === "function")
-          node.addEventListener(key.slice(2), value);
-        else if (typeof value === "boolean")
-          node[key] = value;
-        else
-          node.setAttribute(key, String(value));
-      }
-    }
-    for (const child of children.flat(Infinity)) {
-      if (child !== null && child !== undefined && child !== false)
-        node.append(child);
-    }
-    return node;
-  }
-  var icon = (name) => h("i", { class: `fa-solid fa-${name} ysrp-icon`, "aria-hidden": "true" });
-  function setIcon(button, name) {
-    const el = button.firstElementChild;
-    if (el)
-      el.className = `fa-solid fa-${name} ysrp-icon`;
-  }
-  function iconButton(name, title, onClick, extraClass = "") {
-    return h("button", { type: "button", class: `ysrp-ibtn ${extraClass}`, title, "aria-label": title, onclick: onClick }, icon(name));
-  }
-  function textButton(name, label, onClick, extraClass = "") {
-    return h("button", { type: "button", class: `ysrp-btn ${extraClass}`, title: label, onclick: onClick }, icon(name), h("span", { text: label }));
-  }
-  function deArrowIcon() {
-    const ns = "http://www.w3.org/2000/svg";
-    const svg = document.createElementNS(ns, "svg");
-    svg.setAttribute("viewBox", "0 0 36 36");
-    svg.setAttribute("width", "22");
-    svg.setAttribute("height", "22");
-    svg.setAttribute("aria-hidden", "true");
-    for (const [r, fill] of [[18, "#1213BD"], [13, "#88C9F9"], [6, "#0A62A5"]]) {
-      const circle = document.createElementNS(ns, "circle");
-      circle.setAttribute("cx", "18");
-      circle.setAttribute("cy", "18");
-      circle.setAttribute("r", String(r));
-      circle.setAttribute("fill", fill);
-      svg.appendChild(circle);
-    }
-    return svg;
-  }
-  function shieldFromPlayer(button, onActivate) {
-    const swallow = (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation();
-    };
-    button.addEventListener("pointerdown", (event) => {
-      swallow(event);
-      onActivate();
-    }, { capture: true });
-    button.addEventListener("mousedown", swallow, { capture: true });
-    button.addEventListener("click", swallow, { capture: true });
-    button.addEventListener("touchstart", swallow, { capture: true, passive: false });
-  }
-  function setMessage(el, text, kind) {
-    el.textContent = text || "";
-    el.className = `ysrp-msg${kind ? ` is-${kind}` : ""}`;
-    el.style.display = text ? "" : "none";
-  }
-  function card(iconName, _accentVar, titleText, subtitle, ...children) {
-    return h("div", { class: "ysrp-card" }, h("div", { class: "ysrp-card-title" }, h("span", { class: "ysrp-card-icon" }, icon(iconName)), h("span", { text: titleText })), subtitle ? h("div", { class: "ysrp-card-sub", text: subtitle }) : null, ...children);
-  }
-  function field(label, control) {
-    return h("label", { class: "ysrp-field" }, h("span", { text: label }), control);
-  }
-  function ChoiceGroup(name, accentVar, options, selected, onPick) {
-    const items = new Map;
-    const node = h("div", { style: { display: "flex", flexDirection: "column", gap: "8px" } });
-    for (const option of options) {
-      const input = h("input", { type: "radio", name, value: option.value });
-      const row = h("label", { class: `ysrp-choice${option.disabled ? " is-disabled" : ""}`, dataset: { value: option.value } }, input, h("span", { class: "ysrp-choice-badge", text: option.badge }), h("span", { class: "ysrp-choice-text" }, h("span", { class: "ysrp-choice-label", text: option.label }), option.hint ? h("span", { class: "ysrp-choice-hint", text: option.hint }) : null));
-      row.style.setProperty("--ysrp-choice-accent", `var(${accentVar})`);
-      row.addEventListener("click", (event) => {
-        event.preventDefault();
-        if (option.disabled)
-          return;
-        select(option.value);
-        onPick?.(option.value);
-      });
-      items.set(option.value, { row, input });
-      node.appendChild(row);
-    }
-    function select(value) {
-      for (const [key, item] of items) {
-        item.input.checked = key === value;
-        item.row.classList.toggle("is-selected", key === value);
-      }
-    }
-    select(selected);
-    return { node, select, value: () => [...items].find(([, item]) => item.input.checked)?.[0] };
-  }
-  function secretInput(placeholder, showLabel, hideLabel, accentVar) {
-    const input = h("input", { class: "ysrp-input", type: "password", placeholder, autocomplete: "new-password", spellcheck: "false" });
-    const toggle = h("button", { type: "button", class: "ysrp-btn", text: showLabel() });
-    toggle.style.setProperty("--ysrp-btn-accent", `var(${accentVar})`);
-    toggle.addEventListener("click", () => {
-      const hidden = input.type === "password";
-      input.type = hidden ? "text" : "password";
-      toggle.textContent = hidden ? hideLabel() : showLabel();
-    });
-    return { input, node: h("div", { class: "ysrp-inline" }, input, toggle) };
-  }
-
-  // src/api/Modal.ts
-  var ui = null;
-  var activeTab = "records";
-  var keyListener = null;
-  var unsubscribeTabs = null;
-  function hostRoot() {
-    return document.querySelector("ytd-app #content") || document.querySelector("#content") || document.querySelector("#page-manager") || document.body;
-  }
-  var SCROLL_KEYS = new Set([" ", "PageUp", "PageDown", "Home", "End", "ArrowUp", "ArrowDown"]);
-  var scrollGuard = null;
-  function scrollableInside(target, container) {
-    for (let el = target;el && el !== container.parentElement; el = el.parentElement) {
-      if (el.scrollHeight > el.clientHeight && /(auto|scroll)/.test(getComputedStyle(el).overflowY))
-        return true;
-      if (el === container)
-        break;
-    }
-    return false;
-  }
-  function lockScroll() {
-    if (scrollGuard)
-      return;
-    scrollGuard = (event) => {
-      if (!ui)
-        return;
-      if (event instanceof KeyboardEvent) {
-        const target = event.target;
-        if (!SCROLL_KEYS.has(event.key) || ui.container.contains(target) || target?.closest?.("input, textarea, select, [contenteditable]"))
-          return;
-      } else if (scrollableInside(event.target, ui.container)) {
-        return;
-      }
-      event.preventDefault();
-    };
-    for (const type of ["wheel", "touchmove", "keydown"])
-      window.addEventListener(type, scrollGuard, { capture: true, passive: false });
-  }
-  function unlockScroll() {
-    if (!scrollGuard)
-      return;
-    for (const type of ["wheel", "touchmove", "keydown"])
-      window.removeEventListener(type, scrollGuard, { capture: true });
-    scrollGuard = null;
-  }
-  function isOpen() {
-    return Boolean(ui && ui.container.style.display !== "none" && ui.container.isConnected);
-  }
-  function open(tab) {
-    if (!keyListener)
-      return;
-    ensureFontAwesome();
-    if (!ui)
-      ui = build();
-    const root = hostRoot();
-    if (!ui.backdrop.isConnected)
-      root.appendChild(ui.backdrop);
-    if (!ui.container.isConnected)
-      root.appendChild(ui.container);
-    ui.backdrop.style.display = "block";
-    ui.container.style.display = "flex";
-    ui.setTab(tab || activeTab);
-    ui.refresh();
-    lockScroll();
-  }
-  function close() {
-    if (!ui)
-      return;
-    ui.container.style.display = "none";
-    ui.backdrop.style.display = "none";
-    unlockScroll();
-  }
-  function rebuild() {
-    const wasOpen = isOpen();
-    if (ui) {
-      ui.destroy();
-      ui = null;
-    }
-    if (wasOpen)
-      open(activeTab);
-    else
-      unlockScroll();
-  }
-  function mount() {
-    if (keyListener)
-      return;
-    keyListener = (event) => {
-      if (event.key !== "Escape" || !isOpen())
-        return;
-      event.stopPropagation();
-      const nested = ui?.container.querySelector(".ysrp-dialog-layer");
-      if (nested)
-        nested.remove();
-      else
-        close();
-    };
-    document.addEventListener("keydown", keyListener, true);
-    unsubscribeTabs = onSettingsTabsChange(() => {
-      if (ui)
-        rebuild();
-    });
-  }
-  function unmount() {
-    if (isOpen())
-      close();
-    ui?.destroy();
-    ui = null;
-    if (keyListener)
-      document.removeEventListener("keydown", keyListener, true);
-    keyListener = null;
-    unsubscribeTabs?.();
-    unsubscribeTabs = null;
-  }
-  function build() {
-    const cleanups = [];
-    const listen = (target, name, fn) => {
-      target.addEventListener(name, fn);
-      cleanups.push(() => target.removeEventListener(name, fn));
-    };
-    const backdrop = h("div", { class: "ysrp-backdrop ysrp-theme", style: { display: "none" } });
-    backdrop.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      close();
-    });
-    const title = h("h3");
-    const modeBadge = h("span", { class: "ysrp-badge" });
-    const spinner = h("span", { class: "ysrp-spinner", title: t("Refreshing…", "正在更新列表…") }, h("i", { class: "fa-solid fa-arrows-rotate fa-spin" }));
-    let count = list().length;
-    const renderTitle = () => {
-      const tab = tabs.find((x) => x.id === activeTab);
-      title.textContent = activeTab === "records" || !tab ? t("Saved Videos - ({count})", "已保存视频 - ({count})", { count }) : tab.label();
-    };
-    const setCount = (n) => {
-      count = n;
-      renderTitle();
-    };
-    const renderModeBadge = () => {
-      modeBadge.textContent = getMode() === "gm" ? t("GM Storage", "GM 存储") : t("localStorage", "浏览器本地存储");
-    };
-    renderModeBadge();
-    const closeButton = h("button", { type: "button", class: "ysrp-close", title: t("Close", "关闭"), "aria-label": t("Close", "关闭"), onclick: close }, icon("xmark"));
-    const header = h("div", { class: "ysrp-header" }, h("div", { class: "ysrp-header-left" }, title, modeBadge, spinner), closeButton);
-    const ctx = {
-      setCount,
-      spin: (on) => spinner.classList.toggle("is-active", on),
-      renderModeBadge,
-      listen
-    };
-    const tabs = getSettingsTabs();
-    const panes = new Map;
-    const tabButtons = new Map;
-    const nav = h("nav", { class: "ysrp-tabs ysrp-nav", role: "tablist" });
-    const groupLabels = { general: t("Video Memory", "视频记忆"), plugins: t("Plugins", "插件") };
-    const body = h("div", { class: "ysrp-body ysrp-settings-container-body" });
-    let lastGroup = "";
-    for (const tab of tabs) {
-      if (tab.group !== lastGroup) {
-        lastGroup = tab.group;
-        nav.appendChild(h("div", { class: "ysrp-nav-group", text: groupLabels[tab.group] }));
-      }
-      const pane = tab.render(ctx);
-      pane.node.classList.add("ysrp-pane");
-      pane.node.dataset.pane = tab.id;
-      panes.set(tab.id, pane);
-      const button = h("button", { type: "button", class: "ysrp-tab", role: "tab", dataset: { tabId: tab.id }, onclick: () => setTab(tab.id) }, icon(tab.icon), h("span", { text: tab.label() }));
-      tabButtons.set(tab.id, button);
-      nav.appendChild(button);
-      body.appendChild(pane.node);
-    }
-    nav.appendChild(h("div", { class: "ysrp-version" }, h("a", { href: "https://github.com/0-V-linuxdo/Youtube-Memory", target: "_blank", rel: "noreferrer", text: "Video Memory" }), h("span", { text: ` • ${"[20261010] v2.1.0"}` })));
-    const main = h("section", { class: "ysrp-main" }, header, body);
-    const container = h("div", { class: "ysrp-settings-container ysrp-theme", role: "dialog", "aria-modal": "true", style: { display: "none" } }, nav, main);
-    for (const name of ["keydown", "keyup", "keypress"]) {
-      container.addEventListener(name, (event) => {
-        if (event.key !== "Escape")
-          event.stopPropagation();
-      });
-    }
-    function setTab(id) {
-      activeTab = panes.has(id) ? id : tabs[0]?.id ?? "records";
-      container.dataset.activeTab = activeTab;
-      modeBadge.style.display = activeTab === "records" || activeTab === "storage" ? "" : "none";
-      for (const [key, button] of tabButtons) {
-        const on = key === activeTab;
-        button.classList.toggle("is-active", on);
-        button.setAttribute("aria-selected", String(on));
-        panes.get(key)?.node.classList.toggle("is-active", on);
-      }
-      renderTitle();
-    }
-    return {
-      backdrop,
-      container,
-      setTab,
-      refresh() {
-        renderModeBadge();
-        for (const pane of panes.values())
-          pane.refresh?.();
-      },
-      destroy() {
-        for (const fn of cleanups)
-          fn();
-        for (const pane of panes.values())
-          pane.destroy?.();
-        container.remove();
-        backdrop.remove();
-      }
-    };
-  }
-
-  // src/api/Badge.ts
-  var node = null;
-  var textNode = null;
+  // src/api/badge.ts
   var state = { kind: "loading" };
-  var pending = null;
-  var resumedTimer = null;
-  var mountListeners = new Set;
-  function render() {
-    if (!textNode)
-      return;
-    textNode.classList.remove("is-error", "is-resumed");
-    textNode.removeAttribute("title");
+  var flashUntil = 0;
+  var flashTimer = 0;
+  var pendingTime = null;
+  var badgeChanged = new Emitter;
+  var badgeMounted = new Emitter;
+  function badgeText() {
     switch (state.kind) {
-      case "saved":
-        textNode.textContent = formatTime(state.seconds);
-        textNode.title = t("Last saved position", "最近保存的位置");
-        break;
-      case "resumed":
-        textNode.textContent = t("Resumed {time}", "已恢复 {time}", { time: formatTime(state.seconds) });
-        textNode.classList.add("is-resumed");
-        break;
-      case "error":
-        textNode.textContent = t("⚠ Save failed", "⚠ 保存失败");
-        textNode.title = state.message || "";
-        textNode.classList.add("is-error");
-        break;
-      case "live":
-        textNode.textContent = t("Live · not saved", "直播 · 不保存");
-        break;
-      case "choosing":
-        textNode.textContent = t("Choose a position…", "请选择播放位置…");
-        break;
-      case "syncing":
-        textNode.textContent = t("Syncing…", "正在同步…");
-        break;
-      case "idle":
-        textNode.textContent = formatTime(0);
-        break;
+      case "loading":
+        return tr("Loading...", "加载中...");
+      case "time":
+        return formatTime(state.seconds);
       default:
-        textNode.textContent = t("Loading...", "加载中...");
+        return tr(state.en, state.zh, state.params);
     }
   }
-  function show(next) {
-    if (state.kind === "resumed" && next.kind === "saved" && resumedTimer) {
-      pending = next;
-      return;
-    }
-    if (resumedTimer)
-      clearTimeout(resumedTimer);
-    resumedTimer = null;
-    pending = null;
+  function badgeTooltip() {
+    return state.kind === "status" && state.tooltip ? state.tooltip : "";
+  }
+  function set(next) {
     state = next;
-    if (next.kind === "resumed") {
-      resumedTimer = setTimeout(() => {
-        resumedTimer = null;
-        state = pending || { kind: "saved", seconds: next.seconds };
-        pending = null;
-        render();
-      }, RESUMED_NOTICE_MS);
-    }
-    render();
+    badgeChanged.emit();
   }
-  function build2() {
-    textNode = h("span", { class: "last-save-info-text" });
-    const label = t("Open settings", "打开设置");
-    const button = h("button", { type: "button", class: "ysrp-settings-button", title: label, "aria-label": label }, icon("gear"));
-    shieldFromPlayer(button, () => open());
-    node = h("div", { class: "last-save-info-container" }, h("div", { class: "last-save-info" }, textNode, button));
-    render();
-  }
-  function ensure() {
-    const host = document.querySelector("#movie_player .ytp-left-controls");
-    if (!host)
-      return;
-    if (node && node.parentNode === host)
-      return;
-    document.querySelectorAll(".last-save-info-container").forEach((n) => n.remove());
-    if (!node)
-      build2();
-    host.appendChild(node);
-    for (const listener of mountListeners)
-      listener(node);
-  }
-  function rebuild2() {
-    node?.remove();
-    node = null;
-    textNode = null;
-    ensure();
-  }
-  function destroy() {
-    node?.remove();
-    node = null;
-    textNode = null;
-  }
-  var current = () => node?.isConnected ? node : null;
-  function onMount(listener) {
-    mountListeners.add(listener);
-    return () => mountListeners.delete(listener);
-  }
-
-  // src/api/ResumePrompt.ts
-  var node2 = null;
-  function close2() {
-    node2?.remove();
-    node2 = null;
-  }
-  function open2(times, onChoose) {
-    close2();
-    const host = document.getElementById("movie_player");
-    if (!host) {
-      onChoose("link");
+  function showSavedTime(seconds) {
+    if (Date.now() < flashUntil) {
+      pendingTime = seconds;
       return;
     }
-    const choose = (choice) => {
-      close2();
-      onChoose(choice);
-    };
-    const option = (choice, iconName, label, seconds) => {
-      const button = h("button", { type: "button", class: `ysrp-btn ysrp-resume-${choice}`, dataset: { choice } }, icon(iconName), h("span", { text: `${label} ${formatTime(seconds)}` }));
-      shieldFromPlayer(button, () => choose(choice));
-      button.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter" && event.key !== " ")
-          return;
-        event.preventDefault();
-        event.stopPropagation();
-        choose(choice);
-      });
-      return button;
-    };
-    const saved = option("saved", "clock-rotate-left", t("Saved progress", "上次进度"), times.saved);
-    const title = t("Where to continue?", "从哪里继续播放？");
-    const dialog = h("div", { class: "ysrp-theme ysrp-resume", role: "dialog", "aria-modal": "false", "aria-label": title }, h("div", { class: "ysrp-resume-title", text: title }), h("div", { class: "ysrp-resume-sub", text: t("This link starts at a different time than your saved progress.", "这个链接指定的时间与你上次的进度不同。") }), h("div", { class: "ysrp-row-actions" }, saved, option("link", "link", t("Link time", "链接时间"), times.link)));
-    for (const type of ["click", "mousedown", "pointerdown", "touchstart", "dblclick"]) {
-      dialog.addEventListener(type, (event) => event.stopPropagation());
-    }
-    dialog.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") {
-        event.stopPropagation();
-        choose("link");
+    set({ kind: "time", seconds });
+  }
+  function showStatus(en, zh, params, extra = {}) {
+    flashUntil = 0;
+    set({ kind: "status", en, zh, params, ...extra });
+  }
+  function flashStatus(en, zh, params, ms) {
+    flashUntil = Date.now() + ms;
+    pendingTime = null;
+    set({ kind: "status", en, zh, params });
+    if (flashTimer)
+      clearTimeout(flashTimer);
+    flashTimer = window.setTimeout(() => {
+      flashUntil = 0;
+      if (pendingTime !== null) {
+        set({ kind: "time", seconds: pendingTime });
+        pendingTime = null;
       }
-    });
-    node2 = dialog;
-    host.appendChild(dialog);
-    saved.focus({ preventScroll: true });
+    }, ms);
+  }
+  function resetBadge() {
+    flashUntil = 0;
+    pendingTime = null;
+    set({ kind: "loading" });
+  }
+  var currentContainer = null;
+  function setBadgeContainer(el) {
+    currentContainer = el;
+    if (el)
+      badgeMounted.emit(el);
+  }
+  function badgeContainer() {
+    return currentContainer && currentContainer.isConnected ? currentContainer : null;
   }
 
-  // src/api/Titles.ts
-  var originals = new Map;
-  var originalFetches = new Map;
-  var dearrows = new Map;
-  var dearrowFetches = new Map;
-  function rememberOriginal(id, title) {
-    const value = normTitle(title);
-    if (id && value)
-      originals.set(id, value);
-  }
-  function getOriginal(id) {
-    if (!id)
-      return Promise.resolve(null);
-    const known = originals.get(id);
-    if (known)
-      return Promise.resolve(known);
-    const pending = originalFetches.get(id);
-    if (pending)
-      return pending;
-    const url = OEMBED_API + encodeURIComponent(`https://youtu.be/${id}`);
-    const promise = fetch(url, { credentials: "omit", cache: "no-store" }).then((res) => res.ok ? res.json() : null).then((data) => {
-      const title = data && typeof data.title === "string" ? normTitle(data.title) : null;
-      if (title) {
-        originals.set(id, title);
-        updateIfExists(id, (rec) => Object.assign(rec, { originalTitle: title }));
-      }
-      return title || null;
-    }).catch(() => null).finally(() => originalFetches.delete(id));
-    originalFetches.set(id, promise);
-    return promise;
-  }
-  function pickDeArrow(data) {
-    if (!data || !Array.isArray(data.titles))
-      return null;
-    const entry = data.titles.find((item) => item && typeof item.title === "string" && item.original !== true && (Boolean(item.locked) || (typeof item.votes === "number" ? item.votes : 0) >= 0));
-    return entry ? normTitle(entry.title) || null : null;
-  }
-  function cachedDeArrow(id) {
-    const hit = dearrows.get(id);
-    return hit && Date.now() - hit.at < DEARROW_TTL_MS ? hit : null;
-  }
-  function getDeArrow(id) {
-    if (!id)
-      return Promise.resolve(null);
-    const hit = cachedDeArrow(id);
-    if (hit)
-      return Promise.resolve(hit.title);
-    const pending = dearrowFetches.get(id);
-    if (pending)
-      return pending;
-    const promise = fetch(DEARROW_API + encodeURIComponent(id), { credentials: "omit", cache: "no-store" }).then((res) => {
-      if (res.status === 404)
-        return { titles: [] };
-      if (!res.ok)
-        throw new Error(`DeArrow HTTP ${res.status}`);
-      return res.json();
-    }).then((data) => {
-      let title = pickDeArrow(data);
-      if (title && sameTitle(title, originals.get(id)))
-        title = null;
-      dearrows.set(id, { title, at: Date.now() });
-      if (title)
-        emit(EVT_TITLE, { videoId: id, title });
-      return title;
-    }).catch(() => null).finally(() => dearrowFetches.delete(id));
-    dearrowFetches.set(id, promise);
-    return promise;
-  }
-  var knownOriginal = (id) => originals.get(id) || null;
-  function knownDeArrow(id) {
-    const hit = cachedDeArrow(id);
-    return hit ? hit.title : undefined;
-  }
-
-  // src/utils/youtube.ts
-  function getPlayer() {
-    const player = document.querySelector("#movie_player");
-    return player && typeof player.getCurrentTime === "function" && typeof player.getDuration === "function" && typeof player.seekTo === "function" ? player : null;
-  }
+  // src/api/player.ts
   function urlVideoId() {
-    if (!/^\/watch\/?$/.test(location.pathname))
-      return null;
-    const id = new URLSearchParams(location.search).get("v");
-    return id && /^[\w-]+$/.test(id) ? id : null;
-  }
-  function urlHasStartTime() {
-    const params = new URLSearchParams(location.search);
-    if (params.has("t") || params.has("start"))
-      return true;
-    return /(?:^|[#&])t=/.test(location.hash.replace(/^#/, "&"));
-  }
-  function urlStartTime() {
-    const params = new URLSearchParams(location.search);
-    const hash = new URLSearchParams(location.hash.replace(/^#/, ""));
-    const raw = params.get("t") || params.get("start") || hash.get("t");
-    if (!raw)
-      return null;
-    if (/^\d+(?:\.\d+)?s?$/.test(raw))
-      return parseFloat(raw);
-    const m = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/.exec(raw);
-    return m ? Number(m[1] || 0) * 3600 + Number(m[2] || 0) * 60 + Number(m[3] || 0) : null;
-  }
-  function playerVideoData(player) {
     try {
-      const data = player.getVideoData?.();
-      return data && typeof data === "object" ? data : {};
+      return new URLSearchParams(location.search).get("v") || "";
     } catch {
-      return {};
+      return "";
+    }
+  }
+  function linkStartTime() {
+    try {
+      const params = new URLSearchParams(location.search);
+      const fromQuery = parseTimeParam(params.get("t")) ?? parseTimeParam(params.get("start"));
+      if (fromQuery !== null)
+        return fromQuery;
+      const hash = location.hash.replace(/^#/, "");
+      if (hash)
+        return parseTimeParam(new URLSearchParams(hash).get("t"));
+    } catch {}
+    return null;
+  }
+  function getPlayer() {
+    const el = document.getElementById("movie_player");
+    if (!el)
+      return null;
+    if (typeof el.getCurrentTime !== "function" || typeof el.getDuration !== "function" || typeof el.seekTo !== "function")
+      return null;
+    return el;
+  }
+  function videoData(player) {
+    if (!player || typeof player.getVideoData !== "function")
+      return null;
+    try {
+      return player.getVideoData() || null;
+    } catch {
+      return null;
     }
   }
   function isAdShowing(player) {
     return player.classList.contains("ad-showing") || player.classList.contains("ad-interrupting");
   }
-  function isPlayerReadyFor(player, id) {
-    if (!player || !id)
-      return false;
-    const loadedId = playerVideoData(player).video_id;
-    if (loadedId && loadedId !== id)
-      return false;
-    let duration = 0;
+  function num(fn) {
     try {
-      duration = Number(player.getDuration()) || 0;
-    } catch {}
-    return duration > 0 && !isAdShowing(player);
+      const v = Number(fn());
+      return Number.isFinite(v) ? v : 0;
+    } catch {
+      return 0;
+    }
+  }
+  function playerDuration(player) {
+    return player ? num(() => player.getDuration()) : 0;
+  }
+  function playerTime(player) {
+    return player ? num(() => player.getCurrentTime()) : 0;
+  }
+  function currentDuration() {
+    return playerDuration(getPlayer());
+  }
+  function readyPlayer(sessionId) {
+    const player = getPlayer();
+    if (!player)
+      return null;
+    const data = videoData(player);
+    if (data && data.video_id && data.video_id !== sessionId)
+      return null;
+    if (playerDuration(player) <= 0)
+      return null;
+    if (isAdShowing(player))
+      return null;
+    return player;
+  }
+  function isPlaying(player) {
+    if (typeof player.getPlayerState === "function") {
+      try {
+        return player.getPlayerState() === 1;
+      } catch {}
+    }
+    const video = player.querySelector("video");
+    return Boolean(video && !video.paused);
+  }
+
+  // src/api/resumePrompt.ts
+  var impl = null;
+  function setResumePromptImpl(fn) {
+    impl = fn;
+  }
+  function askResume(opts) {
+    if (impl)
+      return impl(opts);
+    return { result: Promise.resolve("link"), cancel() {} };
+  }
+
+  // src/api/titles.ts
+  var DEARROW_TTL = 6 * 60 * 60 * 1000;
+  var DEARROW_NEGATIVE_TTL = 30 * 60 * 1000;
+  var ORIGINAL_RETRY_MS = 5 * 60 * 1000;
+  var sources = new Map;
+  var dearrowCache = new Map;
+  var dearrowInflight = new Map;
+  var originalCache = new Map;
+  var originalInflight = new Map;
+  function entry(videoId) {
+    let s = sources.get(videoId);
+    if (!s) {
+      s = { original: "", dearrow: "" };
+      sources.set(videoId, s);
+    }
+    return s;
+  }
+  function getSources(videoId) {
+    return entry(videoId);
+  }
+  function setOriginalTitle(videoId, title) {
+    if (!videoId)
+      return false;
+    const s = entry(videoId);
+    s.original = normalizeTitle(title);
+    if (s.dearrow && sameTitle(s.dearrow, s.original))
+      s.dearrow = "";
+    refreshCurrent();
+    return Boolean(s.original);
+  }
+  function setDearrowTitle(videoId, title) {
+    if (!videoId)
+      return false;
+    const s = entry(videoId);
+    const norm = normalizeTitle(title);
+    if (!norm || sameTitle(norm, s.original)) {
+      s.dearrow = "";
+      refreshCurrent();
+      return false;
+    }
+    s.dearrow = norm;
+    refreshCurrent();
+    return true;
+  }
+  function resolveTitle(videoId, fallback) {
+    const fb = normalizeTitle(fallback) || UNKNOWN_TITLE;
+    if (!videoId)
+      return { title: fb, source: "fallback" };
+    const s = sources.get(videoId);
+    if (s?.dearrow)
+      return { title: s.dearrow, source: "dearrow" };
+    if (s?.original)
+      return { title: s.original, source: "original" };
+    return { title: fb, source: "fallback" };
+  }
+  function persistOriginal(videoId, title) {
+    try {
+      const rec = readRecord(videoId);
+      if (!rec || rec.originalTitle === title)
+        return;
+      updateRecord(videoId, (cur) => cur ? { ...cur, originalTitle: title } : null, "meta");
+    } catch (err) {
+      console.warn("[Video Memory] Failed to persist original title:", err);
+    }
+  }
+  function knownOriginalTitle(videoId, title) {
+    const norm = normalizeTitle(title);
+    if (!videoId || !norm)
+      return;
+    originalCache.set(videoId, { title: norm, at: Date.now() });
+    setOriginalTitle(videoId, norm);
+    persistOriginal(videoId, norm);
+  }
+  function cachedOriginalTitle(videoId) {
+    return originalCache.get(videoId)?.title ?? null;
+  }
+  function fetchOriginalTitle(videoId) {
+    if (!videoId)
+      return Promise.resolve(null);
+    const cached = originalCache.get(videoId);
+    if (cached && (cached.title || Date.now() - cached.at < ORIGINAL_RETRY_MS))
+      return Promise.resolve(cached.title);
+    const running = originalInflight.get(videoId);
+    if (running)
+      return running;
+    const url = OEMBED_URL + encodeURIComponent(`https://youtu.be/${videoId}`);
+    const task = fetch(url, { credentials: "omit", cache: "no-store" }).then(async (res) => {
+      if (!res.ok)
+        throw new Error(`oEmbed HTTP ${res.status}`);
+      const data = await res.json();
+      const title = data && typeof data.title === "string" ? data.title.trim() : "";
+      return title || null;
+    }).then((title) => {
+      originalCache.set(videoId, { title, at: Date.now() });
+      if (title) {
+        setOriginalTitle(videoId, title);
+        persistOriginal(videoId, title);
+      }
+      return title;
+    }).catch((err) => {
+      console.warn("[Video Memory] Failed to fetch original title:", err);
+      originalCache.set(videoId, { title: null, at: Date.now() });
+      return null;
+    }).finally(() => {
+      originalInflight.delete(videoId);
+    });
+    originalInflight.set(videoId, task);
+    return task;
+  }
+  function pickDearrowTitle(data) {
+    const titles = data && typeof data === "object" ? data.titles : null;
+    if (!Array.isArray(titles) || !titles.length)
+      return null;
+    for (const item of titles) {
+      if (!item || typeof item !== "object")
+        continue;
+      const { title, original, locked, votes } = item;
+      if (typeof title !== "string" || original === true)
+        continue;
+      const v = typeof votes === "number" && Number.isFinite(votes) ? votes : 0;
+      if (locked || v >= 0)
+        return title;
+    }
+    return null;
+  }
+  function cachedDearrow(videoId) {
+    const c = dearrowCache.get(videoId);
+    if (!c)
+      return;
+    const ttl = c.title ? DEARROW_TTL : DEARROW_NEGATIVE_TTL;
+    if (Date.now() - c.at > ttl)
+      return;
+    return c.title;
+  }
+  function fetchDearrowTitle(videoId, options = {}) {
+    if (!videoId)
+      return Promise.resolve(null);
+    if (!options.force) {
+      const cached = cachedDearrow(videoId);
+      if (cached !== undefined) {
+        if (cached)
+          setDearrowTitle(videoId, cached);
+        return Promise.resolve(cached);
+      }
+    }
+    const running = dearrowInflight.get(videoId);
+    if (running)
+      return running;
+    const task = fetch(DEARROW_URL + encodeURIComponent(videoId), { credentials: "omit", cache: "no-store" }).then(async (res) => res.ok ? pickDearrowTitle(await res.json()) : null).catch((err) => {
+      console.warn("[Video Memory] Failed to fetch DeArrow title:", err);
+      return null;
+    }).then((raw) => {
+      const accepted = raw ? setDearrowTitle(videoId, raw) : false;
+      const title = accepted ? getSources(videoId).dearrow : null;
+      dearrowCache.set(videoId, { title, at: Date.now() });
+      if (title)
+        dispatch(EVT_DEARROW_READY, { videoId, title });
+      return title;
+    }).finally(() => {
+      dearrowInflight.delete(videoId);
+    });
+    dearrowInflight.set(videoId, task);
+    return task;
+  }
+  var current = { videoId: null, title: UNKNOWN_TITLE, isLoading: true, source: "idle", updatedAt: Date.now() };
+  function currentStatus() {
+    return { ...current };
+  }
+  function refreshCurrent() {
+    const id = current.videoId;
+    if (!id)
+      return;
+    const rec = readRecord(id);
+    const stored = rec && typeof rec.videoName === "string" && !isPlaceholderTitle(rec.videoName) ? rec.videoName : "";
+    const { title, source } = resolveTitle(id, stored);
+    const isLoading = source === "fallback" && !stored;
+    const label = source === "fallback" ? stored ? "record" : "loading" : source;
+    if (title === current.title && isLoading === current.isLoading && label === current.source)
+      return;
+    current = { videoId: id, title, isLoading, source: label, updatedAt: Date.now() };
+    dispatch(EVT_VIDEO_STATUS, { ...current });
+  }
+  function setCurrentVideo(videoId) {
+    if ((videoId || null) === current.videoId)
+      return;
+    if (!videoId) {
+      current = { videoId: null, title: UNKNOWN_TITLE, isLoading: false, source: "idle", updatedAt: Date.now() };
+      dispatch(EVT_VIDEO_STATUS, { ...current });
+      return;
+    }
+    current = { videoId, title: UNKNOWN_TITLE, isLoading: true, source: "loading", updatedAt: Date.now() };
+    refreshCurrent();
+    dispatch(EVT_VIDEO_STATUS, { ...current });
+    fetchDearrowTitle(videoId);
+    fetchOriginalTitle(videoId);
+  }
+  function titleForRecord(videoId, existing) {
+    const keep = typeof existing === "string" && !isPlaceholderTitle(existing) ? existing : "";
+    return resolveTitle(videoId, keep).title;
   }
 
   // src/plugins/_core/engine/index.ts
-  var logger3 = new Logger("Engine");
-  var session = null;
-  var timer = null;
-  var cleanups = [];
-  function newSession(id) {
-    return {
-      id,
-      phase: "waiting",
-      ready: true,
-      isLive: false,
-      duration: 0,
-      lastTime: null,
-      lastWritten: null,
-      lastWriteAt: 0,
-      restoreTarget: 0,
-      restoreStartedAt: 0,
-      lastSeekAt: 0,
-      seekAttempts: 0,
-      confirmations: 0
-    };
-  }
-  function titleFor(id, rec) {
-    const dearrow = knownDeArrow(id);
-    const original = knownOriginal(id) || rec && normTitle(rec.originalTitle) || null;
-    if (dearrow)
-      return { videoName: dearrow, originalTitle: original };
-    const stored = rec && !isPlaceholderTitle(rec.videoName) ? normTitle(rec.videoName) : null;
-    return { videoName: stored || original || UNKNOWN_TITLE, originalTitle: original };
-  }
-  function write(s) {
-    if (s.phase !== "tracking" || s.isLive || s.lastTime === null)
-      return false;
-    const position = Math.round(s.lastTime * 1000) / 1000;
-    try {
-      update(s.id, (rec) => {
-        const titles = titleFor(s.id, rec);
-        return Object.assign(rec, {
-          videoProgress: position,
-          saveDate: Date.now(),
-          videoName: titles.videoName,
-          originalTitle: titles.originalTitle || rec.originalTitle || null,
-          videoDuration: s.duration || rec.videoDuration
-        });
-      });
-    } catch (err) {
-      logger3.error("Failed to save progress:", err);
-      show({ kind: "error", message: errorMessage(err) });
-      return false;
+  var TICK_MS = 250;
+  var SAVE_EVERY_MS = 1500;
+  var MIN_DELTA_S = 0.5;
+  var CONFIRM_EVERY_MS = 500;
+  var CONFIRM_TOLERANCE_S = 3;
+  var CONFIRMATIONS = 2;
+  var MAX_SEEKS = 8;
+  var RESTORE_WINDOW_MS = 15000;
+  var HOOK_TIMEOUT_MS = 4000;
+  var MIN_RESUMABLE_S = 1;
+  var FINISHED_MARGIN_S = 5;
+
+  class Engine {
+    ctx;
+    session = null;
+    constructor(ctx) {
+      this.ctx = ctx;
     }
-    s.lastWritten = position;
-    s.lastWriteAt = Date.now();
-    show({ kind: "saved", seconds: position });
-    emit(EVT_RECORD, { videoId: s.id, videoProgress: position });
-    return true;
-  }
-  function maybeWrite(s, force) {
-    if (!s || s.phase !== "tracking" || s.isLive || s.lastTime === null)
-      return;
-    if (s.lastWritten !== null && Math.abs(s.lastTime - s.lastWritten) < MIN_SAVE_DELTA)
-      return;
-    if (!force && Date.now() - s.lastWriteAt < SAVE_THROTTLE_MS)
-      return;
-    write(s);
-  }
-  function enterTracking(s, notice) {
-    s.phase = "tracking";
-    if (notice)
-      show(notice);
-    else if (s.lastWritten === null)
-      show({ kind: "idle" });
-  }
-  function beginRestore(s, player) {
-    const data = playerVideoData(player);
-    s.isLive = Boolean(data.isLive);
-    if (data.title)
-      rememberOriginal(s.id, data.title);
-    if (s.isLive)
-      return enterTracking(s, { kind: "live" });
-    const rec = get(s.id);
-    const target = rec ? Number(rec.videoProgress) : NaN;
-    if (!Number.isFinite(target) || target <= MIN_RESTORE_POSITION)
-      return enterTracking(s);
-    if (target >= s.duration - END_GUARD_SECONDS)
-      return enterTracking(s);
-    s.restoreTarget = target;
-    if (urlHasStartTime())
-      return askForChoice(s, player);
-    startRestoring(s, player);
-  }
-  function startRestoring(s, player) {
-    s.phase = "restoring";
-    s.restoreStartedAt = Date.now();
-    s.seekAttempts = 0;
-    seek(s, player);
-  }
-  function askForChoice(s, player) {
-    const linkTime = urlStartTime() ?? (Number(player.getCurrentTime()) || 0);
-    if (Math.abs(linkTime - s.restoreTarget) <= RESTORE_TOLERANCE)
-      return enterTracking(s);
-    s.phase = "choosing";
-    let wasPlaying = false;
-    try {
-      wasPlaying = player.getPlayerState?.() === 1;
-      player.pauseVideo?.();
-    } catch {}
-    show({ kind: "choosing" });
-    open2({ saved: s.restoreTarget, link: linkTime }, (choice) => {
-      if (session !== s || s.phase !== "choosing")
+    start() {
+      const ctx = this.ctx;
+      ctx.interval(() => this.tick(), TICK_MS);
+      ctx.listen(window, "yt-navigate-start", () => this.flush(), true);
+      for (const type of ["yt-navigate-finish", "yt-page-data-updated", "yt-page-data-fetched", "yt-history-popstate"]) {
+        ctx.listen(window, type, () => this.tick(), true);
+      }
+      ctx.listen(window, "popstate", () => this.tick());
+      ctx.listen(document, "visibilitychange", () => {
+        if (document.visibilityState === "hidden")
+          this.flush();
+      });
+      ctx.listen(window, "pagehide", () => this.flush());
+      const onMedia = (ev) => {
+        const target = ev.target;
+        if (target && target.tagName === "VIDEO" && target.closest("#movie_player"))
+          this.flush();
+      };
+      ctx.listen(document, "pause", onMedia, true);
+      ctx.listen(document, "seeked", onMedia, true);
+      ctx.onDispose(() => {
+        if (this.session)
+          this.endSession(this.session);
+      });
+      ctx.timeout(() => this.tick(), 0);
+    }
+    flush() {
+      if (this.session)
+        this.save(this.session, true);
+    }
+    tick() {
+      const id = urlVideoId();
+      if (id !== (this.session ? this.session.id : ""))
+        this.switchTo(id);
+      const s = this.session;
+      if (!s || s.phase === "sync" || s.phase === "choosing" || s.phase === "live")
         return;
-      const current = getPlayer();
-      if (choice === "saved" && current)
-        startRestoring(s, current);
+      const raw = getPlayer();
+      const data = videoData(raw);
+      if (raw && data && data.video_id === s.id && data.isLive) {
+        s.phase = "live";
+        return;
+      }
+      const player = readyPlayer(s.id);
+      if (player) {
+        s.lastReadyTime = playerTime(player);
+        s.lastDuration = playerDuration(player);
+      }
+      switch (s.phase) {
+        case "waiting":
+          if (player)
+            this.decide(s, player);
+          break;
+        case "restoring":
+          if (player)
+            this.continueRestore(s, player);
+          break;
+        case "tracking":
+          if (Date.now() - s.lastSaveAt >= SAVE_EVERY_MS)
+            this.save(s, false);
+          break;
+      }
+    }
+    switchTo(id) {
+      if (this.session)
+        this.endSession(this.session);
+      this.session = null;
+      setCurrentVideo(id || null);
+      resetBadge();
+      if (!id)
+        return;
+      const s = {
+        id,
+        phase: "sync",
+        lastReadyTime: null,
+        lastDuration: 0,
+        lastWritten: null,
+        lastSaveAt: 0,
+        restore: null,
+        prompt: null,
+        ended: false
+      };
+      this.session = s;
+      runBeforeRestoreHooks(id, HOOK_TIMEOUT_MS, () => {
+        if (this.session === s)
+          showStatus("Syncing…", "正在同步…");
+      }).then(() => {
+        if (this.session !== s || s.phase !== "sync")
+          return;
+        s.phase = "waiting";
+        resetBadge();
+        this.tick();
+      });
+    }
+    endSession(s) {
+      if (s.phase === "tracking")
+        this.save(s, true);
+      if (s.prompt)
+        s.prompt.cancel();
+      s.prompt = null;
+      s.ended = true;
+    }
+    decide(s, player) {
+      const data = videoData(player);
+      if (data && data.title)
+        knownOriginalTitle(s.id, data.title);
+      const rec = readRecord(s.id);
+      const saved = Number(rec ? rec.videoProgress : NaN);
+      const resumable = Number.isFinite(saved) && saved > MIN_RESUMABLE_S;
+      const duration = playerDuration(player);
+      const finished = resumable && duration - saved < FINISHED_MARGIN_S;
+      const link = linkStartTime();
+      if (!resumable) {
+        this.startTracking(s);
+      } else if (finished) {
+        if (link === null) {
+          try {
+            player.seekTo(0, true);
+          } catch {}
+        }
+        this.startTracking(s);
+      } else if (link !== null) {
+        if (Math.abs(link - saved) > CONFIRM_TOLERANCE_S)
+          this.choose(s, player, saved, link);
+        else
+          this.startTracking(s);
+      } else {
+        this.beginRestore(s, player, saved);
+      }
+    }
+    choose(s, player, saved, link) {
+      s.phase = "choosing";
+      const wasPlaying = isPlaying(player);
+      try {
+        player.pauseVideo?.();
+      } catch {}
+      showStatus("Choose a position…", "请选择播放位置…");
+      const handle = askResume({ videoId: s.id, saved, link });
+      s.prompt = handle;
+      handle.result.then((choice) => {
+        if (this.session !== s || s.ended)
+          return;
+        s.prompt = null;
+        const p = getPlayer();
+        resetBadge();
+        if (choice === "saved" && p) {
+          s.phase = "restoring";
+          s.restore = { target: saved, seeks: 0, firstSeekAt: 0, lastCheckAt: 0, confirms: 0 };
+          this.seek(s.restore, p);
+          if (wasPlaying) {
+            try {
+              p.playVideo?.();
+            } catch {}
+          }
+        } else {
+          if (wasPlaying && p) {
+            try {
+              p.playVideo?.();
+            } catch {}
+          }
+          this.startTracking(s);
+        }
+      });
+    }
+    beginRestore(s, player, target) {
+      s.phase = "restoring";
+      s.restore = { target, seeks: 0, firstSeekAt: 0, lastCheckAt: 0, confirms: 0 };
+      this.continueRestore(s, player);
+    }
+    seek(r, player) {
+      const now = Date.now();
+      try {
+        player.seekTo(r.target, true);
+      } catch {}
+      r.seeks++;
+      r.lastCheckAt = now;
+      if (!r.firstSeekAt)
+        r.firstSeekAt = now;
+    }
+    continueRestore(s, player) {
+      const r = s.restore;
+      if (!r)
+        return this.startTracking(s);
+      if (r.seeks === 0) {
+        this.seek(r, player);
+        return;
+      }
+      const now = Date.now();
+      if (now - r.lastCheckAt < CONFIRM_EVERY_MS)
+        return;
+      r.lastCheckAt = now;
+      if (Math.abs(playerTime(player) - r.target) <= CONFIRM_TOLERANCE_S) {
+        r.confirms++;
+        if (r.confirms >= CONFIRMATIONS)
+          this.finishRestore(s, true);
+        return;
+      }
+      r.confirms = 0;
+      if (r.seeks < MAX_SEEKS && now - r.firstSeekAt < RESTORE_WINDOW_MS)
+        this.seek(r, player);
       else
-        enterTracking(s);
-      if (wasPlaying && current) {
-        try {
-          current.playVideo?.();
-        } catch {}
-      }
-    });
-  }
-  function seek(s, player) {
-    s.seekAttempts++;
-    s.lastSeekAt = Date.now();
-    s.confirmations = 0;
-    try {
-      player.seekTo(s.restoreTarget, true);
-    } catch (err) {
-      logger3.error("seekTo failed", err);
+        this.finishRestore(s, false);
     }
-  }
-  function continueRestore(s, player, now) {
-    const current = Number(player.getCurrentTime()) || 0;
-    if (Math.abs(current - s.restoreTarget) <= RESTORE_TOLERANCE) {
-      s.confirmations++;
-      if (s.confirmations >= 2) {
-        s.lastWritten = s.restoreTarget;
-        enterTracking(s, { kind: "resumed", seconds: s.restoreTarget });
-      }
-      return;
+    finishRestore(s, ok) {
+      const target = s.restore ? s.restore.target : 0;
+      s.restore = null;
+      this.startTracking(s);
+      if (ok)
+        flashStatus("Resumed {t}", "已恢复 {t}", { t: formatTime(target) }, 2500);
     }
-    s.confirmations = 0;
-    if (s.seekAttempts >= RESTORE_MAX_ATTEMPTS || now - s.restoreStartedAt > RESTORE_TIMEOUT_MS) {
-      logger3.warn("Could not restore position for", s.id);
-      s.lastWritten = current;
-      enterTracking(s);
-      return;
+    startTracking(s) {
+      s.phase = "tracking";
+      s.lastWritten = null;
+      this.save(s, false);
     }
-    if (now - s.lastSeekAt >= RESTORE_RETRY_MS)
-      seek(s, player);
-  }
-  function startSession(id) {
-    close2();
-    const s = id ? newSession(id) : null;
-    session = s;
-    show({ kind: "loading" });
-    if (s) {
-      const rec = get(s.id);
-      if (rec && normTitle(rec.originalTitle))
-        rememberOriginal(s.id, rec.originalTitle);
-      getDeArrow(s.id).then((title) => {
-        if (title)
-          updateIfExists(s.id, (r) => Object.assign(r, { videoName: title }));
-      });
-      const hooks = runRestoreHooks(s.id);
-      if (hooks.length) {
-        s.ready = false;
-        show({ kind: "syncing" });
-        const timeout = new Promise((resolve) => setTimeout(resolve, BEFORE_RESTORE_TIMEOUT_MS));
-        Promise.race([Promise.allSettled(hooks), timeout]).then(() => {
-          s.ready = true;
-          if (session === s && s.phase === "waiting")
-            show({ kind: "loading" });
-        });
-      }
-    }
-    emit(EVT_VIDEO, { videoId: id, title: id ? titleFor(id, get(id)).videoName : null });
-  }
-  function sample(s) {
-    const player = getPlayer();
-    if (!isPlayerReadyFor(player, s.id))
-      return null;
-    const time = Number(player.getCurrentTime());
-    s.duration = Number(player.getDuration()) || s.duration;
-    if (s.phase === "tracking" && Number.isFinite(time))
-      s.lastTime = time;
-    return player;
-  }
-  function tick() {
-    const id = urlVideoId();
-    if (!session || session.id !== id) {
-      if (session) {
-        sample(session);
-        maybeWrite(session, true);
-      }
-      startSession(id);
-    }
-    const s = session;
-    if (!s)
-      return;
-    const player = sample(s);
-    if (!player)
-      return;
-    if (s.phase === "waiting") {
-      if (!s.ready)
+    save(s, useLastReading) {
+      if (s.phase !== "tracking")
         return;
-      beginRestore(s, player);
-    } else if (s.phase === "restoring")
-      continueRestore(s, player, Date.now());
-    if (s.phase === "tracking") {
-      if (s.lastTime === null)
-        sample(s);
-      maybeWrite(s, false);
+      s.lastSaveAt = Date.now();
+      let time = null;
+      let duration = s.lastDuration;
+      const player = s.ended ? null : readyPlayer(s.id);
+      if (player) {
+        time = playerTime(player);
+        duration = playerDuration(player);
+        s.lastReadyTime = time;
+        s.lastDuration = duration;
+      } else if (useLastReading) {
+        time = s.lastReadyTime;
+      }
+      if (time === null)
+        return;
+      if (s.lastWritten !== null && Math.abs(time - s.lastWritten) < MIN_DELTA_S)
+        return;
+      this.write(s, time, duration);
+    }
+    write(s, time, duration) {
+      const id = s.id;
+      try {
+        updateRecord(id, (cur) => {
+          const base = cur || {};
+          const original = cachedOriginalTitle(id) || getSources(id).original || null;
+          return {
+            ...base,
+            videoProgress: time,
+            saveDate: Date.now(),
+            videoDuration: duration > 0 ? duration : base.videoDuration,
+            videoName: titleForRecord(id, base.videoName),
+            originalTitle: original || base.originalTitle || null
+          };
+        }, "content");
+        s.lastWritten = time;
+        if (this.session === s)
+          showSavedTime(time);
+        dispatch(EVT_RECORD_UPDATED, { videoId: id, videoProgress: time });
+      } catch (err) {
+        console.error("[Video Memory] Failed to save video progress:", err);
+        if (this.session === s)
+          showStatus("⚠ Save failed", "⚠ 保存失败", undefined, { tooltip: errorMessage(err), error: true });
+      }
     }
   }
-  function flush() {
-    const s = session;
-    if (!s || s.id !== urlVideoId()) {
-      tick();
-      return;
-    }
-    sample(s);
-    maybeWrite(s, true);
-  }
-  var safeTick = () => {
-    try {
-      tick();
-    } catch (err) {
-      logger3.error("tick failed", err);
-    }
-  };
-  var safeFlush = () => {
-    try {
-      flush();
-    } catch (err) {
-      logger3.error("flush failed", err);
-    }
-  };
-  function listen(target, name, handler, capture = false) {
-    target.addEventListener(name, handler, capture);
-    cleanups.push(() => target.removeEventListener(name, handler, capture));
-  }
-  var fromPlayer = (event) => Boolean(event.target?.closest?.("#movie_player"));
-  var currentId = () => session?.id ?? null;
-  var currentDuration = () => session?.duration ?? 0;
   var engine_default = definePlugin({
     name: "Engine",
-    title: () => t("Progress engine", "进度引擎"),
-    description: () => t("Saves the playback position and resumes it when you come back.", "保存播放位置，回来时自动接着播放。"),
+    displayName: { en: "Progress engine", zh: "进度引擎" },
+    description: {
+      en: "Saves and restores the playback position of every video; waits for the player, skips ads and handles timestamp links.",
+      zh: "保存并恢复每个视频的播放进度；等待播放器就绪、避开广告并处理时间戳链接。"
+    },
+    authors: ["0_V"],
     icon: "gauge-high",
-    authors: [Devs.V],
     required: true,
-    start() {
-      cleanup();
-      timer = setInterval(safeTick, TICK_MS);
-      setTimeout(safeTick, 0);
-      for (const name of ["pause", "seeked"])
-        listen(document, name, (event) => {
-          if (fromPlayer(event))
-            safeFlush();
-        }, true);
-      for (const name of ["loadedmetadata", "durationchange", "playing"])
-        listen(document, name, (event) => {
-          if (fromPlayer(event))
-            safeTick();
-        }, true);
-      listen(window, "yt-navigate-start", safeFlush, true);
-      listen(window, "yt-navigate-finish", safeTick, true);
-      listen(window, "popstate", safeTick);
-      listen(document, "visibilitychange", () => document.hidden ? safeFlush() : safeTick());
-      listen(window, "pagehide", safeFlush);
-      listen(window, "beforeunload", safeFlush);
-    },
-    stop() {
-      safeFlush();
-      if (timer)
-        clearInterval(timer);
-      timer = null;
-      for (const fn of cleanups.splice(0))
-        fn();
-      session = null;
+    start(ctx) {
+      new Engine(ctx).start();
     }
   });
 
-  // src/plugins/_core/playerBadge/index.ts
-  var timer2 = null;
-  var languageTimer = null;
-  var offLanguage = null;
-  var ensure2 = () => ensure();
-  var playerBadge_default = definePlugin({
-    name: "PlayerBadge",
-    title: () => t("Player badge", "播放器徽标"),
-    description: () => t("Shows the last saved time and the settings button in the player controls.", "在播放器控制栏显示最近保存的时间和设置按钮。"),
-    icon: "tag",
-    authors: [Devs.V],
-    required: true,
-    start() {
-      timer2 = setInterval(ensure2, TICK_MS);
-      window.addEventListener("yt-navigate-finish", ensure2, true);
-      ensure2();
-      offLanguage = on(EVT_LANG, () => {
-        if (languageTimer)
-          clearTimeout(languageTimer);
-        languageTimer = setTimeout(() => rebuild2(), 50);
-      });
-    },
-    stop() {
-      if (timer2)
-        clearInterval(timer2);
-      timer2 = null;
-      window.removeEventListener("yt-navigate-finish", ensure2, true);
-      offLanguage?.();
-      offLanguage = null;
-      close2();
-      destroy();
-    }
-  });
-
-  // src/plugins/_core/settings/DisplayPane.ts
-  function DisplayPane() {
-    const names = { zh: "中文", en: "English" };
-    const status = h("div", { class: "ysrp-msg", style: { display: "none" } });
-    const choice = ChoiceGroup("ysrp-language", "--ysrp-display", [
-      { value: "auto", badge: t("Auto", "自动"), label: t("Auto", "自动"), hint: t("Match the browser language automatically.", "自动跟随浏览器语言。") },
-      { value: "zh", badge: "中文", label: "中文", hint: "始终使用简体中文。" },
-      { value: "en", badge: "English", label: "English", hint: "Always use English." }
-    ], languagePreference(), (value) => {
-      if (!setLanguagePreference(value))
-        setMessage(status, t("Already using this language.", "当前已使用该语言。"));
+  // src/plugins/_core/playerBadge/resumeDialog.ts
+  var STOP_EVENTS = ["pointerdown", "pointerup", "mousedown", "mouseup", "click", "dblclick", "keydown", "keyup", "keypress", "touchstart", "touchend", "wheel", "contextmenu"];
+  function createResumePrompt(opts) {
+    let settle = () => {};
+    let done = false;
+    const result = new Promise((resolve) => {
+      settle = resolve;
     });
-    choice.node.classList.add("ysrp-language-options");
-    return {
-      node: h("div", {}, card("globe", "--ysrp-display", t("Interface Language", "界面语言"), t("Choose how the script UI should appear.", "为脚本界面选择显示语言。"), choice.node, h("div", { class: "ysrp-info" }, h("div", { class: "ysrp-info-row" }, h("b", { text: t("Active language", "当前语言") }), h("span", { text: names[resolvedLanguage()] })), h("div", { class: "ysrp-info-row" }, h("b", { text: t("Browser language", "浏览器语言") }), h("span", { text: names[detectBrowserLanguage()] }))), status))
+    const savedBtn = h("button", { class: "ysrp-resume-btn ysrp-resume-saved", type: "button" }, tr("Saved progress {t}", "上次进度 {t}", { t: formatTime(opts.saved) }));
+    const linkBtn = h("button", { class: "ysrp-resume-btn ysrp-resume-link", type: "button" }, tr("Link time {t}", "链接时间 {t}", { t: formatTime(opts.link) }));
+    const root = h("div", { class: "ysrp-resume", attrs: { role: "dialog", "aria-modal": "true" } }, h("div", { class: "ysrp-resume-title", text: tr("Where to continue?", "从哪里继续播放？") }), h("div", { class: "ysrp-resume-text", text: tr("This link starts at a different time than your saved progress.", "这个链接指定的时间与你上次的进度不同。") }), h("div", { class: "ysrp-resume-actions" }, savedBtn, linkBtn));
+    const onDocKey = (ev) => {
+      if (ev.key !== "Escape")
+        return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      finish("link");
     };
+    const finish = (choice) => {
+      if (done)
+        return;
+      done = true;
+      document.removeEventListener("keydown", onDocKey, true);
+      root.remove();
+      if (choice)
+        settle(choice);
+    };
+    document.addEventListener("keydown", onDocKey, true);
+    for (const type of STOP_EVENTS)
+      root.addEventListener(type, (ev) => ev.stopPropagation());
+    const bind = (btn, choice) => {
+      btn.addEventListener("pointerdown", (ev) => {
+        ev.preventDefault();
+        finish(choice);
+      });
+      btn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        finish(choice);
+      });
+    };
+    bind(savedBtn, "saved");
+    bind(linkBtn, "link");
+    const player = document.getElementById("movie_player");
+    if (!player) {
+      finish("link");
+      return { result, cancel() {} };
+    }
+    const width = Math.max(200, Math.min(360, player.clientWidth - 32 || 360));
+    root.style.width = `${width}px`;
+    player.appendChild(root);
+    try {
+      savedBtn.focus({ preventScroll: true });
+    } catch {}
+    return { result, cancel: () => finish(null) };
   }
 
-  // src/plugins/_core/settings/PluginsPane.ts
-  function Switch(checked, label, onChange, disabled = false) {
-    const node = h("button", { type: "button", class: "ysrp-switch", role: "switch", "aria-label": label });
-    const set = (value) => node.setAttribute("aria-checked", String(value));
+  // src/plugins/_core/playerBadge/style.css
+  var style_default = `/* Player badge (L-57, sizes converted to px) and resume dialog (N-3.2). */
+.last-save-info-container {
+  all: initial;
+  font-family: var(--ysrp-font);
+  font-size: 13px;
+  margin-left: 5px;
+  display: flex;
+  align-items: center;
+}
+.last-save-info-container .last-save-info {
+  text-shadow: none;
+  background: var(--ysrp-bg);
+  color: var(--ysrp-text);
+  padding: 5px;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  line-height: 1.2;
+}
+.last-save-info-container .last-save-info-text.is-error {
+  color: var(--ysrp-error);
+}
+.last-save-info-container .ysrp-settings-button {
+  background: var(--ysrp-layer);
+  color: var(--ysrp-text);
+  border: none;
+  margin: 0 0 0 5px;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.ysrp-resume {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 70;
+  box-sizing: border-box;
+  padding: 20px;
+  border-radius: 16px;
+  background: var(--ysrp-bg);
+  color: var(--ysrp-text);
+  border: 1px solid var(--ysrp-border);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
+  font-family: var(--ysrp-font);
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: left;
+  text-shadow: none;
+}
+.ysrp-resume-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+.ysrp-resume-text {
+  color: var(--ysrp-text-2);
+  margin: 0 0 16px;
+}
+.ysrp-resume-actions {
+  display: flex;
+  gap: 8px;
+}
+.ysrp-resume-btn {
+  flex: 1 1 0;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--ysrp-border-strong);
+  background: transparent;
+  color: var(--ysrp-text);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ysrp-resume-btn:hover { background: var(--ysrp-hover); }
+.ysrp-resume-btn:focus-visible { outline: 2px solid var(--ysrp-border-strong); outline-offset: 2px; }
+.ysrp-resume-saved {
+  background: var(--ysrp-text);
+  border-color: var(--ysrp-text);
+  color: var(--ysrp-bg);
+}
+.ysrp-resume-saved:hover { background: var(--ysrp-text); opacity: .88; }
+`;
+
+  // src/plugins/_core/playerBadge/index.ts
+  function ensureFontAwesome() {
+    if (document.querySelector(`link[href="${FONT_AWESOME_URL}"]`))
+      return;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.type = "text/css";
+    link.href = FONT_AWESOME_URL;
+    (document.head || document.documentElement).appendChild(link);
+  }
+  function createBadge() {
+    const text = h("span", { class: CLS_BADGE_TEXT, text: badgeText() });
+    const tooltip = badgeTooltip();
+    if (tooltip)
+      text.title = tooltip;
+    const gear = h("button", { class: CLS_SETTINGS_BUTTON, type: "button", title: tr("Open settings", "打开设置") }, icon("gear"));
+    gear.addEventListener("pointerdown", (ev) => {
+      swallow(ev);
+      openSettings();
+    }, true);
+    gear.addEventListener("click", swallow, true);
+    gear.addEventListener("touchstart", swallow, { capture: true, passive: false });
+    return h("div", { class: CLS_BADGE_CONTAINER }, h("div", { class: CLS_BADGE_INNER }, text, gear));
+  }
+  function renderBadge() {
+    const container = document.querySelector(`.${CLS_BADGE_CONTAINER}`);
+    if (!container)
+      return;
+    const text = container.querySelector(`.${CLS_BADGE_TEXT}`);
+    if (text) {
+      text.textContent = badgeText();
+      const tooltip = badgeTooltip();
+      if (tooltip)
+        text.title = tooltip;
+      else
+        text.removeAttribute("title");
+      text.classList.toggle("is-error", Boolean(tooltip));
+    }
+    const gear = container.querySelector(`.${CLS_SETTINGS_BUTTON}`);
+    if (gear)
+      gear.title = tr("Open settings", "打开设置");
+  }
+  function ensureBadge(ctx) {
+    if (document.querySelector(`.${CLS_BADGE_CONTAINER}`))
+      return;
+    const left = document.querySelector("#movie_player .ytp-left-controls") || document.querySelector(".ytp-left-controls");
+    const chapter = document.querySelector(".ytp-chapter-container");
+    const parent = left || chapter;
+    if (!parent)
+      return;
+    const badge = createBadge();
+    if (!left && chapter)
+      chapter.style.display = "flex";
+    parent.appendChild(badge);
+    ctx.onDispose(() => badge.remove());
+    setBadgeContainer(badge);
+  }
+  var playerBadge_default = definePlugin({
+    name: "PlayerBadge",
+    displayName: { en: "Player badge", zh: "播放器徽标" },
+    description: {
+      en: "Shows the last saved time and a settings button in the player controls, plus the dialog for conflicting timestamp links.",
+      zh: "在播放器控制栏显示上次保存时间和设置按钮，并在时间戳链接与存档冲突时弹出选择框。"
+    },
+    authors: ["0_V"],
+    icon: "tag",
+    required: true,
+    start(ctx) {
+      ensureFontAwesome();
+      ctx.addStyle(style_default);
+      let scheduled = false;
+      const schedule = () => {
+        if (scheduled)
+          return;
+        scheduled = true;
+        queueMicrotask(() => {
+          scheduled = false;
+          ensureBadge(ctx);
+        });
+      };
+      ensureBadge(ctx);
+      ctx.observe(document.documentElement, { childList: true, subtree: true }, schedule);
+      ctx.onDispose(badgeChanged.on(renderBadge));
+      ctx.listen(document, EVT_LANGUAGE, () => renderBadge());
+      setResumePromptImpl(createResumePrompt);
+      ctx.onDispose(() => setResumePromptImpl(null));
+    }
+  });
+
+  // src/plugins/_core/settings/ui.ts
+  function card(opts, ...children) {
+    return h("div", { class: `ysrp-card${opts.cls ? ` ${opts.cls}` : ""}` }, h("div", { class: "ysrp-card-head" }, h("span", { class: "ysrp-card-icon" }, icon(opts.icon)), h("span", { class: "ysrp-card-title", text: opts.title })), opts.desc ? h("div", { class: "ysrp-card-desc", text: opts.desc }) : null, ...children);
+  }
+  function button(label, opts = {}) {
+    const btn = h("button", {
+      class: `ysrp-btn${opts.small ? " is-small" : ""}${opts.cls ? ` ${opts.cls}` : ""}`,
+      type: "button",
+      title: opts.title
+    }, opts.icon ? icon(opts.icon) : null, h("span", { class: "ysrp-btn-label", text: label }));
+    if (opts.onClick)
+      btn.addEventListener("click", opts.onClick);
+    return btn;
+  }
+  function setButtonLabel(btn, label) {
+    const span = btn.querySelector(".ysrp-btn-label");
+    if (span)
+      span.textContent = label;
+  }
+  function iconButton(iconName, title, cls, onClick) {
+    const btn = h("button", { class: `ysrp-ibtn ${cls}`.trim(), type: "button", title, attrs: { "aria-label": title } }, icon(iconName));
+    if (onClick)
+      btn.addEventListener("click", onClick);
+    return btn;
+  }
+  function setIcon(btn, iconName) {
+    const i = btn.querySelector("i");
+    if (i)
+      i.className = `fa-solid fa-${iconName}`;
+  }
+  function switchControl(checked, onChange, opts = {}) {
+    const el = h("button", {
+      class: "ysrp-switch",
+      type: "button",
+      disabled: Boolean(opts.disabled),
+      dataset: opts.dataset,
+      attrs: { role: "switch", "aria-checked": String(checked), "aria-label": opts.label }
+    }, h("span", { class: "ysrp-switch-knob" }));
+    const set = (on) => {
+      el.setAttribute("aria-checked", String(on));
+      el.classList.toggle("is-on", on);
+    };
     set(checked);
-    node.disabled = disabled;
-    node.addEventListener("click", () => {
-      if (node.disabled)
+    el.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      if (el.disabled)
         return;
-      const next = node.getAttribute("aria-checked") !== "true";
+      const next = el.getAttribute("aria-checked") !== "true";
       set(next);
       onChange(next);
     });
-    return { node, set };
+    return { el, set };
   }
-  var visibleSettings = (plugin) => plugin.settings ? Object.entries(plugin.settings.def).filter(([, def]) => !def.hidden) : [];
-  function SettingRow(settings, key, def) {
-    const store = settings.store;
-    const label = h("div", { class: "ysrp-row-label" }, h("div", { class: "ysrp-row-title", text: def.description() }));
-    if (def.type === 2 /* BOOLEAN */) {
-      const sw = Switch(Boolean(store[key]), def.description(), (next) => {
-        store[key] = next;
+  function choiceGroup(name, options, selected, onSelect, cls = "") {
+    let current = selected;
+    const items = options.map((opt) => {
+      const radio = h("input", { type: "radio", name, value: opt.value, checked: opt.value === selected, disabled: Boolean(opt.disabled), class: "ysrp-choice-radio" });
+      const label = h("label", { class: `ysrp-choice${opt.disabled ? " is-disabled" : ""}`, dataset: { value: opt.value } }, radio, h("span", { class: "ysrp-choice-tag", text: opt.tag }), h("span", { class: "ysrp-choice-text" }, h("span", { class: "ysrp-choice-label", text: opt.label }), opt.hint ? h("span", { class: "ysrp-choice-hint", text: opt.hint }) : null));
+      label.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        if (opt.disabled || current === opt.value)
+          return;
+        set(opt.value);
+        onSelect(opt.value);
       });
-      sw.node.dataset.setting = key;
-      return { node: h("div", { class: "ysrp-setting-row" }, label, sw.node), reset: () => sw.set(Boolean(store[key])) };
-    }
-    if (def.type === 3 /* SELECT */) {
-      const select = h("select", { class: "ysrp-select", dataset: { setting: key } }, def.options.map((option) => h("option", { value: option.value, text: option.label() })));
-      select.value = String(store[key]);
-      select.addEventListener("change", () => {
-        store[key] = select.value;
-      });
-      return { node: h("div", { class: "ysrp-setting-row" }, label, select), reset: () => {
-        select.value = String(store[key]);
-      } };
-    }
-    const input = h("input", {
-      class: "ysrp-input",
-      type: def.type === 1 /* NUMBER */ ? "number" : "text",
-      placeholder: def.type === 0 /* STRING */ ? def.placeholder : undefined,
-      min: def.type === 1 /* NUMBER */ ? def.min : undefined,
-      max: def.type === 1 /* NUMBER */ ? def.max : undefined,
-      dataset: { setting: key }
+      return { opt, radio, label };
     });
-    input.value = String(store[key] ?? "");
-    input.addEventListener("change", () => {
-      store[key] = def.type === 1 /* NUMBER */ ? Number(input.value) : input.value;
-    });
-    return { node: h("div", { class: "ysrp-setting-row is-stacked" }, label, input), reset: () => {
-      input.value = String(store[key] ?? "");
-    } };
+    const set = (value) => {
+      current = value;
+      for (const item of items) {
+        const on = item.opt.value === value;
+        item.radio.checked = on;
+        item.label.classList.toggle("is-selected", on);
+      }
+    };
+    set(selected);
+    return { el: h("div", { class: `ysrp-choices${cls ? ` ${cls}` : ""}`, attrs: { role: "radiogroup" } }, items.map((i) => i.label)), value: () => current, set };
   }
-  function openPluginDialog(plugin, host) {
-    host.querySelector(".ysrp-dialog-layer")?.remove();
-    const settings = plugin.settings;
-    const entries = visibleSettings(plugin);
-    const rows = entries.map(([key, def]) => SettingRow(settings, key, def));
-    const layer = h("div", { class: "ysrp-dialog-layer" });
-    const close = () => layer.remove();
-    let armed = null;
-    const reset = h("button", { type: "button", class: "ysrp-btn is-small", text: t("Reset", "重置") });
-    reset.addEventListener("click", () => {
-      if (!armed) {
-        reset.textContent = t("Click again to reset", "再点一次确认重置");
-        reset.classList.add("is-armed");
-        armed = setTimeout(() => {
-          armed = null;
-          reset.classList.remove("is-armed");
-          reset.textContent = t("Reset", "重置");
+  function messageLine() {
+    const el = h("div", { class: "ysrp-msg", attrs: { role: "status", "aria-live": "polite" } });
+    return {
+      el,
+      set(text, tone = "neutral") {
+        const value = (text || "").trim();
+        el.textContent = value;
+        el.classList.toggle("is-visible", Boolean(value));
+        el.classList.toggle("is-success", Boolean(value) && tone === "success");
+        el.classList.toggle("is-error", Boolean(value) && tone === "error");
+      }
+    };
+  }
+  function field(label, control, hint) {
+    return h("label", { class: "ysrp-field" }, h("span", { class: "ysrp-field-label", text: label }), control, hint ? h("span", { class: "ysrp-field-hint", text: hint }) : null);
+  }
+  function infoRow(label, value) {
+    return h("div", { class: "ysrp-info-row" }, h("span", { class: "ysrp-info-label", text: label }), value);
+  }
+  function secretInput(input, labels) {
+    input.type = "password";
+    const toggle = button(labels.show, { small: true, cls: "ysrp-secret-toggle" });
+    toggle.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const reveal = input.type === "password";
+      input.type = reveal ? "text" : "password";
+      setButtonLabel(toggle, reveal ? labels.hide : labels.show);
+    });
+    return h("div", { class: "ysrp-secret" }, input, toggle);
+  }
+
+  // src/plugins/_core/settings/displayTab.ts
+  function createDisplayTab() {
+    return {
+      id: "display",
+      group: "main",
+      order: 30,
+      icon: "globe",
+      label: () => t("language.tabLabel", tr("Display", "界面")),
+      render(pane) {
+        const status = messageLine();
+        const active = h("span", { class: "ysrp-info-value" });
+        const browser = h("span", { class: "ysrp-info-value" });
+        const refreshInfo = () => {
+          active.textContent = languageName(getLanguage());
+          browser.textContent = languageName(detectBrowserLanguage());
+        };
+        const group = choiceGroup("ysrp-language-preference", LANGUAGE_OPTIONS.map((code) => ({
+          value: code,
+          tag: t(`language.badges.${code}`),
+          label: t(`language.options.${code}`),
+          hint: t(`language.optionHints.${code}`)
+        })), getPreference(), (value) => {
+          if (value === getPreference()) {
+            status.set(tr("Already using this language.", "当前已使用该语言。"));
+            return;
+          }
+          setPreference(value);
+          refreshInfo();
+          status.set(tr("Language preference updated.", "语言偏好已更新。"), "success");
+        }, "ysrp-language-options");
+        refreshInfo();
+        pane.appendChild(card({ icon: "globe", title: tr("Interface Language", "界面语言"), desc: t("language.description") }, group.el, h("div", { class: "ysrp-info" }, infoRow(tr("Active language", "当前语言"), active), infoRow(tr("Browser language", "浏览器语言"), browser)), status.el));
+      }
+    };
+  }
+
+  // src/plugins/_core/settings/pluginsTab.ts
+  function visibleSettings(plugin) {
+    return Object.entries(plugin.settings || {}).filter(([, def]) => !def.hidden);
+  }
+  function settingControl(plugin, key, def) {
+    const ctx = settingsContext(plugin);
+    const value = getSetting(plugin, key);
+    switch (def.type) {
+      case "switch":
+        return switchControl(Boolean(value), (on) => ctx.settings.set(key, on), { dataset: { setting: key }, label: pick(def.label) }).el;
+      case "select": {
+        const select = h("select", { class: "ysrp-select", dataset: { setting: key } }, (def.options || []).map((o) => h("option", { value: o.value, text: pick(o.label), selected: String(value) === o.value })));
+        select.addEventListener("change", () => ctx.settings.set(key, select.value));
+        return select;
+      }
+      case "number": {
+        const input = h("input", { class: "ysrp-input", type: "number", value: String(value ?? ""), min: def.min, max: def.max, step: def.step, placeholder: def.placeholder, dataset: { setting: key } });
+        input.addEventListener("change", () => {
+          const n = Number(input.value);
+          if (input.value.trim() !== "" && Number.isFinite(n))
+            ctx.settings.set(key, n);
+        });
+        return input;
+      }
+      default: {
+        const input = h("input", { class: "ysrp-input", type: "text", value: String(value ?? ""), placeholder: def.placeholder, dataset: { setting: key } });
+        input.addEventListener("input", () => ctx.settings.set(key, input.value));
+        return input;
+      }
+    }
+  }
+  function openPluginDialog(plugin, openDialog) {
+    const list = h("div", { class: "ysrp-setting-list" });
+    const settings = visibleSettings(plugin);
+    const renderList = () => {
+      clear(list);
+      for (const [key, def] of settings) {
+        const stacked = def.type === "text" || def.type === "number";
+        list.appendChild(h("div", { class: `ysrp-setting-row${stacked ? " is-stacked" : ""}` }, h("div", { class: "ysrp-setting-text" }, h("div", { class: "ysrp-setting-label", text: pick(def.label) }), def.description ? h("div", { class: "ysrp-setting-desc", text: pick(def.description) }) : null), settingControl(plugin, key, def)));
+      }
+    };
+    renderList();
+    let resetArmed = false;
+    let resetTimer = 0;
+    const resetLabel = tr("Reset", "重置");
+    const reset = button(resetLabel, { small: true });
+    reset.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      if (!resetArmed) {
+        resetArmed = true;
+        reset.classList.add("is-danger");
+        setButtonLabel(reset, tr("Click again to reset", "再点一次确认重置"));
+        resetTimer = window.setTimeout(() => {
+          resetArmed = false;
+          reset.classList.remove("is-danger");
+          setButtonLabel(reset, resetLabel);
         }, 3000);
         return;
       }
-      clearTimeout(armed);
-      armed = null;
-      for (const [key, def] of entries) {
-        if (getPluginSettings(plugin.name)?.[key] !== undefined)
-          setPluginSetting(plugin.name, key, defaultValue(def));
-      }
-      for (const row of rows)
-        row.reset();
-      reset.classList.remove("is-armed");
-      reset.textContent = t("Reset", "重置");
+      clearTimeout(resetTimer);
+      resetArmed = false;
+      reset.classList.remove("is-danger");
+      setButtonLabel(reset, resetLabel);
+      settingsContext(plugin).settings.reset();
+      renderList();
     });
-    const dialog = h("div", { class: "ysrp-dialog", role: "dialog", "aria-label": plugin.title(), dataset: { plugin: plugin.name } }, h("button", { type: "button", class: "ysrp-close ysrp-dialog-close", title: t("Close", "关闭"), "aria-label": t("Close", "关闭"), onclick: close }, icon("xmark")), h("div", { class: "ysrp-dialog-header" }, h("div", { class: "ysrp-dialog-title", text: plugin.title() }), h("div", { class: "ysrp-dialog-desc", text: plugin.description() })), h("div", { class: "ysrp-separator" }), h("div", { class: "ysrp-dialog-field" }, h("div", { class: "ysrp-dialog-label", text: t("Authors", "作者") }), h("div", { class: "ysrp-dialog-text", text: plugin.authors.join(", ") })), h("div", { class: "ysrp-dialog-field is-grow" }, h("div", { class: "ysrp-dialog-label", text: t("Settings", "设置") }), rows.length ? h("div", { class: "ysrp-dialog-settings" }, rows.map((r) => r.node)) : h("div", { class: "ysrp-dialog-text", text: t("No configurable settings.", "没有可配置的设置。") })), rows.length ? h("div", { class: "ysrp-dialog-footer" }, reset) : null);
-    layer.addEventListener("click", (event) => {
-      if (event.target === layer)
-        close();
+    const closeBtn = h("button", { class: "ysrp-close ysrp-dialog-close", type: "button", title: tr("Close", "关闭"), attrs: { "aria-label": tr("Close", "关闭") } }, icon("xmark"));
+    const dialog = h("div", { class: "ysrp-dialog", attrs: { role: "dialog", "aria-modal": "true" } }, closeBtn, h("div", { class: "ysrp-dialog-title", text: pick(plugin.displayName) }), h("div", { class: "ysrp-dialog-desc", text: pick(plugin.description) }), h("hr", { class: "ysrp-sep" }), h("div", { class: "ysrp-dialog-subtitle", text: tr("Authors", "作者") }), h("div", { class: "ysrp-dialog-authors", text: plugin.authors.join(", ") }), h("div", { class: "ysrp-dialog-subtitle", text: tr("Settings", "设置") }), settings.length ? list : h("div", { class: "ysrp-empty", text: tr("No configurable settings.", "没有可配置的设置项。") }), settings.length ? h("div", { class: "ysrp-dialog-footer" }, reset) : null);
+    const close = openDialog(dialog, () => clearTimeout(resetTimer));
+    closeBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      close();
     });
-    layer.appendChild(dialog);
-    host.appendChild(layer);
   }
-  function PluginCard(plugin, openSettings) {
-    const sw = Switch(isPluginEnabled(plugin.name), plugin.title(), (next) => setPluginEnabled(plugin.name, next), Boolean(plugin.required));
-    sw.node.dataset.plugin = plugin.name;
-    const controls = h("div", { class: "ysrp-card-controls" });
-    if (visibleSettings(plugin).length) {
-      controls.appendChild(iconButton("sliders", t("Settings", "设置"), () => openSettings(plugin), "ysrp-plugin-config"));
-    }
-    controls.appendChild(sw.node);
-    const node = h("div", { class: `ysrp-plugin${plugin.required ? " is-required" : ""}`, dataset: { plugin: plugin.name } }, h("div", { class: "ysrp-plugin-body" }, h("div", { class: "ysrp-plugin-head" }, h("div", { class: "ysrp-plugin-name" }, h("span", { class: "ysrp-plugin-icon" }, icon(plugin.icon || "puzzle-piece")), h("span", { class: "ysrp-plugin-title", text: plugin.title(), title: plugin.title() }), plugin.required ? h("span", { class: "ysrp-plugin-tag", title: t("Core plugin, always on", "核心插件，始终开启") }, icon("circle-exclamation")) : null), controls), h("div", { class: "ysrp-plugin-desc", text: plugin.description() })), h("div", { class: "ysrp-separator" }), h("div", { class: "ysrp-plugin-footer", text: plugin.authors.join(", ") || " " }));
+  function createPluginsTab(openDialog) {
     return {
-      node,
-      plugin,
-      render() {
-        sw.set(isPluginEnabled(plugin.name));
-        sw.node.title = plugin.required ? t("Core plugin, always on", "核心插件，始终开启") : isPluginEnabled(plugin.name) ? t("Turn off", "关闭") : t("Turn on", "开启");
+      id: "plugins",
+      group: "plugins",
+      order: 10,
+      icon: "puzzle-piece",
+      label: () => tr("Plugins", "插件"),
+      render(pane) {
+        const plugins = listPlugins();
+        const search = h("input", { class: "ysrp-input ysrp-search", type: "search", placeholder: tr("Search {n} plugins...", "搜索 {n} 个插件...", { n: plugins.length }) });
+        const filter = h("select", { class: "ysrp-select ysrp-filter" }, h("option", { value: "all", text: tr("All", "全部") }), h("option", { value: "enabled", text: tr("Enabled", "已开启") }), h("option", { value: "disabled", text: tr("Disabled", "已关闭") }));
+        const normalGrid = h("div", { class: "ysrp-plugin-grid" });
+        const divider = h("hr", { class: "ysrp-sep ysrp-core-sep" });
+        const coreGrid = h("div", { class: "ysrp-plugin-grid is-core" });
+        const empty = h("div", { class: "ysrp-empty", text: tr("No plugins match your search.", "没有符合条件的插件。") });
+        const container = h("div", { class: "ysrp-plugins" }, normalGrid, divider, coreGrid, empty);
+        const cards = new Map;
+        const build = () => {
+          clear(normalGrid);
+          clear(coreGrid);
+          cards.clear();
+          const byName = (a, b) => a.name.localeCompare(b.name);
+          const ordered = [...plugins.filter((p) => !p.required).sort(byName), ...plugins.filter((p) => p.required).sort(byName)];
+          for (const plugin of ordered) {
+            const enabled = isEnabled(plugin);
+            const toggle = switchControl(enabled, (on) => setPluginEnabled(plugin.name, on), {
+              disabled: plugin.required,
+              dataset: { plugin: plugin.name },
+              label: pick(plugin.displayName)
+            });
+            const config = visibleSettings(plugin).length ? h("button", { class: "ysrp-ibtn ysrp-plugin-config", type: "button", title: tr("Configure", "配置"), attrs: { "aria-label": tr("Configure", "配置") } }, icon("sliders")) : null;
+            config?.addEventListener("click", (ev) => {
+              ev.preventDefault();
+              openPluginDialog(plugin, openDialog);
+            });
+            const name = h("span", { class: "ysrp-plugin-name", text: pick(plugin.displayName), title: pick(plugin.displayName) });
+            const cardEl = h("div", { class: `ysrp-plugin${plugin.required ? " is-core" : ""}`, dataset: { plugin: plugin.name } }, h("div", { class: "ysrp-plugin-head" }, h("span", { class: "ysrp-card-icon" }, icon(plugin.icon)), name, plugin.required ? h("span", { class: "ysrp-core-mark", title: tr("Core plugin, always on", "核心插件，始终开启") }, icon("circle-exclamation")) : null, h("span", { class: "ysrp-plugin-tools" }, config, toggle.el)), h("div", { class: "ysrp-plugin-desc", text: pick(plugin.description) }), h("hr", { class: "ysrp-sep" }), h("div", { class: "ysrp-plugin-authors", text: plugin.authors.join(", ") }));
+            cards.set(plugin.name, cardEl);
+            (plugin.required ? coreGrid : normalGrid).appendChild(cardEl);
+          }
+          applyFilter();
+        };
+        const applyFilter = () => {
+          const q = search.value.trim().toLowerCase();
+          const mode = filter.value;
+          let normalShown = 0;
+          let coreShown = 0;
+          for (const plugin of plugins) {
+            const el = cards.get(plugin.name);
+            if (!el)
+              continue;
+            const haystack = [plugin.name, pick(plugin.displayName), pick(plugin.description), ...plugin.authors].join(`
+`).toLowerCase();
+            const enabled = isEnabled(plugin);
+            const ok = (!q || haystack.includes(q)) && (mode === "all" || (mode === "enabled" ? enabled : !enabled));
+            el.style.display = ok ? "" : "none";
+            if (ok) {
+              if (plugin.required)
+                coreShown++;
+              else
+                normalShown++;
+            }
+          }
+          normalGrid.style.display = normalShown ? "" : "none";
+          coreGrid.style.display = coreShown ? "" : "none";
+          divider.style.display = normalShown && coreShown ? "" : "none";
+          empty.style.display = normalShown || coreShown ? "none" : "";
+        };
+        search.addEventListener("input", applyFilter);
+        filter.addEventListener("change", applyFilter);
+        const off = pluginsChanged.on(build);
+        build();
+        pane.append(h("div", { class: "ysrp-tab-intro", text: tr("Turn features on or off. Changes apply immediately. Click the sliders icon to configure.", "开启或关闭各项功能，立即生效。点滑杆图标进行配置。") }), h("div", { class: "ysrp-searchbar" }, search, filter), container);
+        return off;
       }
     };
   }
-  function PluginsPane() {
-    const all = listPlugins();
-    const optional = all.filter((p) => !p.required);
-    const required = all.filter((p) => p.required);
-    let search = "";
-    let filter = "all";
-    const node = h("div", { class: "ysrp-plugins" });
-    const openSettings = (plugin) => {
-      const host = node.closest(".ysrp-settings-container");
-      if (host)
-        openPluginDialog(plugin, host);
-    };
-    const cards = [...optional, ...required].map((p) => PluginCard(p, openSettings));
-    const input = h("input", { class: "ysrp-input ysrp-search", type: "text", placeholder: t("Search {n} plugins...", "搜索 {n} 个插件...", { n: all.length }) });
-    const select = h("select", { class: "ysrp-select ysrp-filter" }, h("option", { value: "all", text: t("All", "全部") }), h("option", { value: "enabled", text: t("Enabled", "已开启") }), h("option", { value: "disabled", text: t("Disabled", "已关闭") }));
-    const userGrid = h("div", { class: "ysrp-grid" });
-    const requiredGrid = h("div", { class: "ysrp-grid" });
-    const divider = h("div", { class: "ysrp-separator" });
-    const empty = h("div", { class: "ysrp-empty", text: t("No plugins match your search.", "没有符合条件的插件。") });
-    function apply() {
-      const q = search.trim().toLowerCase();
-      const visible = (c) => {
-        const enabled = isPluginEnabled(c.plugin.name);
-        if (filter === "enabled" && !enabled)
-          return false;
-        if (filter === "disabled" && enabled)
-          return false;
-        return !q || `${c.plugin.name} ${c.plugin.title()} ${c.plugin.description()} ${c.plugin.authors.join(" ")}`.toLowerCase().includes(q);
+
+  // src/plugins/_core/settings/recordsTab.ts
+  var uiStates = new Map;
+  var availability = new Map;
+  function uiFor(videoId) {
+    let s = uiStates.get(videoId);
+    if (!s) {
+      s = {};
+      uiStates.set(videoId, s);
+    }
+    return s;
+  }
+  function forgetRowUi(videoId) {
+    uiStates.delete(videoId);
+  }
+  var rowCount = 0;
+  function recordsHeading() {
+    return tr("Saved Videos - ({count})", "已保存视频 - ({count})", { count: rowCount });
+  }
+  function progressText(videoId, record, liveProgress) {
+    if (!record)
+      return "0%";
+    const progress = Number(liveProgress ?? record.videoProgress);
+    const seconds = Number.isFinite(progress) && progress > 0 ? progress : 0;
+    let duration = Number(record.videoDuration);
+    if (!(duration > 0) && videoId === urlVideoId())
+      duration = currentDuration();
+    if (duration > 0)
+      return `${Math.min(100, Math.max(0, seconds / duration * 100)).toFixed(1)}%`;
+    return formatTime(seconds);
+  }
+  async function persistDearrow(videoId, title) {
+    try {
+      const rec = readRecord(videoId);
+      if (!rec)
+        return;
+      if (typeof rec.originalTitle !== "string" || !rec.originalTitle.trim())
+        await fetchOriginalTitle(videoId);
+      updateRecord(videoId, (cur) => {
+        if (!cur)
+          return null;
+        if (typeof cur.originalTitle === "string" && sameTitle(cur.originalTitle, title))
+          return null;
+        if (cur.videoName === title)
+          return null;
+        return { ...cur, videoName: title };
+      }, "content");
+    } catch (err) {
+      console.warn("[Video Memory] Failed to persist DeArrow title to storage:", err);
+    }
+  }
+  var LOADING_ORIGINAL = () => tr("Loading original title…", "正在获取原标题…");
+  var ORIGINAL_UNAVAILABLE = () => tr("Original title unavailable", "未找到原标题");
+
+  class RecordRow {
+    entry;
+    onDeleted;
+    li;
+    titleEl;
+    pctEl;
+    daBtn = null;
+    dearrow = null;
+    original = null;
+    originalDone = false;
+    loadingOriginal = false;
+    disposers = [];
+    ui;
+    constructor(entry, isCurrent, onDeleted) {
+      this.entry = entry;
+      this.onDeleted = onDeleted;
+      const { videoId, record } = entry;
+      this.ui = uiFor(videoId);
+      this.pctEl = h("span", { class: "ysrp-pct ysrp-record-progress", text: progressText(videoId, record) });
+      this.titleEl = h("span", { class: "ysrp-title ysrp-record-title" });
+      const top = h("div", { class: "ysrp-row-top" }, this.pctEl, this.titleEl);
+      this.li = h("li", { class: `ysrp-row${isCurrent ? " is-current" : ""}`, dataset: { videoId } }, top);
+      this.initTitles();
+      const ctx = {
+        videoId,
+        record,
+        url: watchUrl(videoId),
+        isCurrent,
+        ui: this.ui,
+        title: () => this.titleEl.textContent || UNKNOWN_TITLE
       };
-      const user = cards.filter((c) => !c.plugin.required && visible(c));
-      const core = cards.filter((c) => c.plugin.required && visible(c));
-      userGrid.replaceChildren(...user.map((c) => c.node));
-      requiredGrid.replaceChildren(...core.map((c) => c.node));
-      userGrid.hidden = !user.length;
-      requiredGrid.hidden = !core.length;
-      divider.hidden = !user.length || !core.length;
-      empty.hidden = Boolean(user.length || core.length);
-    }
-    input.addEventListener("input", () => {
-      search = input.value;
-      apply();
-    });
-    select.addEventListener("change", () => {
-      filter = select.value;
-      apply();
-    });
-    node.append(h("div", { class: "ysrp-pane-hint", text: t("Turn features on or off. Changes apply immediately. Click the sliders icon to configure.", "开启或关闭各项功能，立即生效。点滑杆图标进行配置。") }), h("div", { class: "ysrp-search-bar" }, input, select), userGrid, divider, requiredGrid, empty);
-    apply();
-    const off = onPluginToggle(() => {
-      for (const c of cards)
-        c.render();
-      apply();
-    });
-    return {
-      node,
-      refresh() {
-        for (const c of cards)
-          c.render();
-        apply();
-      },
-      destroy: off
-    };
-  }
-
-  // src/plugins/_core/settings/RecordsPane.ts
-  var logger4 = new Logger("Records");
-  function RecordsPane(ctx) {
-    const list2 = h("ul", { class: "ysrp-list" });
-    const empty = h("div", { class: "ysrp-empty", text: t("No saved videos yet.", "还没有保存的视频。") });
-    const node = h("div", {}, empty, list2);
-    const rows = new Map;
-    let renderedKey = null;
-    function render() {
-      ctx.spin(true);
-      try {
-        const current = currentId();
-        const items = list().sort((a, b) => Number(b.id === current) - Number(a.id === current) || (Number(b.rec.saveDate) || 0) - (Number(a.rec.saveDate) || 0));
-        ctx.setCount(items.length);
-        empty.style.display = items.length ? "none" : "";
-        const key = `${current}|${items.map((item) => item.id).join(",")}`;
-        if (key !== renderedKey) {
-          renderedKey = key;
-          const next = new Map;
-          list2.replaceChildren(...items.map(({ id, rec }) => {
-            const row = rows.get(id) || RecordRow(id, rec, () => remove2(id));
-            next.set(id, row);
-            return row.node;
-          }));
-          rows.clear();
-          next.forEach((row, id) => rows.set(id, row));
-        }
-        for (const { id, rec } of items)
-          rows.get(id)?.update(rec, id === current);
-      } finally {
-        ctx.spin(false);
-      }
-    }
-    function remove2(id) {
-      remove(id);
-      for (const action of getRecordActions())
-        action.onRemoved?.(id);
-      render();
-    }
-    ctx.listen(document, EVT_RECORD, () => {
-      if (isOpen())
-        render();
-    });
-    ctx.listen(document, EVT_VIDEO, () => {
-      if (isOpen())
-        render();
-    });
-    ctx.listen(document, EVT_TITLE, (event) => {
-      const detail = event.detail;
-      if (detail && rows.has(detail.videoId))
-        rows.get(detail.videoId)?.setDeArrow(detail.title);
-    });
-    const offActions = onRecordActionsChange(() => {
-      rows.clear();
-      renderedKey = null;
-      if (isOpen())
-        render();
-    });
-    return { node, refresh: render, destroy: offActions };
-  }
-  function RecordRow(id, initialRecord, onDelete) {
-    const url = `https://www.youtube.com/watch?v=${id}`;
-    let rec = initialRecord;
-    let isCurrent = false;
-    let original = normTitle(rec.originalTitle) || knownOriginal(id) || null;
-    let dearrow;
-    let showOriginal = false;
-    const titleEl = h("span", { class: "ysrp-title" });
-    const pctEl = h("span", { class: "ysrp-pct" });
-    const daButton = h("button", { type: "button", class: "ysrp-ibtn ysrp-da" }, deArrowIcon());
-    daButton.addEventListener("click", () => {
-      if (typeof dearrow !== "string")
-        return;
-      showOriginal = !showOriginal;
-      if (showOriginal && !original) {
-        titleEl.textContent = t("Loading original title…", "正在获取原标题…");
-        getOriginal(id).then((value) => {
-          original = value || original;
-          renderTitle();
-        });
-        return;
-      }
-      renderTitle();
-    });
-    const storedName = () => isPlaceholderTitle(rec.videoName) ? null : normTitle(rec.videoName);
-    function renderTitle() {
-      const missing = t("Original title unavailable", "未找到原标题");
-      if (dearrow === null) {
-        daButton.remove();
-        titleEl.textContent = original || storedName() || missing;
-        return;
-      }
-      if (dearrow === undefined) {
-        daButton.disabled = true;
-        daButton.classList.add("is-pending");
-        daButton.title = t("Checking DeArrow title…", "正在检测 DeArrow 标题…");
-        titleEl.textContent = original || storedName() || t("Loading original title…", "正在获取原标题…");
-        return;
-      }
-      daButton.disabled = false;
-      daButton.classList.remove("is-pending");
-      daButton.classList.toggle("is-off", showOriginal);
-      daButton.title = showOriginal ? t("Show DeArrow title", "恢复 DeArrow 标题") : t("Show original title", "显示原标题");
-      daButton.setAttribute("aria-label", daButton.title);
-      titleEl.textContent = showOriginal ? original || missing : dearrow;
-    }
-    function setDeArrow(value) {
-      const title = normTitle(value);
-      if (title && !sameTitle(title, original)) {
-        dearrow = title;
-        if (rec.videoName !== title)
-          updateIfExists(id, (r) => Object.assign(r, { videoName: title }));
-      } else {
-        dearrow = null;
-        if (isPlaceholderTitle(rec.videoName) && original)
-          updateIfExists(id, (r) => Object.assign(r, { videoName: original }));
-      }
-      renderTitle();
-    }
-    function resolveTitles() {
-      const cached = knownDeArrow(id);
-      if (cached !== undefined)
-        setDeArrow(cached);
-      else if (original && storedName() && !sameTitle(storedName(), original)) {
-        dearrow = storedName();
-        renderTitle();
-      }
-      const originalReady = original ? Promise.resolve(original) : getOriginal(id);
-      originalReady.then((value) => {
-        if (value && !original) {
-          original = value;
-          renderTitle();
-        }
-        if (knownDeArrow(id) !== undefined || typeof dearrow === "string")
-          return;
-        return getDeArrow(id).then(setDeArrow);
-      });
-    }
-    const copiedTip = h("span", { class: "ysrp-status", text: t("Copied", "已复制"), style: { display: "none", flex: "0 0 auto" } });
-    const copyBtn = iconButton("copy", t("Copy URL", "复制 URL"), async () => {
-      try {
-        await navigator.clipboard.writeText(url);
-        copyBtn.classList.add("is-copied");
-        setIcon(copyBtn, "check");
-        copiedTip.style.display = "";
-        setTimeout(() => {
-          copyBtn.classList.remove("is-copied");
-          setIcon(copyBtn, "copy");
-        }, 1000);
-        setTimeout(() => {
-          copiedTip.style.display = "none";
-        }, 2000);
-      } catch (err) {
-        logger4.error("copy failed", err);
-      }
-    }, "is-link");
-    const linkPanel = h("div", { class: "ysrp-panel ysrp-link-container" }, h("div", { class: "ysrp-url" }, h("span", { text: t("URL: {url}", "链接：{url}", { url }) }), copiedTip, copyBtn, iconButton("arrow-up-right-from-square", t("Open in new tab", "在新标签页中打开 URL"), () => window.open(url, "_blank"), "is-note")));
-    let editing = false;
-    let noteTextarea = null;
-    const noteText = h("div", { class: "ysrp-note-text" });
-    const noteEditButton = iconButton("pencil", t("Edit note", "编辑笔记"), () => editing ? commitNote() : startNote(), "is-link");
-    const notePanel = h("div", { class: "ysrp-panel ysrp-note-container" }, h("div", { class: "ysrp-panel-head" }, h("strong", { class: "ysrp-panel-label", text: t("Notes", "笔记") }), noteEditButton), noteText);
-    const noteValue = () => typeof rec.videoNote === "string" ? rec.videoNote : "";
-    function renderNote() {
-      const value = noteValue();
-      noteText.textContent = value || t("No notes yet", "暂无笔记");
-      noteText.classList.toggle("is-empty", !value);
-      const noteOpen = notePanel.classList.contains("is-open");
-      noteButton.title = editing ? t("Save & collapse note", "保存并折叠笔记") : value ? noteOpen ? t("Hide notes", "隐藏笔记") : t("Show notes", "显示笔记") : t("Add note", "添加笔记");
-      noteEditButton.title = editing ? t("Save note", "保存笔记") : t("Edit note", "编辑笔记");
-      setIcon(noteEditButton, editing ? "floppy-disk" : "pencil");
-    }
-    function setNoteOpen(open) {
-      notePanel.classList.toggle("is-open", open);
-      renderNote();
-    }
-    function startNote() {
-      if (editing)
-        return;
-      editing = true;
-      const textarea = h("textarea", { class: "ysrp-textarea", rows: "3" });
-      textarea.value = noteValue();
-      noteTextarea = textarea;
-      noteText.replaceWith(textarea);
-      setNoteOpen(true);
-      requestAnimationFrame(() => {
+      const panels = [];
+      for (const contribution of listRowButtons()) {
         try {
-          textarea.focus();
-          textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+          const parts = contribution.create(ctx);
+          if (!parts)
+            continue;
+          top.appendChild(parts.button);
+          if (parts.panel)
+            panels.push({ order: contribution.panelOrder ?? contribution.order, el: parts.panel });
+          if (parts.dispose)
+            this.disposers.push(parts.dispose);
+        } catch (err) {
+          console.error(`[Video Memory] Row button ${contribution.id} failed:`, err);
+        }
+      }
+      top.appendChild(iconButton("trash-can", tr("Delete record", "删除保存记录"), "is-delete", (ev) => {
+        ev.preventDefault();
+        this.delete();
+      }));
+      panels.sort((a, b) => a.order - b.order);
+      for (const p of panels)
+        this.li.appendChild(p.el);
+    }
+    get videoId() {
+      return this.entry.videoId;
+    }
+    updateProgress(liveProgress) {
+      this.pctEl.textContent = progressText(this.videoId, readRecord(this.videoId), liveProgress);
+    }
+    destroy() {
+      for (const fn of this.disposers.splice(0)) {
+        try {
+          fn();
         } catch {}
+      }
+    }
+    delete() {
+      removeRecord(this.videoId, "delete");
+      forgetRowUi(this.videoId);
+      this.destroy();
+      this.li.remove();
+      this.onDeleted(this);
+    }
+    initTitles() {
+      const { videoId, record } = this.entry;
+      const storedOriginal = typeof record.originalTitle === "string" ? normalizeTitle(record.originalTitle) : "";
+      this.original = storedOriginal || cachedOriginalTitle(videoId) || getSources(videoId).original || null;
+      this.originalDone = Boolean(this.original);
+      const avail = availability.get(videoId);
+      if (avail && avail.state === "missing") {
+        this.dearrow = null;
+      } else {
+        const fromName = normalizeTitle(record.videoName);
+        const candidates = [
+          getSources(videoId).dearrow,
+          resolveTitle(videoId).source === "dearrow" ? resolveTitle(videoId).title : "",
+          avail && avail.state === "available" ? avail.title : "",
+          cachedDearrow(videoId) || "",
+          !isPlaceholderTitle(fromName) && !sameTitle(fromName, this.original) ? fromName : ""
+        ];
+        this.dearrow = candidates.find((c) => c && !sameTitle(c, this.original)) || null;
+        if (this.dearrow)
+          availability.set(videoId, { state: "available", title: this.dearrow });
+      }
+      if (!(avail && avail.state === "missing")) {
+        this.daBtn = h("button", { class: "ysrp-ibtn ysrp-da", type: "button" }, dearrowIcon(20));
+        this.daBtn.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          this.toggleDearrow();
+        });
+        this.titleEl.after(this.daBtn);
+      }
+      this.renderTitle();
+      if (this.daBtn && !this.dearrow) {
+        fetchDearrowTitle(videoId).then((title) => {
+          const clean = title ? normalizeTitle(title) : "";
+          if (clean && !sameTitle(clean, this.original))
+            this.applyDearrow(clean);
+          else
+            this.markMissing();
+        }).catch((err) => console.warn("[Video Memory] Failed to load DeArrow title for records list:", err));
+      }
+      if (!this.original) {
+        fetchOriginalTitle(videoId).then((title) => {
+          this.originalDone = true;
+          if (title)
+            this.original = normalizeTitle(title);
+          if (this.dearrow && this.original && sameTitle(this.dearrow, this.original)) {
+            this.dearrow = null;
+            this.markMissing();
+            return;
+          }
+          this.renderTitle();
+        });
+      }
+    }
+    applyDearrow(title) {
+      const clean = normalizeTitle(title);
+      if (!clean || isPlaceholderTitle(clean) || sameTitle(clean, this.original))
+        return;
+      availability.set(this.videoId, { state: "available", title: clean });
+      persistDearrow(this.videoId, clean);
+      this.dearrow = clean;
+      if (!this.daBtn) {
+        this.daBtn = h("button", { class: "ysrp-ibtn ysrp-da", type: "button" }, dearrowIcon(20));
+        this.daBtn.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          this.toggleDearrow();
+        });
+        this.titleEl.after(this.daBtn);
+      }
+      this.renderTitle();
+    }
+    markMissing() {
+      if (this.dearrow)
+        return;
+      availability.set(this.videoId, { state: "missing" });
+      this.daBtn?.remove();
+      this.daBtn = null;
+      this.ui.showOriginal = false;
+      this.renderTitle();
+    }
+    showingOriginal() {
+      return !this.dearrow || this.ui.showOriginal === true;
+    }
+    renderTitle() {
+      let text;
+      if (!this.showingOriginal() && this.dearrow)
+        text = this.dearrow;
+      else if (this.loadingOriginal)
+        text = LOADING_ORIGINAL();
+      else if (this.original)
+        text = this.original;
+      else if (this.originalDone)
+        text = ORIGINAL_UNAVAILABLE();
+      else
+        text = LOADING_ORIGINAL();
+      this.titleEl.textContent = text;
+      this.titleEl.title = text;
+      const btn = this.daBtn;
+      if (!btn)
+        return;
+      const ready = Boolean(this.dearrow);
+      btn.dataset.state = ready ? "ready" : "pending";
+      btn.disabled = !ready;
+      btn.dataset.loading = this.loadingOriginal ? "true" : "false";
+      btn.classList.toggle("is-off", ready && this.showingOriginal());
+      const tip = !ready ? tr("Checking DeArrow title…", "正在检测 DeArrow 标题…") : this.showingOriginal() ? tr("Show DeArrow title", "恢复 DeArrow 标题") : tr("Show original title", "显示原标题");
+      btn.title = tip;
+      btn.setAttribute("aria-label", tip);
+    }
+    toggleDearrow() {
+      if (!this.dearrow || this.loadingOriginal)
+        return;
+      if (this.showingOriginal()) {
+        this.ui.showOriginal = false;
+        this.renderTitle();
+        return;
+      }
+      this.ui.showOriginal = true;
+      if (this.original || this.originalDone) {
+        this.renderTitle();
+        return;
+      }
+      this.loadingOriginal = true;
+      this.renderTitle();
+      fetchOriginalTitle(this.videoId).then((title) => {
+        this.originalDone = true;
+        if (title)
+          this.original = normalizeTitle(title);
+      }).finally(() => {
+        this.loadingOriginal = false;
+        this.renderTitle();
       });
     }
-    function commitNote() {
-      if (!editing || !noteTextarea)
-        return;
-      const value = noteTextarea.value.trim();
-      editing = false;
-      noteTextarea.replaceWith(noteText);
-      noteTextarea = null;
-      try {
-        rec = update(id, (r) => {
-          if (value)
-            r.videoNote = value;
-          else
-            delete r.videoNote;
-          return r;
-        });
-      } catch (err) {
-        logger4.error("Failed to save note", err);
-      }
-      renderNote();
-    }
-    const actions = getRecordActions().map((action) => action.create({ id, url, record: () => rec }));
-    const noteButton = iconButton("pen-to-square", t("Show notes", "显示笔记"), () => {
-      if (editing) {
-        commitNote();
-        setNoteOpen(false);
-        return;
-      }
-      if (!noteValue()) {
-        startNote();
-        return;
-      }
-      setNoteOpen(!notePanel.classList.contains("is-open"));
-    }, "is-note");
-    const linkButton = iconButton("link", t("Show / hide URL", "显示/隐藏 URL"), () => linkPanel.classList.toggle("is-open"), "is-link");
-    const deleteButton = iconButton("trash-can", t("Delete record", "删除保存记录"), () => onDelete(), "is-delete");
-    const node = h("li", { class: "ysrp-row", dataset: { videoId: id } }, h("div", { class: "ysrp-row-top" }, pctEl, titleEl, daButton, actions.map((a) => a.button), noteButton, linkButton, deleteButton), linkPanel, actions.map((a) => a.panel), notePanel);
-    function renderPercent() {
-      const progress = Number(rec.videoProgress) || 0;
-      const duration = Number(rec.videoDuration) || (isCurrent ? currentDuration() : 0);
-      pctEl.textContent = duration > 0 ? `${Math.min(100, progress / duration * 100).toFixed(1)}%` : formatTime(progress);
-      pctEl.title = duration > 0 ? `${formatTime(progress)} / ${formatTime(duration)}` : t("Saved position", "保存的位置");
-    }
-    function update2(nextRecord, current) {
-      rec = nextRecord;
-      isCurrent = Boolean(current);
-      node.classList.toggle("is-current", isCurrent);
-      if (!original && normTitle(rec.originalTitle))
-        original = normTitle(rec.originalTitle);
-      renderPercent();
-      renderTitle();
-      if (!editing)
-        renderNote();
-      for (const action of actions)
-        action.update?.(rec);
-    }
-    renderTitle();
-    renderNote();
-    resolveTitles();
-    return { node, update: update2, setDeArrow };
   }
 
-  // src/plugins/_core/settings/StoragePane.ts
-  function StoragePane(ctx) {
-    const modeMsg = h("div", { class: "ysrp-msg", style: { display: "none" } });
-    const modeChoice = ChoiceGroup("ysrp-storage-mode", "--ysrp-storage", [
-      { value: "local", badge: t("LOCAL", "本地"), label: t("localStorage (default)", "localStorage（默认）"), hint: t("Fast storage scoped to this browser profile.", "快速、本地浏览器可用的存储。") },
-      { value: "gm", badge: "GM", label: t("GM storage", "GM 存储"), hint: hasGM ? t("Userscript-manager storage that can sync across profiles.", "由脚本管理器提供、可在配置间同步的存储。") : t("Not available in this userscript manager.", "当前脚本管理器不支持。"), disabled: !hasGM }
-    ], getMode());
-    const applyButton = textButton("right-left", t("Apply & Migrate", "应用并迁移"), () => {
-      const target = modeChoice.value();
-      if (!target || target === getMode()) {
-        setMessage(modeMsg, t("Already using this backend.", "当前已在使用该存储。"));
+  class RecordsList {
+    setBusy;
+    list;
+    rows = new Map;
+    renderedCurrent = null;
+    building = false;
+    disposers = [];
+    constructor(pane, setBusy) {
+      this.setBusy = setBusy;
+      this.list = h("ul", { class: "ysrp-records" });
+      pane.appendChild(this.list);
+      const on = (type, fn) => {
+        const wrapped = (ev) => {
+          if (isSettingsOpen() && this.list.isConnected)
+            fn(ev);
+        };
+        document.addEventListener(type, wrapped);
+        this.disposers.push(() => document.removeEventListener(type, wrapped));
+      };
+      on(EVT_RECORD_UPDATED, (ev) => {
+        const id = ev.detail && ev.detail.videoId;
+        if (!id)
+          return;
+        const row = this.rows.get(id);
+        if (!row)
+          return this.rebuild();
+        const live = typeof ev.detail.videoProgress === "number" ? ev.detail.videoProgress : undefined;
+        row.updateProgress(live);
+      });
+      on(EVT_VIDEO_STATUS, (ev) => {
+        const id = ev.detail ? ev.detail.videoId : undefined;
+        if (id !== undefined && (id || null) !== this.renderedCurrent)
+          this.rebuild();
+      });
+      on(EVT_DEARROW_READY, (ev) => {
+        const { videoId, title } = ev.detail || {};
+        if (!videoId || !title)
+          return;
+        this.rows.get(videoId)?.applyDearrow(title);
+      });
+      this.disposers.push(rowsChanged.on(() => {
+        if (isSettingsOpen())
+          this.rebuild();
+      }));
+      this.disposers.push(recordChanges.on((change) => {
+        if (change.kind === "bulk" && isSettingsOpen())
+          this.rebuild();
+      }));
+    }
+    destroy() {
+      for (const fn of this.disposers.splice(0))
+        fn();
+      for (const row of this.rows.values())
+        row.destroy();
+      this.rows.clear();
+    }
+    rebuild() {
+      if (this.building)
+        return;
+      this.building = true;
+      this.setBusy(true);
+      try {
+        for (const row of this.rows.values())
+          row.destroy();
+        this.rows.clear();
+        clear(this.list);
+        const current = urlVideoId() || null;
+        this.renderedCurrent = current;
+        const entries = listRecords().filter((e) => {
+          if (!e.record)
+            console.warn("[Video Memory] Failed to parse saved video data:", e.key);
+          return Boolean(e.record);
+        });
+        entries.sort((a, b) => {
+          if (a.videoId === current)
+            return -1;
+          if (b.videoId === current)
+            return 1;
+          return (Number(b.record.saveDate) || 0) - (Number(a.record.saveDate) || 0);
+        });
+        for (const entry of entries) {
+          try {
+            const row = new RecordRow(entry, entry.videoId === current, (r) => this.onDeleted(r));
+            this.rows.set(entry.videoId, row);
+            this.list.appendChild(row.li);
+          } catch (err) {
+            console.error("[Video Memory] Failed to render saved video:", err);
+          }
+        }
+        rowCount = this.rows.size;
+        if (!rowCount) {
+          this.list.appendChild(h("li", { class: "ysrp-empty-row", text: tr("No saved videos yet.", "还没有保存的视频。") }));
+        }
+        refreshSettingsHeader();
+      } finally {
+        this.building = false;
+        this.setBusy(false);
+      }
+    }
+    onDeleted(row) {
+      this.rows.delete(row.videoId);
+      rowCount = this.rows.size;
+      if (!rowCount)
+        this.list.appendChild(h("li", { class: "ysrp-empty-row", text: tr("No saved videos yet.", "还没有保存的视频。") }));
+      refreshSettingsHeader();
+    }
+  }
+  function createRecordsTab(setBusy) {
+    let list = null;
+    return {
+      id: "records",
+      group: "main",
+      order: 10,
+      icon: "database",
+      label: () => tr("Records", "记录"),
+      heading: () => recordsHeading(),
+      storageBadge: true,
+      render(pane) {
+        rowCount = countRecords();
+        list = new RecordsList(pane, setBusy);
+        return () => {
+          list?.destroy();
+          list = null;
+        };
+      },
+      onShow() {
+        list?.rebuild();
+      }
+    };
+  }
+
+  // src/plugins/_core/settings/rowParts.ts
+  function showPanel(panel, open) {
+    panel.style.display = open ? "flex" : "none";
+  }
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(text);
         return;
       }
-      try {
-        const moved = setMode(target);
-        ctx.renderModeBadge();
-        setMessage(modeMsg, t("Moved {count} record(s).", "已迁移 {count} 条记录。", { count: moved }), "ok");
-        emit(EVT_RECORD, { videoId: null });
-      } catch (err) {
-        modeChoice.select(getMode());
-        setMessage(modeMsg, t("Migration failed: {message}", "迁移失败：{message}", { message: errorMessage(err) }), "error");
+    } catch (err) {
+      if (!legacyCopy(text))
+        throw err;
+      return;
+    }
+    if (!legacyCopy(text))
+      throw new Error(tr("Clipboard is not available", "剪贴板不可用"));
+  }
+  function legacyCopy(text) {
+    try {
+      const area = h("textarea", { value: text, style: "position:fixed;top:-1000px;left:-1000px;opacity:0" });
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand("copy");
+      area.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+  var noteContribution = {
+    id: "note",
+    order: 20,
+    panelOrder: 30,
+    create(ctx) {
+      const ui = ctx.ui;
+      let note = typeof ctx.record.videoNote === "string" ? ctx.record.videoNote : "";
+      let editor = null;
+      const topBtn = iconButton("pen-to-square", "", "is-note");
+      const editBtn = iconButton("pencil", "", "is-note-edit");
+      const preview = h("div", { class: "ysrp-note-text" });
+      const body = h("div", { class: "ysrp-note-body" }, preview);
+      const panel = h("div", { class: "ysrp-panel ysrp-note-container" }, h("div", { class: "ysrp-panel-head" }, h("span", { class: "ysrp-panel-label", text: tr("Notes", "笔记") }), editBtn), body);
+      const hasNote = () => note.trim().length > 0;
+      const isOpen = () => ui.noteOpen === true;
+      const editing = () => editor !== null;
+      const renderPreview = () => {
+        preview.textContent = hasNote() ? note : tr("No notes yet", "暂无笔记");
+        preview.classList.toggle("is-empty", !hasNote());
+      };
+      const refreshButtons = () => {
+        const topTip = editing() ? tr("Save & collapse note", "保存并折叠笔记") : hasNote() ? isOpen() ? tr("Hide notes", "隐藏笔记") : tr("Show notes", "显示笔记") : tr("Add note", "添加笔记");
+        topBtn.title = topTip;
+        topBtn.setAttribute("aria-label", topTip);
+        topBtn.classList.toggle("has-content", hasNote());
+        setIcon(editBtn, editing() ? "floppy-disk" : "pencil");
+        const editTip = editing() ? tr("Save note", "保存笔记") : tr("Edit note", "编辑笔记");
+        editBtn.title = editTip;
+        editBtn.setAttribute("aria-label", editTip);
+      };
+      const setOpen = (open) => {
+        if (!open && editing())
+          return;
+        ui.noteOpen = open;
+        showPanel(panel, open);
+        refreshButtons();
+      };
+      const autosize = () => {
+        if (!editor)
+          return;
+        editor.style.height = "auto";
+        editor.style.height = `${editor.scrollHeight}px`;
+      };
+      const startEdit = (draft) => {
+        if (editing())
+          return;
+        ui.noteOpen = true;
+        showPanel(panel, true);
+        const area = h("textarea", { class: "ysrp-textarea ysrp-note-input", value: draft ?? note, rows: 3 });
+        area.addEventListener("input", () => {
+          ui.noteDraft = area.value;
+          autosize();
+        });
+        editor = area;
+        ui.editing = true;
+        ui.noteDraft = area.value;
+        preview.replaceWith(area);
+        autosize();
+        requestAnimationFrame(() => {
+          if (!area.isConnected)
+            return;
+          area.focus();
+          area.setSelectionRange(area.value.length, area.value.length);
+        });
+        refreshButtons();
+      };
+      const save = () => {
+        if (!editor)
+          return;
+        const next = editor.value.trim();
+        editor.replaceWith(preview);
+        editor = null;
+        ui.editing = false;
+        delete ui.noteDraft;
+        note = next;
+        renderPreview();
+        try {
+          updateRecord(ctx.videoId, (cur) => {
+            if (!cur)
+              return null;
+            const out = { ...cur };
+            if (next)
+              out.videoNote = next;
+            else
+              delete out.videoNote;
+            return out;
+          }, "content");
+        } catch (err) {
+          console.error("[Video Memory] Failed to update video note in storage:", err);
+        }
+        refreshButtons();
+      };
+      topBtn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        if (editing()) {
+          save();
+          setOpen(false);
+        } else if (!hasNote()) {
+          startEdit();
+        } else {
+          setOpen(!isOpen());
+        }
+      });
+      editBtn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        if (editing())
+          save();
+        else
+          startEdit();
+      });
+      renderPreview();
+      showPanel(panel, isOpen());
+      if (ui.editing === true)
+        startEdit(typeof ui.noteDraft === "string" ? ui.noteDraft : undefined);
+      refreshButtons();
+      return { button: topBtn, panel };
+    }
+  };
+  var linkContribution = {
+    id: "link",
+    order: 30,
+    panelOrder: 10,
+    create(ctx) {
+      const ui = ctx.ui;
+      const tip = h("span", { class: "ysrp-copied", text: tr("Copied", "已复制") });
+      let tipTimer = 0;
+      let iconTimer = 0;
+      const copyBtn = iconButton("copy", tr("Copy URL", "复制 URL"), "is-link is-copy");
+      const openBtn = iconButton("arrow-up-right-from-square", tr("Open in new tab", "在新标签页中打开 URL"), "is-open");
+      const panel = h("div", { class: "ysrp-panel ysrp-url" }, h("span", { class: "ysrp-url-text", title: ctx.url }, tr("URL: {url}", "链接：{url}", { url: ctx.url })), tip, copyBtn, openBtn);
+      const flashTip = (text, error = false) => {
+        tip.textContent = text;
+        tip.classList.toggle("is-error", error);
+        tip.classList.add("is-visible");
+        if (tipTimer)
+          clearTimeout(tipTimer);
+        tipTimer = window.setTimeout(() => tip.classList.remove("is-visible"), 2000);
+      };
+      copyBtn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        copyText(ctx.url).then(() => {
+          setIcon(copyBtn, "check");
+          copyBtn.classList.add("is-success");
+          if (iconTimer)
+            clearTimeout(iconTimer);
+          iconTimer = window.setTimeout(() => {
+            setIcon(copyBtn, "copy");
+            copyBtn.classList.remove("is-success");
+          }, 1000);
+          flashTip(tr("Copied", "已复制"));
+        }).catch((err) => {
+          console.warn("[Video Memory] Failed to copy text: ", err);
+          flashTip(tr("Copy failed", "复制失败"), true);
+        });
+      });
+      openBtn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        window.open(ctx.url, "_blank", "noopener");
+      });
+      const button = iconButton("link", tr("Show / hide URL", "显示/隐藏 URL"), "is-link");
+      button.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ui.linkOpen = ui.linkOpen !== true;
+        showPanel(panel, ui.linkOpen === true);
+      });
+      showPanel(panel, ui.linkOpen === true);
+      return {
+        button,
+        panel,
+        dispose() {
+          clearTimeout(tipTimer);
+          clearTimeout(iconTimer);
+        }
+      };
+    }
+  };
+
+  // src/plugins/_core/settings/scrollLock.ts
+  var SCROLL_KEYS = new Set([" ", "Spacebar", "PageUp", "PageDown", "Home", "End", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"]);
+  function isEditable(el) {
+    if (!el)
+      return false;
+    const tag = el.tagName;
+    if (tag === "TEXTAREA" || tag === "SELECT")
+      return true;
+    if (tag === "INPUT") {
+      const type = el.type;
+      return !["button", "checkbox", "radio", "submit", "reset", "file", "range", "color", "image"].includes(type);
+    }
+    return el.isContentEditable === true;
+  }
+  function canScroll(el, dx, dy) {
+    const style = getComputedStyle(el);
+    if (dy !== 0) {
+      const scrollableY = /(auto|scroll)/.test(style.overflowY) || el.tagName === "TEXTAREA";
+      if (scrollableY && el.scrollHeight > el.clientHeight + 1) {
+        if (dy > 0 && el.scrollTop + el.clientHeight < el.scrollHeight - 1)
+          return true;
+        if (dy < 0 && el.scrollTop > 0)
+          return true;
       }
-    });
-    applyButton.style.setProperty("--ysrp-btn-accent", "var(--ysrp-storage)");
-    applyButton.style.flex = "0 0 auto";
-    const storageCard = card("database", "--ysrp-storage", t("Storage Backend", "存储后端"), t("Choose where to store your progress data.", "选择保存进度的存储方式。"), modeChoice.node, h("div", { class: "ysrp-row-actions" }, applyButton, h("span", { class: "ysrp-msg", text: t("Migrates all saved records to the selected backend (moves data).", "将所有记录迁移至所选存储后端（移动数据）。") })), modeMsg);
-    const exportMsg = h("div", { class: "ysrp-msg", style: { display: "none" } });
-    const exportJson = () => JSON.stringify(exportAll(), null, 2);
-    const exportFileName = () => {
-      const now = new Date;
-      const p = (n) => String(n).padStart(2, "0");
-      return `[Youtube] Video Memory「${now.getFullYear()} ${p(now.getMonth() + 1)} ${p(now.getDate())}」「${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}」.json`;
+    }
+    if (dx !== 0) {
+      const scrollableX = /(auto|scroll)/.test(style.overflowX);
+      if (scrollableX && el.scrollWidth > el.clientWidth + 1) {
+        if (dx > 0 && el.scrollLeft + el.clientWidth < el.scrollWidth - 1)
+          return true;
+        if (dx < 0 && el.scrollLeft > 0)
+          return true;
+      }
+    }
+    return false;
+  }
+  function scrollerFor(target, root, dx, dy) {
+    let el = target instanceof Element ? target : null;
+    if (!el || !root.contains(el))
+      return null;
+    while (el) {
+      if (canScroll(el, dx, dy))
+        return el;
+      if (el === root)
+        break;
+      el = el.parentElement;
+    }
+    return null;
+  }
+  function createScrollLock(getRoot, getKeyTarget) {
+    let locked = false;
+    let touchX = 0;
+    let touchY = 0;
+    const onWheel = (ev) => {
+      const root = getRoot();
+      if (!root)
+        return;
+      if (!scrollerFor(ev.target, root, ev.deltaX, ev.deltaY))
+        ev.preventDefault();
     };
-    const copyExport = textButton("copy", t("Copy JSON", "复制 JSON"), async () => {
-      try {
-        await navigator.clipboard.writeText(exportJson());
-        setMessage(exportMsg, t("JSON copied to clipboard.", "JSON 已复制到剪贴板。"), "ok");
-      } catch (err) {
-        setMessage(exportMsg, t("Copy export failed: {message}", "复制导出失败：{message}", { message: errorMessage(err) }), "error");
+    const onTouchStart = (ev) => {
+      const t = ev.touches[0];
+      if (t) {
+        touchX = t.clientX;
+        touchY = t.clientY;
       }
+    };
+    const onTouchMove = (ev) => {
+      const root = getRoot();
+      const t = ev.touches[0];
+      if (!root || !t)
+        return;
+      const dx = touchX - t.clientX;
+      const dy = touchY - t.clientY;
+      touchX = t.clientX;
+      touchY = t.clientY;
+      if (!scrollerFor(ev.target, root, dx, dy))
+        ev.preventDefault();
+    };
+    const onKey = (ev) => {
+      if (!SCROLL_KEYS.has(ev.key) || ev.defaultPrevented)
+        return;
+      const target = ev.target;
+      if (isEditable(target))
+        return;
+      if ((ev.key === " " || ev.key === "Spacebar") && target && target.closest('button, a, label, [role="button"], [role="switch"]'))
+        return;
+      ev.preventDefault();
+      const pane = getKeyTarget();
+      const root = getRoot();
+      if (!pane || !root)
+        return;
+      const page = Math.max(40, pane.clientHeight * 0.9);
+      switch (ev.key) {
+        case "ArrowDown":
+          pane.scrollTop += 40;
+          break;
+        case "ArrowUp":
+          pane.scrollTop -= 40;
+          break;
+        case "PageDown":
+        case " ":
+        case "Spacebar":
+          pane.scrollTop += ev.shiftKey ? -page : page;
+          break;
+        case "PageUp":
+          pane.scrollTop -= page;
+          break;
+        case "Home":
+          pane.scrollTop = 0;
+          break;
+        case "End":
+          pane.scrollTop = pane.scrollHeight;
+          break;
+        default:
+          break;
+      }
+    };
+    return {
+      lock() {
+        if (locked)
+          return;
+        locked = true;
+        window.addEventListener("wheel", onWheel, { capture: true, passive: false });
+        window.addEventListener("touchstart", onTouchStart, { capture: true, passive: true });
+        window.addEventListener("touchmove", onTouchMove, { capture: true, passive: false });
+        window.addEventListener("keydown", onKey, true);
+      },
+      unlock() {
+        if (!locked)
+          return;
+        locked = false;
+        window.removeEventListener("wheel", onWheel, { capture: true });
+        window.removeEventListener("touchstart", onTouchStart, { capture: true });
+        window.removeEventListener("touchmove", onTouchMove, { capture: true });
+        window.removeEventListener("keydown", onKey, true);
+      }
+    };
+  }
+
+  // src/plugins/_core/settings/shell.ts
+  var modalOpened = new Emitter;
+  function storageModeLabel() {
+    return getMode() === "gm" ? tr("GM Storage", "GM 存储") : tr("Browser storage", "浏览器本地存储");
+  }
+
+  class SettingsModal {
+    backdrop = null;
+    root = null;
+    navGroups = null;
+    headingEl = null;
+    badgeEl = null;
+    spinnerEl = null;
+    panesEl = null;
+    panes = new Map;
+    active = "records";
+    opened = false;
+    dialogs = [];
+    spinUntil = 0;
+    spinTimer = 0;
+    disposers = [];
+    languageTimer = 0;
+    scrollLock = createScrollLock(() => this.root, () => this.activePane());
+    start() {
+      this.disposers.push(tabsChanged.on(() => this.onTabsChanged()));
+      const onLanguage = () => {
+        if (this.languageTimer)
+          clearTimeout(this.languageTimer);
+        this.languageTimer = window.setTimeout(() => this.rebuild(), 50);
+      };
+      document.addEventListener(EVT_LANGUAGE, onLanguage);
+      this.disposers.push(() => document.removeEventListener(EVT_LANGUAGE, onLanguage));
+      const onKey = (ev) => {
+        if (!this.opened || ev.key !== "Escape")
+          return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (this.dialogs.length)
+          this.dialogs[this.dialogs.length - 1]();
+        else
+          this.close();
+      };
+      document.addEventListener("keydown", onKey, true);
+      this.disposers.push(() => document.removeEventListener("keydown", onKey, true));
+    }
+    destroy() {
+      this.close();
+      for (const fn of this.disposers.splice(0))
+        fn();
+      this.teardown();
+    }
+    isOpen() {
+      return this.opened;
+    }
+    activeTab() {
+      return this.active;
+    }
+    activePane() {
+      return this.panes.get(this.active)?.el || null;
+    }
+    open(tabId) {
+      this.ensureBuilt();
+      if (!this.root || !this.backdrop)
+        return;
+      const host = pageHost();
+      if (this.backdrop.parentElement !== host)
+        host.appendChild(this.backdrop);
+      if (this.root.parentElement !== host)
+        host.appendChild(this.root);
+      const wasOpen = this.opened;
+      this.opened = true;
+      this.backdrop.classList.add("is-open");
+      this.root.classList.add("is-open");
+      this.scrollLock.lock();
+      this.activate(tabId && getTab(tabId) ? tabId : getTab(this.active) ? this.active : "records", !wasOpen);
+      if (!wasOpen)
+        modalOpened.emit();
+    }
+    close() {
+      if (!this.opened)
+        return;
+      while (this.dialogs.length)
+        this.dialogs[this.dialogs.length - 1]();
+      this.opened = false;
+      this.backdrop?.classList.remove("is-open");
+      this.root?.classList.remove("is-open");
+      this.scrollLock.unlock();
+    }
+    openDialog(content, onClose) {
+      if (!this.root)
+        return () => {};
+      const overlay = h("div", { class: "ysrp-dialog-overlay" }, content);
+      let closed = false;
+      const close = () => {
+        if (closed)
+          return;
+        closed = true;
+        overlay.remove();
+        this.dialogs = this.dialogs.filter((fn) => fn !== close);
+        onClose?.();
+      };
+      overlay.addEventListener("click", (ev) => {
+        if (ev.target === overlay)
+          close();
+      });
+      this.root.appendChild(overlay);
+      this.dialogs.push(close);
+      return close;
+    }
+    setBusy(busy) {
+      if (!this.spinnerEl)
+        return;
+      const el = this.spinnerEl;
+      if (busy) {
+        this.spinUntil = Date.now() + 300;
+        el.classList.add("is-active");
+        return;
+      }
+      const wait = Math.max(0, this.spinUntil - Date.now());
+      if (this.spinTimer)
+        clearTimeout(this.spinTimer);
+      this.spinTimer = window.setTimeout(() => el.classList.remove("is-active"), wait);
+    }
+    refreshHeader() {
+      if (!this.headingEl || !this.badgeEl)
+        return;
+      const tab = getTab(this.active);
+      this.headingEl.textContent = tab ? tab.heading ? tab.heading() : tab.label() : "";
+      this.badgeEl.textContent = storageModeLabel();
+      this.badgeEl.style.display = tab && tab.storageBadge ? "" : "none";
+    }
+    rebuild() {
+      if (!this.root)
+        return;
+      const wasOpen = this.opened;
+      const tab = this.active;
+      this.close();
+      this.teardown();
+      this.active = tab;
+      if (wasOpen)
+        this.open(tab);
+    }
+    teardown() {
+      for (const entry of this.panes.values()) {
+        try {
+          entry.cleanup?.();
+        } catch (err) {
+          console.error("[Video Memory] tab cleanup failed:", err);
+        }
+      }
+      this.panes.clear();
+      this.root?.remove();
+      this.backdrop?.remove();
+      this.root = null;
+      this.backdrop = null;
+      this.navGroups = null;
+    }
+    ensureBuilt() {
+      if (this.root && this.backdrop)
+        return;
+      const existing = document.querySelector(`.${CLS_BACKDROP}`);
+      const backdrop = existing || h("div", { class: CLS_BACKDROP });
+      backdrop.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (ev.target === backdrop)
+          this.close();
+      });
+      this.backdrop = backdrop;
+      this.navGroups = h("div", { class: "ysrp-nav-groups" });
+      const footer = h("div", { class: "ysrp-nav-footer" }, h("a", { href: HOMEPAGE_URL, target: "_blank", rel: "noopener noreferrer", text: "Video Memory" }), h("span", { text: ` • ${VERSION_SHORT}` }));
+      const nav = h("nav", { class: "ysrp-nav", attrs: { "aria-label": tr("Settings sections", "设置分区") } }, this.navGroups, footer);
+      this.headingEl = h("h3", { class: "ysrp-heading" });
+      this.badgeEl = h("span", { class: "ysrp-badge" });
+      this.spinnerEl = h("span", { class: "ysrp-refresh", title: tr("Refreshing…", "正在更新列表…") }, icon("arrows-rotate", "fa-spin"));
+      const closeBtn = h("button", { class: "ysrp-close", type: "button", title: tr("Close", "关闭"), attrs: { "aria-label": tr("Close", "关闭") } }, icon("xmark"));
+      closeBtn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        this.close();
+      });
+      const header = h("div", { class: "ysrp-header" }, h("div", { class: "ysrp-header-left" }, this.headingEl, this.badgeEl, this.spinnerEl), closeBtn);
+      this.panesEl = h("div", { class: `ysrp-panes ${CLS_MODAL_BODY}` });
+      const main = h("div", { class: "ysrp-main" }, header, this.panesEl);
+      const root = h("div", { class: CLS_MODAL, attrs: { role: "dialog", "aria-modal": "true" } }, nav, main);
+      root.addEventListener("keydown", (ev) => ev.stopPropagation());
+      root.addEventListener("keyup", (ev) => ev.stopPropagation());
+      root.addEventListener("keypress", (ev) => ev.stopPropagation());
+      this.root = root;
+      this.renderNav();
+    }
+    renderNav() {
+      if (!this.navGroups)
+        return;
+      clear(this.navGroups);
+      const groups = [
+        { id: "main", title: tr("Video Memory", "视频记忆") },
+        { id: "plugins", title: tr("Plugins", "插件") }
+      ];
+      const tabs = listTabs();
+      for (const group of groups) {
+        const items = tabs.filter((t) => t.group === group.id);
+        if (!items.length)
+          continue;
+        const box = h("div", { class: "ysrp-nav-group" }, h("div", { class: "ysrp-nav-title", text: group.title }));
+        for (const tab of items) {
+          const btn = h("button", { class: `ysrp-tab${tab.id === this.active ? " is-active" : ""}`, type: "button", dataset: { tabId: tab.id } }, h("span", { class: "ysrp-tab-icon" }, icon(tab.icon)), h("span", { class: "ysrp-tab-label", text: tab.label() }));
+          btn.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            this.activate(tab.id);
+          });
+          box.appendChild(btn);
+        }
+        this.navGroups.appendChild(box);
+      }
+    }
+    onTabsChanged() {
+      for (const [id, entry] of Array.from(this.panes)) {
+        if (getTab(id) !== entry.tab) {
+          try {
+            entry.cleanup?.();
+          } catch {}
+          entry.el.remove();
+          this.panes.delete(id);
+        }
+      }
+      if (!this.root)
+        return;
+      this.renderNav();
+      if (!getTab(this.active))
+        this.activate(getTab("plugins") ? "plugins" : "records");
+    }
+    activate(id, forceShow = false) {
+      const tab = getTab(id);
+      if (!tab || !this.root || !this.panesEl)
+        return;
+      const changed = this.active !== id;
+      this.active = id;
+      this.root.dataset.activeTab = id;
+      for (const btn of Array.from(this.root.querySelectorAll(".ysrp-tab"))) {
+        btn.classList.toggle("is-active", btn.dataset.tabId === id);
+      }
+      let entry = this.panes.get(id);
+      if (!entry) {
+        const el = h("div", { class: "ysrp-pane", dataset: { pane: id } });
+        this.panesEl.appendChild(el);
+        entry = { tab, el, cleanup: null };
+        this.panes.set(id, entry);
+        try {
+          const cleanup = tab.render(el);
+          entry.cleanup = typeof cleanup === "function" ? cleanup : null;
+        } catch (err) {
+          console.error(`[Video Memory] Failed to render tab ${id}:`, err);
+        }
+      }
+      for (const [pid, p] of this.panes)
+        p.el.classList.toggle("is-active", pid === id);
+      if (changed || forceShow || !entry.el.dataset.shown) {
+        entry.el.dataset.shown = "1";
+        try {
+          tab.onShow?.(entry.el);
+        } catch (err) {
+          console.error(`[Video Memory] Failed to show tab ${id}:`, err);
+        }
+      }
+      this.refreshHeader();
+    }
+  }
+
+  // src/plugins/_core/settings/storageTab.ts
+  function isIOS() {
+    if (typeof navigator === "undefined")
+      return false;
+    const ua = String(navigator.userAgent || navigator.vendor || "").toLowerCase();
+    if (/\b(ipad|iphone|ipod)\b/.test(ua))
+      return true;
+    return ua.includes("mac") && typeof navigator.maxTouchPoints === "number" && navigator.maxTouchPoints > 1;
+  }
+  var canShareFiles = (() => {
+    try {
+      if (!isIOS() || typeof File !== "function" || typeof navigator.share !== "function")
+        return false;
+      if (typeof navigator.canShare === "function") {
+        const probe = new File(["{}"], "probe.json", { type: "application/json" });
+        return navigator.canShare({ files: [probe] });
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  function exportFileName(date = new Date) {
+    const p = (n) => String(n).padStart(2, "0");
+    return `[Youtube] Video Memory「${date.getFullYear()} ${p(date.getMonth() + 1)} ${p(date.getDate())}」「${p(date.getHours())}:${p(date.getMinutes())}:${p(date.getSeconds())}」.json`;
+  }
+  function downloadFile(name, text) {
+    const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+    const a = h("a", { href: url, download: name, style: "display:none" });
+    document.body.appendChild(a);
+    a.click();
+    requestAnimationFrame(() => {
+      a.remove();
+      URL.revokeObjectURL(url);
     });
-    const downloadExport = textButton("file-arrow-down", t("Download JSON", "下载 JSON"), async () => {
-      try {
-        const json = exportJson();
-        const fileName = exportFileName();
-        if (runtime.isIOS) {
-          if (runtime.canShareFile) {
-            try {
-              await navigator.share({
-                files: [new File([json], fileName, { type: "application/json" })],
-                title: t("Video Memory Export", "视频记忆导出"),
-                text: t("Choose “Save to Files” to store your backup.", "请选择“存储到文件”以保存备份。")
-              });
-              setMessage(exportMsg, t("Share sheet opened. Choose “Save to Files”.", "已打开系统分享面板，请选择“存储到文件”。"), "ok");
-              return;
-            } catch (err) {
-              const name = err?.name;
-              if (name === "AbortError" || name === "NotAllowedError") {
-                setMessage(exportMsg, t("Share cancelled.", "已取消分享。"));
-                return;
+  }
+  function modeName(mode) {
+    return mode === "gm" ? tr("GM storage", "GM 存储") : tr("localStorage", "localStorage");
+  }
+  function createStorageTab() {
+    return {
+      id: "storage",
+      group: "main",
+      order: 20,
+      icon: "gear",
+      label: () => tr("Storage", "存储"),
+      storageBadge: true,
+      render(pane) {
+        const backendMsg = messageLine();
+        const choices = choiceGroup("ysrp-storage-mode", [
+          { value: "local", tag: tr("LOCAL", "本地"), label: tr("localStorage (default)", "localStorage（默认）"), hint: tr("Fast storage scoped to this browser profile.", "快速、本地浏览器可用的存储。") },
+          {
+            value: "gm",
+            tag: "GM",
+            label: tr("GM storage", "GM 存储"),
+            hint: gmAvailable ? tr("Tampermonkey-backed storage that can sync across profiles.", "由 Tampermonkey 提供、可在配置间同步的存储。") : tr("Not available in this userscript manager.", "当前脚本管理器不提供 GM 存储。"),
+            disabled: !gmAvailable
+          }
+        ], getMode(), () => backendMsg.set(""));
+        const applyLabel = tr("Apply & Migrate", "应用并迁移");
+        const applyBtn = button(applyLabel, { icon: "right-left", title: tr("Switch storage backend and migrate data.", "切换存储方式并迁移数据。") });
+        applyBtn.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          const target = choices.value() === "gm" ? "gm" : "local";
+          const from = getMode();
+          if (target === from) {
+            backendMsg.set(tr("Already using {mode}.", "当前已在使用{mode}。", { mode: modeName(from) }));
+            return;
+          }
+          applyBtn.disabled = true;
+          setButtonLabel(applyBtn, tr("Migrating...", "正在迁移..."));
+          try {
+            const result = switchMode(target, { migrate: true, clearSource: true });
+            if (result.ok) {
+              backendMsg.set(tr("Moved {count} record(s) to {mode}.", "已将 {count} 条记录迁移到{mode}。", { count: result.moved, mode: modeName(target) }), "success");
+            } else {
+              choices.set(getMode());
+              backendMsg.set(tr("Migration failed: {message}", "迁移失败：{message}", { message: result.error || "" }), "error");
+            }
+          } catch (err) {
+            console.error("[Video Memory] Failed to switch storage:", err);
+            choices.set(getMode());
+            backendMsg.set(tr("Migration failed: {message}", "迁移失败：{message}", { message: errorMessage(err) }), "error");
+          }
+          refreshSettingsHeader();
+          window.setTimeout(() => {
+            applyBtn.disabled = false;
+            setButtonLabel(applyBtn, applyLabel);
+          }, 500);
+        });
+        const backendCard = card({ icon: "database", title: tr("Storage Backend", "存储后端"), desc: tr("Choose where to store your progress data.", "选择保存进度的存储方式。") }, choices.el, h("div", { class: "ysrp-actions" }, applyBtn, h("span", { class: "ysrp-hint", text: tr("Migrates all saved records to the selected backend (moves data).", "将所有记录迁移至所选存储后端（移动数据）。") })), backendMsg.el);
+        const exportMsg = messageLine();
+        const exportJson = () => JSON.stringify(exportData(), null, 2);
+        const copyBtn = button(tr("Copy JSON", "复制 JSON"), { icon: "copy", title: tr("Copy export JSON to clipboard", "复制导出的 JSON 到剪贴板") });
+        copyBtn.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          let text;
+          try {
+            text = exportJson();
+          } catch (err) {
+            exportMsg.set(tr("Copy export failed: {message}", "复制导出失败：{message}", { message: errorMessage(err) }), "error");
+            return;
+          }
+          copyText(text).then(() => {
+            exportMsg.set(tr("JSON copied to clipboard.", "JSON 已复制到剪贴板。"), "success");
+          }).catch((err) => {
+            console.warn("[Video Memory] Copy export failed:", err);
+            exportMsg.set(tr("Copy export failed: {message}", "复制导出失败：{message}", { message: errorMessage(err) }), "error");
+          });
+        });
+        const downloadBtn = button(tr("Download JSON", "下载 JSON"), { icon: "file-arrow-down", title: tr("Download export JSON as file", "下载导出的 JSON 文件") });
+        downloadBtn.addEventListener("click", async (ev) => {
+          ev.preventDefault();
+          try {
+            const text = exportJson();
+            const name = exportFileName();
+            if (canShareFiles) {
+              try {
+                const file = new File([text], name, { type: "application/json" });
+                if (typeof navigator.canShare !== "function" || navigator.canShare({ files: [file] })) {
+                  await navigator.share({
+                    files: [file],
+                    title: tr("Video Memory Export", "视频记忆导出"),
+                    text: tr("Choose “Save to Files” to store your backup.", "请选择“存储到文件”以保存备份。")
+                  });
+                  exportMsg.set(tr("Shared. If you chose “Save to Files”, the backup is stored.", "已分享。如选择了“存储到文件”，备份已保存。"), "success");
+                  return;
+                }
+              } catch (err) {
+                const name2 = err?.name;
+                if (name2 === "AbortError" || name2 === "NotAllowedError") {
+                  exportMsg.set(tr("Share cancelled.", "已取消分享。"));
+                  return;
+                }
+                console.warn("[Video Memory] Share failed, falling back to download:", err);
               }
             }
-          } else if (window.open(`data:application/json;charset=utf-8,${encodeURIComponent(json)}`, "_blank", "noopener")) {
-            setMessage(exportMsg, t("Export opened in a new tab. Use the share menu to save it.", "已在新标签页打开导出，请通过分享菜单保存。"), "ok");
+            downloadFile(name, text);
+            exportMsg.set(tr("Export download started.", "导出下载已开始。"), "success");
+          } catch (err) {
+            console.warn("[Video Memory] Download export failed:", err);
+            exportMsg.set(tr("Download failed: {message}", "下载失败：{message}", { message: errorMessage(err) }), "error");
+          }
+        });
+        const exportCard = card({ icon: "file-arrow-down", title: tr("Export Data", "导出数据"), desc: tr("Back up your saved progress as JSON.", "将保存的进度备份为 JSON。") }, h("div", { class: "ysrp-actions" }, copyBtn, downloadBtn), h("div", { class: "ysrp-hint", text: tr("Exports all saved records from the currently selected backend.", "导出当前存储后端中的所有记录。") }), exportMsg.el);
+        const importMsg = messageLine();
+        const overwrite = h("input", { type: "checkbox", class: "ysrp-overwrite", id: "ysrp-overwrite" });
+        const overwriteRow = h("div", { class: "ysrp-check-row" }, h("label", { class: "ysrp-check" }, overwrite, h("span", { text: tr("Overwrite", "覆盖") })), h("span", { class: "ysrp-hint", text: tr("Deletes all records of the current backend before importing.", "导入前先删除当前存储后端中的全部记录。") }));
+        const textarea = h("textarea", { class: "ysrp-textarea", rows: 4, placeholder: tr("Paste exported JSON here...", "在此粘贴导出的 JSON...") });
+        const runImport = (text) => {
+          let payload;
+          try {
+            payload = JSON.parse(text);
+            const count = importData(payload, { overwrite: overwrite.checked });
+            importMsg.set(tr("Imported {count} record(s).", "已导入 {count} 条记录。", { count }), "success");
+            refreshSettingsHeader();
+          } catch (err) {
+            console.warn("[Video Memory] Import failed:", err);
+            importMsg.set(tr("Import failed: {message}", "导入失败：{message}", { message: errorMessage(err) }), "error");
+          }
+        };
+        const importBtn = button(tr("Import from Text", "从文本导入"), { icon: "file-arrow-up", title: tr("Import from pasted JSON", "从粘贴的 JSON 导入") });
+        importBtn.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          const text = textarea.value.trim();
+          if (!text) {
+            importMsg.set(tr("Nothing to import.", "没有可导入的内容。"));
             return;
           }
-        }
-        const blobUrl = URL.createObjectURL(new Blob([json], { type: "application/json" }));
-        const anchor = h("a", { href: blobUrl, download: fileName, style: { display: "none" } });
-        document.body.appendChild(anchor);
-        anchor.click();
-        setTimeout(() => {
-          anchor.remove();
-          URL.revokeObjectURL(blobUrl);
-        }, 1000);
-        setMessage(exportMsg, t("Export download started.", "导出下载已开始。"), "ok");
-      } catch (err) {
-        setMessage(exportMsg, t("Download failed: {message}", "下载失败：{message}", { message: errorMessage(err) }), "error");
-      }
-    });
-    for (const btn of [copyExport, downloadExport])
-      btn.style.setProperty("--ysrp-btn-accent", "var(--ysrp-ok)");
-    const exportCard = card("file-arrow-down", "--ysrp-ok", t("Export Data", "导出数据"), t("Back up your saved progress as JSON.", "将保存的进度备份为 JSON。"), h("div", { class: "ysrp-row-actions" }, copyExport, downloadExport), h("div", { class: "ysrp-msg", text: t("Exports all saved records from the currently selected backend.", "导出当前存储后端中的所有记录。") }), exportMsg);
-    const importMsg = h("div", { class: "ysrp-msg", style: { display: "none" } });
-    const overwrite = h("input", { type: "checkbox", class: "ysrp-overwrite" });
-    const importText = h("textarea", { class: "ysrp-textarea", rows: "3", placeholder: t("Paste exported JSON here...", "在此粘贴导出的 JSON...") });
-    function doImport(text) {
-      try {
-        const count = importPayload(JSON.parse(text), { overwrite: overwrite.checked });
-        setMessage(importMsg, t("Imported {count} record(s).", "已导入 {count} 条记录。", { count }), "ok");
-        emit(EVT_RECORD, { videoId: null });
-      } catch (err) {
-        setMessage(importMsg, t("Import failed: {message}", "导入失败：{message}", { message: errorMessage(err) }), "error");
-      }
-    }
-    const importButton = textButton("file-arrow-up", t("Import from Text", "从文本导入"), () => {
-      const text = importText.value.trim();
-      if (!text) {
-        setMessage(importMsg, t("Nothing to import.", "没有可导入的内容。"));
-        return;
-      }
-      doImport(text);
-    });
-    const noFile = t("No file chosen", "未选择文件");
-    const fileName = h("span", { class: "ysrp-file-name", text: noFile });
-    const fileInput = h("input", { type: "file", accept: "application/json,.json" });
-    const fileLabel = h("label", { class: `ysrp-file${runtime.isIOS ? " is-ios" : ""}`, tabindex: "0", title: t("Select an export JSON file", "选择要导入的 JSON 文件") }, icon("file-arrow-up"), h("strong", { text: t("Choose File", "选择文件") }), fileName, fileInput);
-    if (!runtime.isIOS) {
-      const openPicker = (event) => {
-        event.preventDefault();
-        try {
-          if (typeof fileInput.showPicker === "function") {
-            fileInput.showPicker();
+          runImport(text);
+        });
+        const noFile = tr("No file chosen", "未选择文件");
+        const fileName = h("span", { class: "ysrp-file-name", text: noFile });
+        const fileInput = h("input", { type: "file", accept: "application/json,.json", class: "ysrp-file-input" });
+        const fileBox = h("label", { class: "ysrp-file", tabIndex: 0, title: tr("Select an export JSON file", "选择要导入的 JSON 文件") }, h("span", { class: "ysrp-file-label", text: tr("Choose File", "选择文件") }), fileName, fileInput);
+        fileBox.addEventListener("keydown", (ev) => {
+          if (ev.key !== "Enter" && ev.key !== " " && ev.key !== "Spacebar")
+            return;
+          ev.preventDefault();
+          try {
+            const picker = fileInput;
+            if (typeof picker.showPicker === "function")
+              picker.showPicker();
+            else
+              fileInput.click();
+          } catch {
+            fileInput.click();
+          }
+        });
+        fileInput.addEventListener("change", () => {
+          const file = fileInput.files && fileInput.files[0];
+          if (!file) {
+            fileName.textContent = noFile;
             return;
           }
-        } catch {}
-        fileInput.click();
-      };
-      fileLabel.addEventListener("click", openPicker);
-      fileLabel.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ")
-          openPicker(event);
-      });
-    }
-    fileInput.addEventListener("change", () => {
-      const file = fileInput.files?.[0];
-      if (!file)
-        return;
-      fileName.textContent = file.name;
-      const reader = new FileReader;
-      reader.onload = () => {
-        importText.value = String(reader.result || "");
-        doImport(importText.value);
-        fileInput.value = "";
-        fileName.textContent = noFile;
-      };
-      reader.readAsText(file);
-    });
-    const importCard = card("file-arrow-up", "--ysrp-accent", t("Import Data", "导入数据"), t("Restore a previous export to merge or replace your saved records.", "导入之前的导出文件，用于合并或替换记录。"), h("label", { class: "ysrp-check" }, overwrite, h("strong", { text: t("Overwrite", "覆盖") }), h("span", { class: "ysrp-msg", text: t("Clears the current backend before importing; otherwise records are merged.", "勾选后导入前先清空当前存储后端，否则合并。") })), importText, h("div", { class: "ysrp-row-actions" }, importButton, fileLabel), importMsg);
-    return { node: h("div", {}, storageCard, exportCard, importCard) };
+          fileName.textContent = file.name;
+          file.text().then((text) => {
+            textarea.value = text || "";
+            runImport(text || "");
+          }).catch((err) => {
+            importMsg.set(tr("Could not read the file: {message}", "无法读取文件：{message}", { message: errorMessage(err) }), "error");
+          }).finally(() => {
+            fileInput.value = "";
+            fileName.textContent = noFile;
+          });
+        });
+        const importCard = card({ icon: "file-arrow-up", title: tr("Import Data", "导入数据"), desc: tr("Restore a previous export to merge or replace your saved records.", "导入之前的导出文件，用于合并或替换记录。") }, overwriteRow, textarea, h("div", { class: "ysrp-actions" }, importBtn, fileBox), h("div", { class: "ysrp-hint", text: tr("Imports records into the currently selected backend.", "将记录导入到当前选择的存储后端。") }), importMsg.el);
+        pane.append(backendCard, exportCard, importCard);
+      },
+      onShow() {
+        refreshSettingsHeader();
+      }
+    };
   }
 
+  // src/plugins/_core/settings/style.css
+  var style_default2 = `/* Settings modal (N-5). All sizes in px: YouTube sets html { font-size: 10px }. */
+
+.ysrp-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--ysrp-backdrop);
+  z-index: 9998;
+  display: none;
+}
+.ysrp-backdrop.is-open { display: block; }
+
+.ysrp-settings-container {
+  all: initial;
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+  z-index: 9999;
+  box-sizing: border-box;
+  width: min(896px, 92vw);
+  height: min(640px, 85vh);
+  display: none;
+  flex-direction: row;
+  overflow: hidden;
+  background: var(--ysrp-bg);
+  color: var(--ysrp-text);
+  border: 1px solid var(--ysrp-border);
+  border-radius: 16px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
+  font-family: var(--ysrp-font);
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: left;
+  -webkit-font-smoothing: antialiased;
+}
+.ysrp-settings-container.is-open { display: flex; }
+.ysrp-settings-container *,
+.ysrp-settings-container *::before,
+.ysrp-settings-container *::after { box-sizing: border-box; }
+.ysrp-settings-container,
+.ysrp-settings-container * {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(128, 128, 128, .45) transparent;
+}
+.ysrp-settings-container ::-webkit-scrollbar { width: 8px; height: 8px; }
+.ysrp-settings-container ::-webkit-scrollbar-track { background: transparent; }
+.ysrp-settings-container ::-webkit-scrollbar-thumb { background: rgba(128, 128, 128, .45); border-radius: 8px; }
+.ysrp-settings-container ::-webkit-scrollbar-corner { background: transparent; }
+
+/* ---------------------------------------------------------------- navigation */
+.ysrp-nav {
+  flex: 0 0 208px;
+  width: 208px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 12px 12px;
+  background: var(--ysrp-nav-bg);
+  border-right: 1px solid var(--ysrp-border);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.ysrp-nav-groups { display: flex; flex-direction: column; gap: 16px; }
+.ysrp-nav-group { display: flex; flex-direction: column; gap: 2px; }
+.ysrp-nav-title {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ysrp-text-3);
+  padding: 0 10px 4px;
+}
+.ysrp-tab {
+  all: unset;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 10px;
+  font-family: var(--ysrp-font);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ysrp-text-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ysrp-tab:hover { background: var(--ysrp-hover); color: var(--ysrp-text); }
+.ysrp-tab.is-active { background: var(--ysrp-layer); color: var(--ysrp-text); }
+.ysrp-tab:focus-visible { outline: 2px solid var(--ysrp-border-strong); outline-offset: -2px; }
+.ysrp-tab-icon { flex: 0 0 16px; width: 16px; text-align: center; font-size: 13px; }
+.ysrp-tab-label { overflow: hidden; text-overflow: ellipsis; }
+.ysrp-nav-footer {
+  margin-top: auto;
+  font-size: 11px;
+  opacity: .3;
+  overflow-wrap: anywhere;
+  padding: 0 10px;
+}
+.ysrp-nav-footer a { color: inherit; text-decoration: none; }
+.ysrp-nav-footer a:hover { text-decoration: underline; }
+
+/* ---------------------------------------------------------------- right column */
+.ysrp-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 24px 16px;
+}
+.ysrp-header {
+  flex: 0 0 32px;
+  height: 32px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ysrp-header-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ysrp-heading {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--ysrp-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ysrp-badge {
+  flex: 0 0 auto;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ysrp-text-2);
+  border: 1px solid var(--ysrp-border-strong);
+  border-radius: 999px;
+  padding: 0 8px;
+  white-space: nowrap;
+}
+.ysrp-refresh { display: none; color: var(--ysrp-text-2); font-size: 13px; }
+.ysrp-refresh.is-active { display: inline-flex; }
+.ysrp-close {
+  all: unset;
+  box-sizing: border-box;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ysrp-text-2);
+  cursor: pointer;
+  font-size: 16px;
+}
+.ysrp-close:hover { background: var(--ysrp-hover); color: var(--ysrp-text); }
+.ysrp-panes {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  margin-right: -24px;
+}
+.ysrp-pane {
+  display: none;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 24px;
+  padding-bottom: 4px;
+}
+.ysrp-pane.is-active { display: flex; }
+.ysrp-pane > * { flex-shrink: 0; }
+.ysrp-tab-intro { color: var(--ysrp-text-2); }
+
+/* ---------------------------------------------------------------- controls */
+.ysrp-btn {
+  all: unset;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 16px;
+  border: 1px solid var(--ysrp-border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ysrp-text);
+  font-family: var(--ysrp-font);
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.ysrp-btn.is-small { height: 30px; padding: 0 12px; font-size: 13px; }
+.ysrp-btn:hover { background: var(--ysrp-hover); }
+.ysrp-btn:focus-visible { box-shadow: 0 0 0 2px var(--ysrp-border-strong); }
+.ysrp-btn:disabled { opacity: .5; cursor: default; }
+.ysrp-btn.is-danger { color: var(--ysrp-error); border-color: var(--ysrp-error); }
+
+.ysrp-ibtn {
+  all: unset;
+  box-sizing: border-box;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ysrp-text-2);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.ysrp-ibtn:hover { background: var(--ysrp-hover); color: var(--ysrp-text); }
+.ysrp-ibtn:focus-visible { box-shadow: 0 0 0 2px var(--ysrp-border-strong); }
+.ysrp-ibtn:disabled { opacity: .5; cursor: default; }
+.ysrp-ibtn.is-delete:hover { color: var(--ysrp-error); }
+.ysrp-ibtn.is-success, .ysrp-ibtn.is-success:hover { color: var(--ysrp-success); }
+.ysrp-ibtn.has-content { color: var(--ysrp-text); }
+.ysrp-da[data-state="pending"] { filter: grayscale(1); opacity: .4; }
+.ysrp-da.is-off { filter: grayscale(1); opacity: .6; }
+
+.ysrp-input,
+.ysrp-select,
+.ysrp-textarea {
+  box-sizing: border-box;
+  width: 100%;
+  height: 36px;
+  margin: 0;
+  padding: 0 12px;
+  border: 1px solid var(--ysrp-border);
+  border-radius: 10px;
+  background: var(--ysrp-bg);
+  color: var(--ysrp-text);
+  font-family: var(--ysrp-font);
+  font-size: 14px;
+  line-height: 1.5;
+  outline: none;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+.ysrp-select { width: auto; padding-right: 8px; cursor: pointer; }
+.ysrp-textarea {
+  height: auto;
+  min-height: 72px;
+  padding: 8px 12px;
+  resize: vertical;
+  display: block;
+}
+.ysrp-input::placeholder, .ysrp-textarea::placeholder { color: var(--ysrp-text-3); }
+.ysrp-input:focus, .ysrp-select:focus, .ysrp-textarea:focus {
+  border-color: var(--ysrp-border-strong);
+  box-shadow: 0 0 0 2px var(--ysrp-hover);
+}
+
+.ysrp-switch {
+  all: unset;
+  box-sizing: border-box;
+  position: relative;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--ysrp-border-strong);
+  cursor: pointer;
+  transition: background .15s ease;
+}
+.ysrp-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .3);
+  transition: left .15s ease, background .15s ease;
+}
+.ysrp-switch.is-on { background: var(--ysrp-text); }
+.ysrp-switch.is-on .ysrp-switch-knob { left: 18px; background: var(--ysrp-bg); }
+.ysrp-switch:disabled { opacity: .5; cursor: not-allowed; }
+.ysrp-switch:focus-visible { box-shadow: 0 0 0 2px var(--ysrp-border-strong); }
+
+.ysrp-sep { border: none; border-top: 1px solid var(--ysrp-border); margin: 0; width: 100%; height: 0; }
+.ysrp-empty { color: var(--ysrp-text-3); text-align: center; padding: 16px; }
+.ysrp-hint { color: var(--ysrp-text-2); font-size: 13px; }
+
+/* ---------------------------------------------------------------- cards */
+.ysrp-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--ysrp-border);
+  border-radius: 16px;
+  background: var(--ysrp-card);
+}
+.ysrp-card-head { display: flex; align-items: center; gap: 10px; }
+.ysrp-card-icon {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: var(--ysrp-layer);
+  color: var(--ysrp-text);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+}
+.ysrp-card-title { font-size: 15px; font-weight: 600; }
+.ysrp-card-desc { color: var(--ysrp-text-2); margin-top: -6px; }
+.ysrp-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+.ysrp-choices { display: flex; flex-direction: column; gap: 8px; }
+.ysrp-choice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid var(--ysrp-border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background .15s ease, border-color .15s ease, box-shadow .15s ease;
+}
+.ysrp-choice:hover { background: var(--ysrp-hover); }
+.ysrp-choice.is-selected { border-color: var(--ysrp-text); box-shadow: 0 0 0 1px var(--ysrp-text); }
+.ysrp-choice.is-disabled { opacity: .5; cursor: not-allowed; }
+.ysrp-choice-radio { display: none; }
+.ysrp-choice-tag {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--ysrp-layer);
+  color: var(--ysrp-text);
+}
+.ysrp-choice.is-selected .ysrp-choice-tag { background: var(--ysrp-text); color: var(--ysrp-bg); }
+.ysrp-choice-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ysrp-choice-label { font-weight: 600; }
+.ysrp-choice-hint { font-size: 13px; color: var(--ysrp-text-2); }
+
+.ysrp-msg { display: none; font-size: 13px; color: var(--ysrp-text-2); }
+.ysrp-msg.is-visible { display: block; }
+.ysrp-msg.is-success { color: var(--ysrp-success); }
+.ysrp-msg.is-error { color: var(--ysrp-error); }
+
+.ysrp-check-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--ysrp-layer);
+}
+.ysrp-check { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
+.ysrp-overwrite { width: 16px; height: 16px; margin: 0; accent-color: var(--ysrp-text); cursor: pointer; }
+
+.ysrp-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 220px;
+  min-width: 0;
+  height: 36px;
+  padding: 0 14px;
+  border: 1px dashed var(--ysrp-border-strong);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.ysrp-file:hover, .ysrp-file:focus-within { background: var(--ysrp-hover); }
+.ysrp-file-label { font-weight: 600; white-space: nowrap; }
+.ysrp-file-name { flex: 1 1 auto; min-width: 0; color: var(--ysrp-text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ysrp-file { position: relative; }
+.ysrp-file:focus-visible { outline: 2px solid var(--ysrp-border-strong); outline-offset: 2px; }
+/* Visually hidden but still activatable through the label (works on iOS Safari too). */
+.ysrp-file-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; left: 0; top: 0; }
+
+.ysrp-field { display: flex; flex-direction: column; gap: 6px; max-width: 560px; }
+.ysrp-field-label { font-size: 13px; font-weight: 500; color: var(--ysrp-text-2); }
+.ysrp-field-hint { font-size: 12px; color: var(--ysrp-text-3); }
+.ysrp-fields { display: flex; flex-direction: column; gap: 12px; }
+.ysrp-secret { display: flex; gap: 8px; align-items: center; }
+.ysrp-secret .ysrp-input { flex: 1 1 auto; min-width: 0; }
+.ysrp-secret .ysrp-btn { height: 36px; }
+
+.ysrp-info {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--ysrp-layer);
+}
+.ysrp-info-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.ysrp-info-label { flex: 0 0 140px; font-size: 12px; font-weight: 600; color: var(--ysrp-text-2); }
+.ysrp-info-value { min-width: 0; overflow-wrap: anywhere; }
+.ysrp-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--ysrp-hover);
+}
+.ysrp-steps { margin: 0; padding-left: 20px; color: var(--ysrp-text-2); display: flex; flex-direction: column; gap: 4px; }
+.ysrp-steps a { color: var(--ysrp-text); }
+
+/* ---------------------------------------------------------------- records */
+.ysrp-records {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.ysrp-row {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 8px 14px;
+  border: 1px solid var(--ysrp-border);
+  border-radius: 14px;
+  background: var(--ysrp-card);
+}
+.ysrp-row.is-current { border-color: var(--ysrp-border-strong); }
+.ysrp-row.is-current::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--ysrp-text);
+}
+.ysrp-row-top { display: flex; align-items: center; gap: 2px; min-height: 30px; }
+.ysrp-pct {
+  flex: 0 0 auto;
+  min-width: 52px;
+  margin-right: 8px;
+  text-align: right;
+  font-size: 13px;
+  color: var(--ysrp-text-2);
+  font-variant-numeric: tabular-nums;
+}
+.ysrp-title { flex: 1 1 auto; min-width: 0; word-break: break-word; font-weight: 500; margin-right: 4px; }
+.ysrp-empty-row { color: var(--ysrp-text-3); text-align: center; padding: 24px; }
+.ysrp-panel {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--ysrp-border);
+  border-radius: 12px;
+  background: var(--ysrp-bg);
+}
+.ysrp-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.ysrp-panel-label { font-size: 12px; font-weight: 600; color: var(--ysrp-text-2); }
+.ysrp-panel-tools { display: inline-flex; align-items: center; gap: 2px; }
+.ysrp-panel-status { font-size: 12px; color: var(--ysrp-text-2); }
+.ysrp-panel-status.is-error { color: var(--ysrp-error); }
+.ysrp-panel-status.is-success { color: var(--ysrp-success); }
+.ysrp-url { position: relative; flex-direction: row; align-items: center; gap: 2px; padding: 4px 4px 4px 12px; }
+.ysrp-url-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  color: var(--ysrp-text-2);
+}
+.ysrp-copied {
+  position: absolute;
+  right: 72px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  background: var(--ysrp-text);
+  color: var(--ysrp-bg);
+  opacity: 0;
+  transition: opacity .3s ease;
+  pointer-events: none;
+}
+.ysrp-copied.is-visible { opacity: 1; }
+.ysrp-copied.is-error { background: var(--ysrp-error); }
+.ysrp-note-text { white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+.ysrp-note-text.is-empty { color: var(--ysrp-text-3); font-style: italic; }
+.ysrp-note-input { min-height: 60px; overflow: hidden; }
+.ysrp-transcript-text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; min-height: 96px; }
+
+/* ---------------------------------------------------------------- plugins tab */
+.ysrp-searchbar { display: flex; gap: 8px; }
+.ysrp-searchbar .ysrp-search { flex: 1 1 auto; min-width: 0; }
+.ysrp-plugins { display: flex; flex-direction: column; gap: 12px; }
+.ysrp-plugin-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.ysrp-plugin {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--ysrp-border);
+  border-radius: 16px;
+  background: var(--ysrp-card);
+  transition: border-color .15s ease, opacity .15s ease;
+}
+.ysrp-plugin:hover { border-color: var(--ysrp-border-strong); }
+.ysrp-plugin.is-core { opacity: .4; }
+.ysrp-plugin.is-core:hover { opacity: .7; }
+.ysrp-plugin-head { display: flex; align-items: center; gap: 10px; min-height: 30px; }
+.ysrp-plugin-name { flex: 0 1 auto; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ysrp-core-mark { color: var(--ysrp-text-3); font-size: 12px; }
+.ysrp-plugin-tools { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; }
+.ysrp-plugin-desc {
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--ysrp-text-2);
+  height: 36px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.ysrp-plugin-authors { font-size: 12px; color: var(--ysrp-text-3); }
+
+/* ---------------------------------------------------------------- sub dialog */
+.ysrp-dialog-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--ysrp-backdrop);
+}
+.ysrp-dialog {
+  position: relative;
+  width: min(512px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 24px;
+  border: 1px solid var(--ysrp-border);
+  border-radius: 16px;
+  background: var(--ysrp-bg);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
+}
+.ysrp-dialog > * { flex-shrink: 0; }
+.ysrp-dialog-close { position: absolute; top: 16px; right: 16px; }
+.ysrp-dialog-title { font-size: 18px; font-weight: 600; padding-right: 40px; }
+.ysrp-dialog-desc { color: var(--ysrp-text-2); }
+.ysrp-dialog-subtitle { font-size: 12px; font-weight: 600; color: var(--ysrp-text-3); margin-top: 4px; }
+.ysrp-setting-list { display: flex; flex-direction: column; border: 1px solid var(--ysrp-border); border-radius: 14px; }
+.ysrp-setting-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; }
+.ysrp-setting-row + .ysrp-setting-row { border-top: 1px solid var(--ysrp-border); }
+.ysrp-setting-row.is-stacked { flex-direction: column; align-items: stretch; }
+.ysrp-setting-label { font-weight: 500; }
+.ysrp-setting-desc { font-size: 12px; color: var(--ysrp-text-2); }
+.ysrp-dialog-footer { display: flex; justify-content: flex-end; }
+
+/* ---------------------------------------------------------------- narrow screens (N-5.2.3) */
+@media (max-width: 640px) {
+  .ysrp-settings-container { width: 94vw; height: 88vh; flex-direction: column; }
+  .ysrp-nav {
+    flex: 0 0 auto;
+    width: auto;
+    flex-direction: row;
+    padding: 8px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border-right: none;
+    border-bottom: 1px solid var(--ysrp-border);
+  }
+  .ysrp-nav-groups, .ysrp-nav-group { flex-direction: row; gap: 2px; }
+  .ysrp-nav-title, .ysrp-nav-footer { display: none; }
+  .ysrp-tab { flex: 0 0 auto; }
+  .ysrp-main { padding: 16px; }
+  .ysrp-panes { margin-right: -16px; }
+  .ysrp-pane { padding-right: 16px; }
+  .ysrp-plugin-grid { grid-template-columns: minmax(0, 1fr); }
+  .ysrp-info-label { flex-basis: auto; }
+}
+`;
+
   // src/plugins/_core/settings/index.ts
-  var tabs2 = [
-    { id: "records", group: "general", order: 10, icon: "database", label: () => t("Records", "记录"), render: RecordsPane },
-    { id: "storage", group: "general", order: 20, icon: "gear", label: () => t("Storage", "存储"), render: StoragePane },
-    { id: "plugins", group: "plugins", order: 10, icon: "puzzle-piece", label: () => t("Plugins", "插件"), render: PluginsPane },
-    { id: "display", group: "general", order: 30, icon: "globe", label: () => t("Display", "界面"), render: DisplayPane }
-  ];
-  var languageTimer2 = null;
-  var offLanguage2 = null;
   var settings_default = definePlugin({
     name: "Settings",
-    title: () => t("Settings dialog", "设置弹窗"),
-    description: () => t("The records list, storage, plugins and language settings.", "记录列表，以及存储、插件、语言等设置。"),
-    icon: "gear",
-    authors: [Devs.V],
-    required: true,
-    start() {
-      mount();
-      for (const tab of tabs2)
-        addSettingsTab(tab);
-      offLanguage2 = on(EVT_LANG, () => {
-        if (languageTimer2)
-          clearTimeout(languageTimer2);
-        languageTimer2 = setTimeout(() => rebuild(), 50);
-      });
+    displayName: { en: "Settings", zh: "设置弹窗" },
+    description: {
+      en: "The settings dialog shell with the Records, Storage, Plugins and Display tabs.",
+      zh: "设置弹窗外壳，以及记录、存储、插件、界面标签。"
     },
-    stop() {
-      offLanguage2?.();
-      offLanguage2 = null;
-      for (const tab of tabs2)
-        removeSettingsTab(tab.id);
-      unmount();
+    authors: ["0_V"],
+    icon: "gear",
+    required: true,
+    start(ctx) {
+      ctx.addStyle(style_default2);
+      const modal = new SettingsModal;
+      modal.start();
+      ctx.onDispose(() => modal.destroy());
+      setModalController({
+        open: (tab) => modal.open(tab),
+        close: () => modal.close(),
+        isOpen: () => modal.isOpen(),
+        refreshHeader: () => modal.refreshHeader()
+      });
+      ctx.onDispose(() => setModalController(null));
+      ctx.addTab(createRecordsTab((busy) => modal.setBusy(busy)));
+      ctx.addTab(createStorageTab());
+      ctx.addTab(createDisplayTab());
+      ctx.addTab(createPluginsTab((content, onClose) => modal.openDialog(content, onClose)));
+      ctx.addRowButton(noteContribution);
+      ctx.addRowButton(linkContribution);
     }
   });
 
-  // src/plugins/badgeToggle/styles.css
-  var styles_default = `.ysrp-badge-toggle {
-    flex: 0 0 auto;
-    margin-right: .5rem;
-    padding: 0;
-    border: none;
-    background: transparent;
-    font-size: 1.5rem;
-    line-height: 1;
-    cursor: pointer;
+  // src/plugins/badgeToggle/style.css
+  var style_default3 = `/* N-6.1: transparent \uD83D\uDCBE button before the badge (1.5rem -> 15px, .5rem -> 5px). */
+.ysrp-badge-toggle {
+  all: initial;
+  background: transparent;
+  border: none;
+  font-size: 15px;
+  line-height: 1;
+  margin: 0 5px 0 0;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
 }
-
 .last-save-info-container.ysrp-badge-hidden {
-    opacity: 0;
-    pointer-events: none;
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 `;
 
   // src/plugins/badgeToggle/index.ts
-  var settings = definePluginSettings({
-    startHidden: {
-      type: 2 /* BOOLEAN */,
-      default: true,
-      description: () => t("Hide the badge when a page opens", "打开页面时先隐藏徽标")
-    }
-  });
-  var button = null;
-  var hidden = true;
-  var offMount = null;
-  function render2(badge) {
-    if (!button)
-      return;
-    button.setAttribute("aria-pressed", String(!hidden));
-    button.title = hidden ? t("Show progress badge", "显示进度徽标") : t("Hide progress badge", "隐藏进度徽标");
-    button.setAttribute("aria-label", button.title);
-    if (badge)
-      badge.classList.toggle("ysrp-badge-hidden", hidden);
-  }
-  function attach(badge) {
-    if (!button) {
-      button = h("button", { type: "button", class: "ysrp-badge-toggle", text: "\uD83D\uDCBE" });
-      shieldFromPlayer(button, () => {
-        hidden = !hidden;
-        render2(current());
-      });
-    }
-    if (button.nextElementSibling !== badge)
-      badge.before(button);
-    render2(badge);
-  }
+  var HIDDEN_CLASS = "ysrp-badge-hidden";
   var badgeToggle_default = definePlugin({
     name: "BadgeToggle",
-    title: () => t("Badge toggle", "徽标开关"),
-    description: () => t("Adds a \uD83D\uDCBE button that shows or hides the progress badge.", "在徽标旁加一个 \uD83D\uDCBE 按钮，点击显示或隐藏进度徽标。"),
-    icon: "floppy-disk",
-    authors: [Devs.V],
-    enabledByDefault: true,
-    settings,
-    start() {
-      hidden = settings.store.startHidden;
-      registerStyle("badgeToggle", styles_default);
-      offMount = onMount(attach);
-      const badge = current();
-      if (badge)
-        attach(badge);
+    displayName: { en: "Badge toggle", zh: "徽标开关" },
+    description: {
+      en: "Adds a \uD83D\uDCBE button in front of the badge to show or hide it with one click.",
+      zh: "在徽标前添加 \uD83D\uDCBE 按钮，一键显示或隐藏徽标。"
     },
-    stop() {
-      offMount?.();
-      offMount = null;
-      button?.remove();
-      button = null;
-      current()?.classList.remove("ysrp-badge-hidden");
-      unregisterStyle("badgeToggle");
+    authors: ["0_V"],
+    icon: "floppy-disk",
+    enabledByDefault: true,
+    settings: {
+      startHidden: {
+        type: "switch",
+        default: true,
+        label: { en: "Hide the badge when a page opens", zh: "打开页面时先隐藏徽标" }
+      }
+    },
+    start(ctx) {
+      ctx.addStyle(style_default3);
+      let hidden = ctx.settings.get("startHidden") !== false;
+      const button = h("button", { class: "ysrp-badge-toggle", type: "button", text: "\uD83D\uDCBE" });
+      const refreshTitle = () => {
+        const tip = hidden ? tr("Show the badge", "显示徽标") : tr("Hide the badge", "隐藏徽标");
+        button.title = tip;
+        button.setAttribute("aria-label", tip);
+        button.setAttribute("aria-pressed", String(!hidden));
+      };
+      button.addEventListener("pointerdown", (ev) => {
+        swallow(ev);
+        hidden = !hidden;
+        apply();
+      }, true);
+      button.addEventListener("click", swallow, true);
+      button.addEventListener("touchstart", swallow, { capture: true, passive: false });
+      const container = () => badgeContainer() || document.querySelector(`.${CLS_BADGE_CONTAINER}`);
+      const apply = () => {
+        const badge = container();
+        if (!badge)
+          return;
+        if (button.nextElementSibling !== badge)
+          badge.before(button);
+        badge.classList.toggle(HIDDEN_CLASS, hidden);
+        refreshTitle();
+      };
+      ctx.onDispose(badgeMounted.on(() => apply()));
+      ctx.observe(document.documentElement, { childList: true, subtree: true }, () => {
+        const badge = container();
+        if (badge && (button.nextElementSibling !== badge || badge.classList.contains(HIDDEN_CLASS) !== hidden))
+          apply();
+      });
+      ctx.listen(document, EVT_LANGUAGE, refreshTitle);
+      ctx.onDispose(() => {
+        button.remove();
+        for (const el of Array.from(document.querySelectorAll(`.${HIDDEN_CLASS}`)))
+          el.classList.remove(HIDDEN_CLASS);
+      });
+      apply();
     }
   });
 
-  // src/utils/http.ts
+  // src/utils/net.ts
   function wrap(status, text) {
     return {
       status,
       ok: status >= 200 && status < 300,
       text,
-      json: () => JSON.parse(text || "null")
+      json() {
+        return JSON.parse(text);
+      }
     };
   }
-  var hasGMXhr = () => typeof GM_xmlhttpRequest === "function";
-  function request(req) {
-    const timeoutMs = req.timeoutMs ?? 30000;
-    if (hasGMXhr()) {
+  function httpRequest(req) {
+    const method = req.method || "GET";
+    if (!req.preferFetch && typeof GM_xmlhttpRequest === "function") {
       return new Promise((resolve, reject) => {
-        GM_xmlhttpRequest({
-          method: req.method,
-          url: req.url,
-          headers: req.headers,
-          data: req.body,
-          timeout: timeoutMs,
-          onload: (res) => resolve(wrap(res.status, res.responseText ?? "")),
-          onerror: () => reject(new Error(`Network error: ${req.method} ${new URL(req.url).host}`)),
-          ontimeout: () => reject(new Error(`Timed out: ${req.method} ${new URL(req.url).host}`)),
-          onabort: () => reject(new Error("Request aborted"))
-        });
+        try {
+          GM_xmlhttpRequest({
+            method,
+            url: req.url,
+            headers: req.headers,
+            data: req.body,
+            timeout: req.timeoutMs,
+            onload: (res) => resolve(wrap(res.status, res.responseText || "")),
+            onerror: (err) => reject(new Error(`Network error: ${String(err?.error || "request failed")}`)),
+            ontimeout: () => reject(new Error("Request timed out")),
+            onabort: () => reject(new Error("Request aborted"))
+          });
+        } catch (err) {
+          reject(err);
+        }
       });
     }
-    const controller = new AbortController;
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    return fetch(req.url, { method: req.method, headers: req.headers, body: req.body, signal: controller.signal, credentials: "omit", cache: "no-store" }).then(async (res) => wrap(res.status, await res.text())).finally(() => clearTimeout(timer));
+    const controller = typeof AbortController === "function" ? new AbortController : null;
+    let timer = 0;
+    if (controller && req.timeoutMs)
+      timer = window.setTimeout(() => controller.abort(), req.timeoutMs);
+    return fetch(req.url, {
+      method,
+      headers: req.headers,
+      body: req.body,
+      credentials: "omit",
+      cache: "no-store",
+      signal: controller ? controller.signal : undefined
+    }).then(async (res) => {
+      const text = await res.text();
+      return wrap(res.status, text);
+    }).finally(() => {
+      if (timer)
+        clearTimeout(timer);
+    });
   }
 
   // src/plugins/driveSync/drive.ts
-  var TOKEN_URL = "https://oauth2.googleapis.com/token";
-  var FILES_URL = "https://www.googleapis.com/drive/v3/files";
-  var UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files";
   var FOLDER_NAME = "[Youtube] Video Memory";
-  var LEGACY_FILE_NAME = "[Youtube] Video Memory Sync.json";
   var FOLDER_MIME = "application/vnd.google-apps.folder";
-  var JSON_MIME = "application/json";
-  var FILE_FIELDS = "id,name,modifiedTime";
-
-  class DriveError extends Error {
-    status;
-    constructor(message, status = 0) {
-      super(message);
-      this.status = status;
+  var LEGACY_FILE_NAME = "[Youtube] Video Memory Sync.json";
+  var TOKEN_URL = "https://oauth2.googleapis.com/token";
+  var API = "https://www.googleapis.com/drive/v3/files";
+  var UPLOAD = "https://www.googleapis.com/upload/drive/v3/files";
+  function readCredentials() {
+    const empty = { clientId: "", clientSecret: "", refreshToken: "" };
+    const raw = readSecretSetting(KEY_DRIVE);
+    if (!raw)
+      return empty;
+    try {
+      let parsed = JSON.parse(raw);
+      if (typeof parsed === "string")
+        parsed = JSON.parse(parsed);
+      if (!parsed || typeof parsed !== "object")
+        return empty;
+      const p = parsed;
+      return {
+        clientId: typeof p.clientId === "string" ? p.clientId.trim() : "",
+        clientSecret: typeof p.clientSecret === "string" ? p.clientSecret.trim() : "",
+        refreshToken: typeof p.refreshToken === "string" ? p.refreshToken.trim() : ""
+      };
+    } catch {
+      return empty;
     }
   }
-  function readCredentials() {
-    let stored = {};
-    try {
-      stored = JSON.parse(readSecret(KEY_DRIVE) || "{}") || {};
-    } catch {}
-    return {
-      clientId: typeof stored.clientId === "string" ? stored.clientId.trim() : "",
-      clientSecret: typeof stored.clientSecret === "string" ? stored.clientSecret.trim() : "",
-      refreshToken: typeof stored.refreshToken === "string" ? stored.refreshToken.trim() : ""
-    };
+  function saveCredentials(creds) {
+    writeSecretSetting(KEY_DRIVE, JSON.stringify({
+      clientId: creds.clientId.trim(),
+      clientSecret: creds.clientSecret.trim(),
+      refreshToken: creds.refreshToken.trim()
+    }));
   }
-  function writeCredentials(creds) {
-    let stored = {};
-    try {
-      stored = JSON.parse(readSecret(KEY_DRIVE) || "{}") || {};
-    } catch {}
-    writeSecret(KEY_DRIVE, JSON.stringify({ ...stored, ...creds }));
+  function hasCredentials(creds) {
+    return Boolean(creds.clientId && creds.clientSecret && creds.refreshToken);
   }
-  var hasCredentials = (c) => Boolean(c.clientId && c.clientSecret && c.refreshToken);
   function fileNameFor(title, videoId) {
-    const clean = String(title ?? "").replace(/[\u0000-\u001f\u007f]/g, "").replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, " ").trim().slice(0, 120).trim();
-    return `${clean || UNKNOWN_TITLE}｜${videoId}.json`;
+    let clean = typeof title === "string" ? title : "";
+    clean = clean.replace(/[\u0000-\u001f\u007f]/g, "").replace(/[\\/:*?"<>|]/g, "-").trim();
+    if (clean.length > 120)
+      clean = clean.slice(0, 120).trim();
+    if (!clean)
+      clean = UNKNOWN_TITLE;
+    return `${clean}｜${videoId}.json`;
   }
   function videoIdFromName(name) {
-    const m = /(?:｜([\w-]+)|\[([\w-]+)\])\.json$/.exec(name);
-    return m ? m[1] || m[2] : null;
+    const m = /｜([^｜]+)\.json$/.exec(name) || /\[([^\]]+)\]\.json$/.exec(name);
+    return m ? m[1] : null;
   }
-  var quote = (value) => `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
-  function describe(status, text) {
+  var quote = (value) => value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  function errorFrom(res) {
+    let message = `HTTP ${res.status}`;
     try {
-      const body = JSON.parse(text);
-      const message = body?.error?.message || body?.error_description || body?.error;
-      if (message)
-        return `HTTP ${status}: ${typeof message === "string" ? message : JSON.stringify(message)}`;
+      const data = res.json();
+      if (data && typeof data.error === "object" && data.error.message)
+        message = data.error.message;
+      else if (data && data.error_description)
+        message = data.error_description;
+      else if (data && typeof data.error === "string")
+        message = data.error;
     } catch {}
-    return `HTTP ${status}`;
+    const err = new Error(message);
+    err.status = res.status;
+    return err;
   }
 
   class DriveClient {
-    credentials;
+    creds;
     token = null;
     folder = null;
-    constructor(credentials) {
-      this.credentials = credentials;
+    folderTask = null;
+    constructor(creds) {
+      this.creds = creds;
     }
     reset() {
       this.token = null;
       this.folder = null;
+      this.folderTask = null;
     }
     async accessToken(force = false) {
       if (!force && this.token && Date.now() < this.token.expiresAt)
         return this.token.value;
-      const c = this.credentials();
+      const c = this.creds();
       if (!hasCredentials(c))
-        throw new DriveError("Missing credentials");
+        throw new Error("Missing Google Drive credentials");
       const body = new URLSearchParams({
         client_id: c.clientId,
         client_secret: c.clientSecret,
         refresh_token: c.refreshToken,
         grant_type: "refresh_token"
       }).toString();
-      const res = await request({ method: "POST", url: TOKEN_URL, headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+      const res = await httpRequest({ method: "POST", url: TOKEN_URL, headers: { "Content-Type": "application/x-www-form-urlencoded" }, body, timeoutMs: 30000 });
       if (!res.ok)
-        throw new DriveError(describe(res.status, res.text), res.status);
+        throw errorFrom(res);
       const data = res.json();
-      if (!data?.access_token)
-        throw new DriveError("Token response has no access_token");
-      const lifetime = (Number(data.expires_in) || 3600) * 1000;
-      this.token = { value: data.access_token, expiresAt: Date.now() + Math.max(0, lifetime - 60000) };
-      return this.token.value;
+      if (!data.access_token)
+        throw new Error("No access token in response");
+      const ttl = Number(data.expires_in) > 0 ? Number(data.expires_in) * 1000 : 3600000;
+      this.token = { value: data.access_token, expiresAt: Date.now() + ttl - 60000 };
+      return data.access_token;
     }
-    async call(method, url, init = {}, retry = true) {
-      const token = await this.accessToken();
-      const res = await request({ method, url, headers: { ...init.headers, Authorization: `Bearer ${token}` }, body: init.body });
-      if (res.status === 401 && retry) {
-        this.token = null;
-        return this.call(method, url, init, false);
+    async call(method, url, body, headers = {}) {
+      for (let attempt = 0;attempt < 2; attempt++) {
+        const token = await this.accessToken(attempt > 0);
+        const res = await httpRequest({ method, url, body, headers: { ...headers, Authorization: `Bearer ${token}` }, timeoutMs: 60000 });
+        if (res.status === 401 && attempt === 0) {
+          this.token = null;
+          continue;
+        }
+        if (!res.ok)
+          throw errorFrom(res);
+        return res;
       }
-      if (!res.ok && !(method === "DELETE" && res.status === 404))
-        throw new DriveError(describe(res.status, res.text), res.status);
-      return res.text;
+      throw new Error("Unauthorized");
     }
-    async list(q, orderBy) {
-      const params = new URLSearchParams({ q, fields: `files(${FILE_FIELDS})`, pageSize: "100", spaces: "drive" });
-      if (orderBy)
-        params.set("orderBy", orderBy);
-      const text = await this.call("GET", `${FILES_URL}?${params}`);
-      return JSON.parse(text || "{}").files ?? [];
-    }
-    async folderId() {
-      if (this.folder)
-        return this.folder;
-      const found = await this.list(`name = ${quote(FOLDER_NAME)} and mimeType = ${quote(FOLDER_MIME)} and trashed = false`, "createdTime");
-      if (found[0])
-        return this.folder = found[0].id;
-      const text = await this.call("POST", `${FILES_URL}?fields=id`, {
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: FOLDER_NAME, mimeType: FOLDER_MIME })
+    async list(q) {
+      const params = new URLSearchParams({
+        q,
+        orderBy: "modifiedTime desc",
+        fields: "files(id,name,modifiedTime)",
+        pageSize: "100",
+        spaces: "drive"
       });
-      return this.folder = JSON.parse(text).id;
+      const res = await this.call("GET", `${API}?${params.toString()}`);
+      const data = res.json();
+      return Array.isArray(data.files) ? data.files : [];
+    }
+    folderId() {
+      if (this.folder)
+        return Promise.resolve(this.folder);
+      if (!this.folderTask) {
+        this.folderTask = (async () => {
+          const found = await this.list(`name = '${quote(FOLDER_NAME)}' and mimeType = '${FOLDER_MIME}' and trashed = false`);
+          if (found.length)
+            return found[0].id;
+          const res = await this.call("POST", `${API}?fields=id`, JSON.stringify({ name: FOLDER_NAME, mimeType: FOLDER_MIME }), { "Content-Type": "application/json" });
+          const id = res.json().id;
+          if (!id)
+            throw new Error("Folder creation returned no id");
+          return id;
+        })().then((id) => {
+          this.folder = id;
+          return id;
+        }).finally(() => {
+          this.folderTask = null;
+        });
+      }
+      return this.folderTask;
     }
     async filesFor(videoId) {
       const folder = await this.folderId();
-      const files = await this.list(`name contains ${quote(videoId)} and mimeType = ${quote(JSON_MIME)} and trashed = false and ${quote(folder)} in parents`, "modifiedTime desc");
+      const files = await this.list(`name contains '${quote(videoId)}' and mimeType = 'application/json' and '${quote(folder)}' in parents and trashed = false`);
       return files.filter((f) => videoIdFromName(f.name) === videoId);
     }
     async findByName(name) {
-      return this.list(`name = ${quote(name)} and trashed = false`, "modifiedTime desc");
+      return this.list(`name = '${quote(name)}' and trashed = false`);
     }
     async download(fileId) {
-      const text = await this.call("GET", `${FILES_URL}/${encodeURIComponent(fileId)}?alt=media`);
-      return JSON.parse(text);
+      const res = await this.call("GET", `${API}/${encodeURIComponent(fileId)}?alt=media`);
+      return res.text;
     }
-    async upload(name, content, existingId) {
-      const boundary = `ysrp-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
-      const metadata = { name, mimeType: JSON_MIME };
-      if (!existingId)
-        metadata.parents = [await this.folderId()];
+    multipart(metadata, content) {
+      const boundary = `ysrp${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
       const body = [
         `--${boundary}`,
         "Content-Type: application/json; charset=UTF-8",
         "",
         JSON.stringify(metadata),
         `--${boundary}`,
-        "Content-Type: application/json; charset=UTF-8",
+        "Content-Type: application/json",
         "",
-        JSON.stringify(content),
+        content,
         `--${boundary}--`,
         ""
       ].join(`\r
 `);
-      const url = existingId ? `${UPLOAD_URL}/${encodeURIComponent(existingId)}?uploadType=multipart&fields=${FILE_FIELDS}` : `${UPLOAD_URL}?uploadType=multipart&fields=${FILE_FIELDS}`;
-      const text = await this.call(existingId ? "PATCH" : "POST", url, {
-        headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
-        body
-      });
-      return JSON.parse(text);
+      return { body, type: `multipart/related; boundary=${boundary}` };
+    }
+    async create(name, content) {
+      const folder = await this.folderId();
+      const { body, type } = this.multipart({ name, parents: [folder], mimeType: "application/json" }, content);
+      const res = await this.call("POST", `${UPLOAD}?uploadType=multipart&fields=id,name,modifiedTime`, body, { "Content-Type": type });
+      return res.json();
+    }
+    async update(fileId, name, content) {
+      const { body, type } = this.multipart({ name }, content);
+      const res = await this.call("PATCH", `${UPLOAD}/${encodeURIComponent(fileId)}?uploadType=multipart&fields=id,name,modifiedTime`, body, { "Content-Type": type });
+      return res.json();
     }
     async remove(fileId) {
-      await this.call("DELETE", `${FILES_URL}/${encodeURIComponent(fileId)}`);
+      await this.call("DELETE", `${API}/${encodeURIComponent(fileId)}`);
     }
   }
 
   // src/plugins/driveSync/sync.ts
-  var logger5 = new Logger("DriveSync");
-  var DEBOUNCE_MS = 1500;
+  var FIRST_DELAY_MS = 1500;
   var MIN_INTERVAL_MS = 15000;
-  var RETRY_MS = 30000;
-  var PAYLOAD_VERSION = "2";
-  var client = new DriveClient(readCredentials);
-  var queue = new Map;
-  var lastUpload = new Map;
-  var timer3 = null;
-  var timerDue = 0;
-  var running = false;
-  var rerun = false;
-  var active2 = false;
-  var fullSyncPending = false;
-  var status = { state: "idle", done: 0, total: 0, message: "", at: 0 };
-  var configured = () => hasCredentials(readCredentials());
-  var getStatus = () => status;
-  function setStatus(next) {
-    status = { done: 0, total: 0, message: "", ...next, at: Date.now() };
-    emit(EVT_DRIVE_STATUS, status);
-  }
-  function arm(ms) {
-    if (!active2)
-      return;
-    const due = Date.now() + Math.max(0, ms);
-    if (timer3 && timerDue <= due)
-      return;
-    if (timer3)
-      clearTimeout(timer3);
-    timerDue = due;
-    timer3 = setTimeout(() => {
-      timer3 = null;
-      flush2();
-    }, Math.max(0, ms));
-  }
-  function schedule(videoId, action, force = false) {
-    if (!active2 || !configured())
-      return;
-    const previous = queue.get(videoId);
-    queue.set(videoId, { action, force: force || previous?.action === action && previous.force });
-    arm(DEBOUNCE_MS);
-  }
-  var stripMeta = ({ driveSync: _meta, ...rest }) => rest;
-  async function uploadRecord(videoId, force) {
-    const startedAt = Date.now();
-    const rec = get(videoId);
-    if (!rec)
-      return false;
-    if (!force && (Number(rec.updatedAt) || 0) <= (Number(rec.driveSync?.lastUploadAt) || 0))
-      return false;
-    const files = await client.filesFor(videoId);
-    const payload = {
-      version: PAYLOAD_VERSION,
-      videoId,
-      videoUrl: `https://www.youtube.com/watch?v=${videoId}`,
-      exportedAt: startedAt,
-      record: stripMeta(rec)
-    };
-    const saved = await client.upload(fileNameFor(rec.videoName, videoId), payload, files[0]?.id);
-    for (const extra of files.slice(1))
-      await client.remove(extra.id);
-    const remoteModifiedAt = Date.parse(saved?.modifiedTime) || Date.now();
-    updateIfExists(videoId, (r) => ({ ...r, driveSync: { ...r.driveSync, lastUploadAt: startedAt, remoteModifiedAt } }), { touch: false, source: "sync" });
-    return true;
-  }
-  async function removeRemote(videoId) {
-    for (const file of await client.filesFor(videoId))
-      await client.remove(file.id);
-  }
-  async function flush2() {
-    if (!active2)
-      return;
-    if (running) {
-      rerun = true;
-      return;
-    }
-    if (!queue.size)
-      return;
-    running = true;
-    let failed = false;
-    try {
-      const total = queue.size;
-      let done = 0;
-      let nextDue = Infinity;
-      setStatus({ state: "start", done, total });
-      for (const [videoId, job] of [...queue]) {
-        if (!active2)
-          break;
-        const last = lastUpload.get(videoId) || 0;
-        if (!job.force && job.action === "set" && Date.now() - last < MIN_INTERVAL_MS) {
-          nextDue = Math.min(nextDue, last + MIN_INTERVAL_MS);
-          continue;
-        }
-        queue.delete(videoId);
-        try {
-          if (job.action === "remove")
-            await removeRemote(videoId);
-          else if (await uploadRecord(videoId, job.force))
-            lastUpload.set(videoId, Date.now());
-        } catch (err) {
-          failed = true;
-          if (!queue.has(videoId))
-            queue.set(videoId, job);
-          logger5.warn(`${job.action} ${videoId} failed`, err);
-          setStatus({ state: "error", done, total, message: errorMessage(err) });
-          arm(RETRY_MS);
-          break;
-        }
-        done++;
-        setStatus({ state: "progress", done, total });
-      }
-      if (!failed) {
-        if (nextDue < Infinity) {
-          setStatus({ state: "deferred", done, total });
-          arm(nextDue - Date.now());
-        } else {
-          if (fullSyncPending && !queue.size) {
-            fullSyncPending = false;
-            writeSetting(KEY_DRIVE_FULL_SYNC, "1");
-          }
-          setStatus({ state: "done", done, total });
-        }
-      }
-    } finally {
-      running = false;
-      if (rerun) {
-        rerun = false;
-        arm(0);
-      }
-    }
-  }
-  function uploadAll() {
-    if (!active2 || !configured())
-      return 0;
-    const items = list();
-    for (const { id } of items)
-      queue.set(id, { action: "set", force: true });
-    arm(0);
-    return items.length;
-  }
-  async function importLegacy() {
-    const [file] = await client.findByName(LEGACY_FILE_NAME);
-    if (!file)
-      return 0;
-    const payload = await client.download(file.id);
-    const count = importPayload(payload, {
-      source: "sync",
-      accept: (_id, incoming, existing) => !existing || (Number(incoming.saveDate) || 0) > (Number(existing.saveDate) || 0)
-    });
-    if (count)
-      emit(EVT_RECORD, { videoId: null });
-    logger5.info(`Imported ${count} record(s) from ${LEGACY_FILE_NAME}`);
-    return count;
-  }
-  async function fullSync() {
-    if (!active2 || !configured())
-      return;
-    fullSyncPending = true;
-    try {
-      await importLegacy();
-    } catch (err) {
-      logger5.warn("Legacy import failed", err);
-    }
-    uploadAll();
-  }
-  function maybeFirstFullSync() {
-    if (readSetting(KEY_DRIVE_FULL_SYNC) !== "1")
-      fullSync();
-  }
-  async function pullRecord(videoId) {
-    if (!active2 || !configured())
-      return;
-    const [file] = await client.filesFor(videoId);
-    const local = get(videoId);
-    if (!file) {
-      if (local)
-        schedule(videoId, "set");
-      return;
-    }
-    const remoteTime = Date.parse(file.modifiedTime) || 0;
-    const meta = local?.driveSync ?? {};
-    const newer = remoteTime > (Number(local?.updatedAt) || 0) && remoteTime > (Number(meta.lastDownloadAt) || 0) && remoteTime > (Number(meta.remoteModifiedAt) || 0);
-    if (!newer) {
-      if (local && (Number(local.updatedAt) || 0) > (Number(meta.lastUploadAt) || 0))
-        schedule(videoId, "set");
-      return;
-    }
-    const payload = await client.download(file.id);
-    const remote = payload?.record;
-    if (!remote || typeof remote !== "object" || Array.isArray(remote) || payload.videoId && payload.videoId !== videoId)
-      return;
-    const now = Date.now();
-    update(videoId, (r) => ({
-      ...r,
-      ...stripMeta(remote),
-      updatedAt: Number(remote.updatedAt) || remoteTime,
-      driveSync: { ...r.driveSync, lastDownloadAt: now, lastUploadAt: now, remoteModifiedAt: remoteTime }
-    }), { touch: false, source: "sync" });
-    emit(EVT_RECORD, { videoId, videoProgress: remote.videoProgress });
-  }
-  function activate() {
-    active2 = true;
-    if (queue.size)
-      arm(DEBOUNCE_MS);
-  }
-  function deactivate() {
-    active2 = false;
-    if (timer3)
-      clearTimeout(timer3);
-    timer3 = null;
-    queue.clear();
-    fullSyncPending = false;
-    setStatus({ state: "idle" });
-  }
 
-  // src/plugins/driveSync/DrivePane.ts
-  function statusText(s) {
-    if (!configured())
-      return t("Not configured: fill in the three fields below.", "未配置：请填写下面三项。");
-    switch (s.state) {
-      case "start":
-      case "progress":
-        return t("Syncing… {done} / {total}", "同步中… {done} / {total}", { done: s.done, total: s.total });
-      case "done":
-        return t("Synced at {time}", "已同步（{time}）", { time: new Date(s.at).toLocaleTimeString() });
-      case "deferred":
-        return t("Waiting a few seconds before the next upload…", "稍后继续上传…");
-      case "error":
-        return t("Sync failed: {message}", "同步出错：{message}", { message: s.message });
-      default:
-        return t("Ready. Changes upload automatically.", "已就绪，修改会自动上传。");
+  class DriveSync {
+    client;
+    creds = readCredentials();
+    pending = new Map;
+    lastUpload = new Map;
+    deletes = [];
+    fullRequested = false;
+    working = false;
+    timer = 0;
+    stopped = false;
+    status = { state: "idle", done: 0, total: 0, message: "", at: Date.now() };
+    onStatus = null;
+    constructor() {
+      this.client = new DriveClient(() => this.creds);
     }
-  }
-  function DrivePane(ctx) {
-    const creds = readCredentials();
-    const clientId = h("input", { class: "ysrp-input", type: "text", placeholder: "xxxx.apps.googleusercontent.com", autocomplete: "off", spellcheck: "false" });
-    const secret = secretInput("GOCSPX-…", () => t("Show", "显示"), () => t("Hide", "隐藏"), "--ysrp-accent");
-    const token = secretInput("1//…", () => t("Show", "显示"), () => t("Hide", "隐藏"), "--ysrp-accent");
-    clientId.value = creds.clientId;
-    secret.input.value = creds.clientSecret;
-    token.input.value = creds.refreshToken;
-    const status = h("div", { class: "ysrp-msg ysrp-drive-status" });
-    const result = h("div", { class: "ysrp-msg", style: { display: "none" } });
-    const renderStatus = () => {
-      const s = getStatus();
-      status.textContent = statusText(s);
-      status.className = `ysrp-msg ysrp-drive-status${s.state === "error" ? " is-error" : s.state === "done" ? " is-ok" : ""}`;
-    };
-    const save = textButton("floppy-disk", t("Save & verify", "保存并验证"), async () => {
-      const next = { clientId: clientId.value.trim(), clientSecret: secret.input.value.trim(), refreshToken: token.input.value.trim() };
-      const wasConfigured = configured();
-      writeCredentials(next);
-      client.reset();
-      renderStatus();
-      if (!hasCredentials(next)) {
-        setMessage(result, t("Saved. All three fields are needed to sync.", "已保存。三项都填写后才会同步。"));
+    configured() {
+      return hasCredentials(this.creds);
+    }
+    reloadCredentials() {
+      this.creds = readCredentials();
+      this.client.reset();
+    }
+    start() {
+      this.stopped = false;
+      if (!this.configured()) {
+        this.setStatus("idle", 0, 0, "");
         return;
       }
-      save.disabled = true;
-      setMessage(result, t("Checking…", "正在验证…"));
+      if (readSetting(KEY_DRIVE_FULL_SYNC) !== "1")
+        this.requestFullSync();
+    }
+    stop() {
+      this.stopped = true;
+      if (this.timer)
+        clearTimeout(this.timer);
+      this.timer = 0;
+      this.pending.clear();
+      this.deletes = [];
+    }
+    setStatus(state, done, total, message) {
+      this.status = { state, done, total, message, at: Date.now() };
+      dispatch(EVT_DRIVE_STATUS, { state, done, total, message });
+      this.onStatus?.(this.status);
+    }
+    handleChange(change) {
+      if (this.stopped || !this.configured())
+        return;
+      if (change.kind === "content")
+        this.queueUpload(change.videoId, false);
+      else if (change.kind === "delete") {
+        this.pending.delete(change.videoId);
+        this.deletes.push(change.videoId);
+        this.kick();
+      }
+    }
+    queueUpload(videoId, force) {
+      if (this.stopped || !this.configured())
+        return;
+      if (this.pending.has(videoId))
+        return;
+      const rec = readRecord(videoId);
+      if (!rec)
+        return;
+      const uploadedAt = rec.driveSync?.lastUploadAt || 0;
+      if (!force && (Number(rec.updatedAt) || 0) <= uploadedAt)
+        return;
+      const now = Date.now();
+      const earliest = (this.lastUpload.get(videoId) || 0) + MIN_INTERVAL_MS;
+      const due = Math.max(now + FIRST_DELAY_MS, earliest);
+      this.pending.set(videoId, due);
+      if (earliest > now + FIRST_DELAY_MS)
+        this.setStatus("deferred", 0, 0, "");
+      this.schedule();
+    }
+    requestFullSync() {
+      if (!this.configured())
+        return;
+      this.fullRequested = true;
+      this.kick();
+    }
+    uploadAll() {
+      if (!this.configured())
+        return;
+      this.fullRequested = true;
+      this.kick();
+    }
+    schedule() {
+      if (this.timer)
+        clearTimeout(this.timer);
+      this.timer = 0;
+      if (this.stopped || this.working || !this.pending.size)
+        return;
+      const next = Math.min(...this.pending.values());
+      this.timer = window.setTimeout(() => {
+        this.timer = 0;
+        this.kick();
+      }, Math.max(0, next - Date.now()));
+    }
+    nextTask() {
+      if (this.deletes.length)
+        return { kind: "delete", videoId: this.deletes.shift() };
+      if (this.fullRequested) {
+        this.fullRequested = false;
+        return { kind: "full" };
+      }
+      const now = Date.now();
+      for (const [videoId, due] of this.pending) {
+        if (due <= now) {
+          this.pending.delete(videoId);
+          return { kind: "upload", videoId };
+        }
+      }
+      return null;
+    }
+    async kick() {
+      if (this.working || this.stopped)
+        return;
+      this.working = true;
       try {
-        await client.accessToken(true);
-        setMessage(result, t("Connected to Google Drive.", "已连接 Google Drive。"), "ok");
-        if (!wasConfigured)
-          fullSync();
-      } catch (err) {
-        setMessage(result, t("Could not connect: {message}", "连接失败：{message}", { message: errorMessage(err) }), "error");
+        for (let task = this.nextTask();task && !this.stopped; task = this.nextTask()) {
+          try {
+            if (task.kind === "upload") {
+              this.setStatus("start", 0, 1, "");
+              await this.upload(task.videoId);
+              this.setStatus("done", 1, 1, "");
+            } else if (task.kind === "delete") {
+              await this.deleteRemote(task.videoId);
+            } else {
+              await this.fullSync();
+            }
+          } catch (err) {
+            console.warn("[Video Memory] Drive sync failed:", err);
+            this.setStatus("error", 0, 0, errorMessage(err));
+          }
+        }
       } finally {
-        save.disabled = false;
+        this.working = false;
+        this.schedule();
       }
-    });
-    const upload = textButton("cloud-arrow-up", t("Upload all", "全部上传"), () => {
-      if (!configured()) {
-        setMessage(result, t("Fill in and save the credentials first.", "请先填写并保存凭据。"), "error");
+    }
+    payload(videoId, record) {
+      const copy = { ...record };
+      delete copy.driveSync;
+      return JSON.stringify({ version: "2", videoId, videoUrl: watchUrl(videoId), exportedAt: Date.now(), record: copy });
+    }
+    async upload(videoId) {
+      const rec = readRecord(videoId);
+      if (!rec)
+        return;
+      const snapshotAt = Date.now();
+      this.lastUpload.set(videoId, snapshotAt);
+      const name = fileNameFor(rec.videoName, videoId);
+      const content = this.payload(videoId, rec);
+      const files = await this.client.filesFor(videoId);
+      let file;
+      if (files.length) {
+        file = await this.client.update(files[0].id, name, content);
+        for (const extra of files.slice(1)) {
+          try {
+            await this.client.remove(extra.id);
+          } catch (err) {
+            console.warn("[Video Memory] Drive cleanup failed:", err);
+          }
+        }
+      } else {
+        file = await this.client.create(name, content);
+      }
+      const remoteModifiedAt = Date.parse(file && file.modifiedTime) || Date.now();
+      const uploadedAt = Math.max(Number(rec.updatedAt) || 0, 1);
+      updateRecord(videoId, (cur) => cur ? { ...cur, driveSync: { ...cur.driveSync || {}, lastUploadAt: uploadedAt, remoteModifiedAt } } : null, "sync");
+    }
+    async deleteRemote(videoId) {
+      const files = await this.client.filesFor(videoId);
+      for (const f of files)
+        await this.client.remove(f.id);
+    }
+    async pull(videoId) {
+      if (!this.configured() || this.stopped)
+        return;
+      try {
+        const files = await this.client.filesFor(videoId);
+        const local = readRecord(videoId);
+        if (!files.length) {
+          if (local)
+            this.queueUpload(videoId, true);
+          return;
+        }
+        const remoteMs = Date.parse(files[0].modifiedTime) || 0;
+        const meta = local && local.driveSync || {};
+        const localUpdated = Number(local && local.updatedAt) || 0;
+        if (!(remoteMs > localUpdated && remoteMs > (meta.lastDownloadAt || 0) && remoteMs !== meta.remoteModifiedAt))
+          return;
+        const parsed = JSON.parse(await this.client.download(files[0].id));
+        const remote = parsed && typeof parsed === "object" ? parsed.record : null;
+        if (!remote || typeof remote !== "object" || Array.isArray(remote))
+          return;
+        const now = Date.now();
+        const incoming = { ...remote };
+        delete incoming.driveSync;
+        const current = readRecord(videoId) || {};
+        writeRecord(videoId, {
+          ...current,
+          ...incoming,
+          driveSync: { ...current.driveSync || {}, lastDownloadAt: now, lastUploadAt: now, remoteModifiedAt: remoteMs }
+        }, "sync");
+        this.setStatus("done", 1, 1, "");
+      } catch (err) {
+        console.warn("[Video Memory] Drive pull failed:", err);
+        this.setStatus("error", 0, 0, errorMessage(err));
+      }
+    }
+    async fullSync() {
+      this.setStatus("start", 0, 0, "");
+      await this.importLegacy();
+      const entries = listRecords().filter((e) => e.record);
+      const total = entries.length;
+      let done = 0;
+      this.setStatus("progress", done, total, "");
+      for (const entry of entries) {
+        if (this.stopped)
+          return;
+        this.pending.delete(entry.videoId);
+        await this.upload(entry.videoId);
+        done++;
+        this.setStatus("progress", done, total, "");
+      }
+      writeSetting(KEY_DRIVE_FULL_SYNC, "1");
+      this.setStatus("done", done, total, "");
+    }
+    async importLegacy() {
+      let files;
+      try {
+        files = await this.client.findByName(LEGACY_FILE_NAME);
+      } catch (err) {
+        console.warn("[Video Memory] Legacy Drive file lookup failed:", err);
         return;
       }
-      const count = uploadAll();
-      setMessage(result, t("Uploading {count} record(s)…", "正在上传 {count} 条记录…", { count }));
-    });
-    upload.style.setProperty("--ysrp-btn-accent", "var(--ysrp-ok)");
-    ctx.listen(document, EVT_DRIVE_STATUS, renderStatus);
-    renderStatus();
-    return {
-      node: h("div", {}, card("cloud", "--ysrp-accent", t("Google Drive sync", "Google Drive 同步"), t("Each video is saved as one JSON file in the “{folder}” folder of your Drive, and pulled back when you open the video on another device.", "每个视频在你云端硬盘的“{folder}”文件夹里保存为一个 JSON 文件；在另一台设备打开该视频时会先拉取云端进度。", { folder: FOLDER_NAME }), status, field(t("OAuth client ID", "OAuth 客户端 ID"), clientId), field(t("Client secret", "客户端密钥"), secret.node), field(t("Refresh token", "Refresh token"), token.node), h("div", { class: "ysrp-row-actions" }, save, upload), result), card("circle-info", "--ysrp-fg", t("Getting credentials", "如何获取凭据"), t("Create an OAuth client in Google Cloud Console, enable the Drive API, then use the OAuth Playground with your own client and the Drive scope to get a refresh token.", "在 Google Cloud Console 创建 OAuth 客户端并启用 Drive API，然后在 OAuth Playground 里用你自己的客户端和 Drive 权限换取 refresh token。"))),
-      refresh: renderStatus
-    };
+      if (!files.length)
+        return;
+      const parsed = JSON.parse(await this.client.download(files[0].id));
+      const entries = parsed && typeof parsed === "object" ? parsed.entries && typeof parsed.entries === "object" ? parsed.entries : parsed : null;
+      if (!entries || typeof entries !== "object")
+        return;
+      for (const [key, value] of Object.entries(entries)) {
+        if (!key.startsWith(RECORD_PREFIX))
+          continue;
+        const videoId = key.slice(RECORD_PREFIX.length);
+        let remote = null;
+        try {
+          remote = typeof value === "string" ? JSON.parse(value) : value;
+        } catch {
+          remote = null;
+        }
+        if (!remote || typeof remote !== "object")
+          continue;
+        const local = readRecord(videoId);
+        if (!local || (Number(remote.saveDate) || 0) > (Number(local.saveDate) || 0)) {
+          writeRecord(videoId, { ...local || {}, ...remote }, "bulk");
+        }
+      }
+    }
   }
 
   // src/plugins/driveSync/index.ts
-  var STARTUP_DELAY_MS = 2000;
-  var offChange = null;
-  var startupTimer = null;
+  function statusText(sync, s) {
+    if (!sync.configured())
+      return { text: tr("Not configured: fill in the three fields below.", "未配置：请填写下面三项凭据。"), tone: "neutral" };
+    switch (s.state) {
+      case "start":
+      case "progress":
+        return { text: s.total ? tr("Syncing ({done} / {total})", "同步中（已完成 {done} / 共 {total}）", { done: s.done, total: s.total }) : tr("Syncing…", "同步中…"), tone: "neutral" };
+      case "done":
+        return { text: tr("Synced ({time})", "已同步（{time}）", { time: new Date(s.at).toLocaleTimeString() }), tone: "success" };
+      case "deferred":
+        return { text: tr("Deferred: the next upload waits a few seconds.", "已推迟：下一次上传稍后进行。"), tone: "neutral" };
+      case "error":
+        return { text: tr("Error: {message}", "出错：{message}", { message: s.message }), tone: "error" };
+      default:
+        return { text: tr("Ready.", "已就绪。"), tone: "neutral" };
+    }
+  }
   var driveSync_default = definePlugin({
     name: "DriveSync",
-    title: () => t("Google Drive sync", "云同步"),
-    description: () => t("Keeps your records in your own Google Drive and picks up progress from other devices.", "把记录同步到你自己的 Google Drive，在其它设备上接着看。"),
+    displayName: { en: "Drive sync", zh: "云同步" },
+    description: {
+      en: "Syncs every video record to a folder in your own Google Drive. Does nothing until credentials are set.",
+      zh: "把每个视频的记录同步到你自己的 Google Drive 文件夹；未填写凭据时不做任何事。"
+    },
+    authors: ["0_V"],
     icon: "cloud",
-    authors: [Devs.V],
     enabledByDefault: true,
-    settingsTab: {
-      id: "drive",
-      group: "plugins",
-      order: 30,
-      icon: "cloud",
-      label: () => t("Sync", "云同步"),
-      render: DrivePane
-    },
-    start() {
-      activate();
-      offChange = onRecordChange((change) => {
-        if (change.source !== "local" || !change.id)
-          return;
-        if (change.type === "set")
-          schedule(change.id, "set");
-        else if (change.type === "remove")
-          schedule(change.id, "remove");
+    start(ctx) {
+      const sync = new DriveSync;
+      ctx.onDispose(() => sync.stop());
+      ctx.onDispose(recordChanges.on((change) => sync.handleChange(change)));
+      ctx.beforeRestore((videoId) => sync.configured() ? sync.pull(videoId) : undefined);
+      const statusListeners = new Set;
+      sync.onStatus = (s) => statusListeners.forEach((fn) => fn(s));
+      ctx.onDispose(() => {
+        sync.onStatus = null;
+        statusListeners.clear();
       });
-      startupTimer = setTimeout(() => {
-        if (configured())
-          maybeFirstFullSync();
-      }, STARTUP_DELAY_MS);
-    },
-    stop() {
-      offChange?.();
-      offChange = null;
-      if (startupTimer)
-        clearTimeout(startupTimer);
-      startupTimer = null;
-      deactivate();
-    },
-    beforeRestore(videoId) {
-      if (!configured())
-        return;
-      return pullRecord(videoId);
+      ctx.addTab({
+        id: "drive",
+        group: "plugins",
+        order: 30,
+        icon: "cloud",
+        label: () => tr("Drive sync", "云同步"),
+        render(pane) {
+          const creds = readCredentials();
+          const clientId = h("input", { class: "ysrp-input", type: "text", value: creds.clientId, placeholder: "xxxx.apps.googleusercontent.com", autocomplete: "off", spellcheck: false });
+          const clientSecret = h("input", { class: "ysrp-input", type: "password", value: creds.clientSecret, autocomplete: "new-password", spellcheck: false });
+          const refreshToken = h("input", { class: "ysrp-input", type: "password", value: creds.refreshToken, autocomplete: "new-password", spellcheck: false });
+          const labels = { show: tr("Show", "显示"), hide: tr("Hide", "隐藏") };
+          const status = messageLine();
+          const result = messageLine();
+          const renderStatus = (s) => {
+            const { text, tone } = statusText(sync, s);
+            status.set(text, tone);
+          };
+          statusListeners.add(renderStatus);
+          renderStatus(sync.status);
+          const saveBtn = button(tr("Save & verify", "保存并验证"), { icon: "check" });
+          saveBtn.addEventListener("click", async (ev) => {
+            ev.preventDefault();
+            saveCredentials({ clientId: clientId.value, clientSecret: clientSecret.value, refreshToken: refreshToken.value });
+            sync.reloadCredentials();
+            renderStatus(sync.status);
+            if (!sync.configured()) {
+              result.set(tr("Please fill in all three fields.", "请填写全部三项。"), "error");
+              return;
+            }
+            saveBtn.disabled = true;
+            result.set(tr("Verifying…", "正在验证…"));
+            try {
+              await sync.client.accessToken(true);
+              result.set(tr("Credentials verified.", "凭据验证成功。"), "success");
+              if (readSetting(KEY_DRIVE_FULL_SYNC) !== "1")
+                sync.requestFullSync();
+            } catch (err) {
+              result.set(tr("Verification failed: {message}", "验证失败：{message}", { message: errorMessage(err) }), "error");
+            } finally {
+              saveBtn.disabled = false;
+            }
+          });
+          const uploadAll = button(tr("Upload all", "全部上传"), { icon: "cloud-arrow-up" });
+          uploadAll.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            if (!sync.configured()) {
+              result.set(tr("Please save valid credentials first.", "请先保存有效的凭据。"), "error");
+              return;
+            }
+            result.set("");
+            sync.uploadAll();
+          });
+          pane.append(card({ icon: "cloud", title: tr("Google Drive sync", "Google Drive 同步"), desc: tr('Each video is stored as "<title>｜<id>.json" in the "[Youtube] Video Memory" folder of your Drive.', "每个视频以“<标题>｜<id>.json”保存在你的云端硬盘“[Youtube] Video Memory”文件夹中。") }, status.el, h("div", { class: "ysrp-fields" }, field(tr("Client ID", "客户端 ID"), clientId), field(tr("Client secret", "客户端密钥"), secretInput(clientSecret, labels)), field(tr("Refresh token", "Refresh token"), secretInput(refreshToken, labels))), h("div", { class: "ysrp-actions" }, saveBtn, uploadAll), result.el), card({ icon: "circle-question", title: tr("How to get credentials", "如何获取凭据") }, h("ol", { class: "ysrp-steps" }, h("li", { text: tr('In Google Cloud Console create a project and an OAuth client (type "Web application"); add https://developers.google.com/oauthplayground as a redirect URI.', "在 Google Cloud Console 新建项目和 OAuth 客户端（类型“Web 应用”），把 https://developers.google.com/oauthplayground 加为重定向 URI。") }), h("li", { text: tr("Enable the Google Drive API for the project.", "为该项目启用 Google Drive API。") }), h("li", { text: tr('Open the OAuth 2.0 Playground, tick "Use your own OAuth credentials", authorise the https://www.googleapis.com/auth/drive scope and exchange the code for a refresh token.', "打开 OAuth 2.0 Playground，勾选“Use your own OAuth credentials”，授权 https://www.googleapis.com/auth/drive 范围，然后用授权码换取 refresh token。") }), h("li", {}, tr("Paste the three values above and click “Save & verify”. More: ", "把三项填到上面并点“保存并验证”。更多说明："), h("a", { href: HOMEPAGE_URL, target: "_blank", rel: "noopener noreferrer", text: HOMEPAGE_URL })))));
+          return () => statusListeners.delete(renderStatus);
+        }
+      });
+      sync.start();
     }
   });
 
-  // src/plugins/transcript/api.ts
-  var SUFFIX = "/v1/chat/completions";
-  var DEFAULTS = Object.freeze({
-    endpoint: "https://0-v-YouTube-Transcript-Generator-api.hf.space/v1/chat/completions",
-    model: "transcript",
-    apiKey: "sk-asdlfjalalfja",
-    timeoutMs: 10 * 60 * 1000
-  });
-  var MIN_MINUTES = 1;
-  var MAX_MINUTES = 60;
+  // src/plugins/transcript/service.ts
+  var ENDPOINT_SUFFIX = "/v1/chat/completions";
+  var DEFAULT_ENDPOINT_RAW = "https://0-v-YouTube-Transcript-Generator-api.hf.space/v1/chat/completions";
+  var DEFAULT_MODEL = "transcript";
+  var DEFAULT_API_KEY = "sk-asdlfjalalfja";
+  var DEFAULT_TIMEOUT_MS = 600000;
+  var MIN_TIMEOUT_MS = 60000;
+  var MAX_TIMEOUT_MS = 3600000;
   var CACHE_TTL_MS = 30 * 60 * 1000;
-  var cache = new Map;
-  var inflight = new Map;
-  function clampTimeoutMs(value) {
+  function normalizeTimeoutMs(value) {
     const n = Number(value);
     if (!Number.isFinite(n) || n <= 0)
-      return DEFAULTS.timeoutMs;
-    return Math.min(MAX_MINUTES * 60000, Math.max(MIN_MINUTES * 60000, Math.round(n)));
+      return DEFAULT_TIMEOUT_MS;
+    return Math.min(MAX_TIMEOUT_MS, Math.max(MIN_TIMEOUT_MS, Math.round(n)));
+  }
+  function timeoutMinutes(ms) {
+    const n = Number(ms);
+    if (!Number.isFinite(n) || n <= 0)
+      return 10;
+    return Math.round(n / 60000);
   }
   function normalizeEndpoint(value) {
-    let raw = typeof value === "string" ? value.trim() : "";
-    if (!raw)
+    if (typeof value !== "string")
       return "";
-    if (!/^https?:\/\//i.test(raw))
-      raw = `https://${raw}`;
+    let s = value.trim();
+    if (!s)
+      return "";
+    if (!/^https?:\/\//i.test(s))
+      s = `https://${s}`;
     try {
-      const url = new URL(raw);
-      const path = url.pathname.replace(/\/+$/, "");
-      url.pathname = path || SUFFIX;
+      const url = new URL(s);
+      let path = url.pathname.replace(/\/+$/, "");
+      if (path.toLowerCase().includes(ENDPOINT_SUFFIX)) {
+        if (!path.startsWith("/"))
+          path = `/${path}`;
+      } else if (!path) {
+        path = ENDPOINT_SUFFIX;
+      }
+      url.pathname = path;
       return url.toString().replace(/\/+$/, "");
     } catch {
-      const trimmed = raw.replace(/\/+$/, "");
-      return /\/\/[^/]+$/.test(trimmed) ? trimmed + SUFFIX : trimmed;
+      const trimmed = s.replace(/\/+$/, "");
+      return trimmed.toLowerCase().includes(ENDPOINT_SUFFIX) ? trimmed : trimmed + ENDPOINT_SUFFIX;
+    }
+  }
+  var DEFAULTS = {
+    endpoint: normalizeEndpoint(DEFAULT_ENDPOINT_RAW),
+    model: DEFAULT_MODEL,
+    apiKey: DEFAULT_API_KEY,
+    timeoutMs: DEFAULT_TIMEOUT_MS
+  };
+  function readStored() {
+    const raw = readSetting(KEY_TRANSCRIPT);
+    if (!raw)
+      return {};
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
     }
   }
   function getSettings() {
-    const merged = { ...DEFAULTS, ...readJsonSetting(KEY_TRANSCRIPT) };
-    return {
-      endpoint: normalizeEndpoint(merged.endpoint) || DEFAULTS.endpoint,
-      model: String(merged.model || DEFAULTS.model),
-      apiKey: typeof merged.apiKey === "string" ? merged.apiKey : "",
-      timeoutMs: clampTimeoutMs(merged.timeoutMs)
-    };
+    const stored = readStored();
+    const endpoint = normalizeEndpoint(stored.endpoint) || DEFAULTS.endpoint;
+    const model = typeof stored.model === "string" && stored.model.trim() ? stored.model.trim() : DEFAULTS.model;
+    const apiKey = typeof stored.apiKey === "string" ? stored.apiKey.trim() : DEFAULTS.apiKey;
+    const timeoutMs = stored.timeoutMs ? normalizeTimeoutMs(stored.timeoutMs) : DEFAULTS.timeoutMs;
+    return { endpoint, model, apiKey, timeoutMs };
   }
-  function saveSettings(partial) {
-    const next = getSettings();
-    if (typeof partial.endpoint === "string" && partial.endpoint.trim())
-      next.endpoint = normalizeEndpoint(partial.endpoint);
-    if (typeof partial.model === "string" && partial.model.trim())
-      next.model = partial.model.trim();
-    if (typeof partial.apiKey === "string" && partial.apiKey.trim())
-      next.apiKey = partial.apiKey.trim();
-    if (partial.timeoutMs !== undefined && Number(partial.timeoutMs) > 0)
-      next.timeoutMs = clampTimeoutMs(partial.timeoutMs);
+  function updateSettings(input) {
+    const stored = readStored();
+    const next = { ...DEFAULTS, ...stored };
+    if (input.endpoint !== undefined)
+      next.endpoint = normalizeEndpoint(input.endpoint) || DEFAULTS.endpoint;
+    if (input.model !== undefined)
+      next.model = input.model.trim() || DEFAULTS.model;
+    if (input.apiKey !== undefined)
+      next.apiKey = input.apiKey.trim();
+    if (input.timeoutMinutes !== undefined && Number.isFinite(input.timeoutMinutes) && input.timeoutMinutes > 0) {
+      next.timeoutMs = normalizeTimeoutMs(input.timeoutMinutes * 60000);
+    }
     writeSetting(KEY_TRANSCRIPT, JSON.stringify(next));
-    return next;
+    return getSettings();
   }
   function extractText(payload) {
     if (!payload)
@@ -2795,573 +4868,365 @@
     if (Array.isArray(payload))
       return payload.map(extractText).filter(Boolean).join(`
 `).trim();
-    if (payload.error?.message)
-      throw new Error(payload.error.message);
-    if (typeof payload.transcript === "string")
-      return payload.transcript.trim();
-    if (Array.isArray(payload.transcript))
-      return payload.transcript.join(`
+    if (typeof payload !== "object")
+      return "";
+    const p = payload;
+    if (p.error && typeof p.error === "object" && p.error.message)
+      throw new Error(String(p.error.message));
+    if (typeof p.transcript === "string")
+      return p.transcript.trim();
+    if (Array.isArray(p.transcript))
+      return p.transcript.join(`
 `).trim();
-    if (typeof payload.output_text === "string")
-      return payload.output_text.trim();
-    if (Array.isArray(payload.output_text))
-      return payload.output_text.join(`
+    if (p.output_text) {
+      if (Array.isArray(p.output_text))
+        return p.output_text.join(`
 `).trim();
-    if (Array.isArray(payload.output)) {
-      const joined = payload.output.flatMap((entry) => entry && Array.isArray(entry.content) ? entry.content : []).map((part) => part && typeof part.text === "string" ? part.text : "").filter(Boolean).join(`
+      if (typeof p.output_text === "string")
+        return p.output_text.trim();
+    }
+    if (Array.isArray(p.output)) {
+      const parts = [];
+      for (const item of p.output) {
+        if (item && Array.isArray(item.content)) {
+          for (const c of item.content)
+            if (c && typeof c.text === "string")
+              parts.push(c.text);
+        }
+      }
+      const joined = parts.join(`
 `).trim();
       if (joined)
         return joined;
     }
-    if (Array.isArray(payload.choices)) {
-      const joined = payload.choices.map((choice) => {
-        if (!choice)
-          return "";
-        const content = choice.message?.content;
+    if (Array.isArray(p.choices)) {
+      const parts = p.choices.map((choice) => {
+        const content = choice && choice.message ? choice.message.content : undefined;
         if (typeof content === "string")
           return content;
         if (Array.isArray(content))
-          return content.map((part) => part?.text || "").join(`
+          return content.map((part) => part && typeof part.text === "string" ? part.text : "").join(`
 `);
-        return typeof choice.text === "string" ? choice.text : "";
-      }).filter(Boolean).join(`
+        if (choice && typeof choice.text === "string")
+          return choice.text;
+        return "";
+      }).filter((s) => s && s.trim());
+      const joined = parts.join(`
 `).trim();
       if (joined)
         return joined;
     }
-    if (typeof payload.text === "string")
-      return payload.text.trim();
-    if (typeof payload.data === "string")
-      return payload.data.trim();
+    if (typeof p.text === "string")
+      return p.text.trim();
+    if (typeof p.data === "string" && p.data)
+      return p.data.trim();
     return "";
   }
-  function cached(id) {
-    const hit = cache.get(id);
+  var cache2 = new Map;
+  var inflight = new Map;
+  var tokenSeq = 0;
+  function forgetTranscript(videoId) {
+    cache2.delete(videoId);
+  }
+  function persist(videoId, text) {
+    try {
+      updateRecord(videoId, (cur) => {
+        const out = { ...cur || {} };
+        if (text.trim()) {
+          out.videoTranscript = text.trim();
+          out.videoTranscriptUpdatedAt = Date.now();
+        } else {
+          delete out.videoTranscript;
+          delete out.videoTranscriptUpdatedAt;
+        }
+        return out;
+      }, "content");
+    } catch (err) {
+      console.error("[Video Memory] Failed to persist transcript to storage:", err);
+    }
+  }
+  function cachedTranscript(videoId) {
+    if (!videoId)
+      return null;
+    const hit = cache2.get(videoId);
     if (hit && Date.now() - hit.at <= CACHE_TTL_MS)
       return hit.text;
-    const rec = get(id);
-    if (rec && typeof rec.videoTranscript === "string" && rec.videoTranscript.trim()) {
-      const text = rec.videoTranscript.trim();
-      cache.set(id, { text, at: rec.videoTranscriptUpdatedAt || Date.now() });
-      return text;
-    }
-    return "";
+    const rec = readRecord(videoId);
+    const stored = rec && typeof rec.videoTranscript === "string" ? rec.videoTranscript.trim() : "";
+    if (!stored)
+      return null;
+    cache2.set(videoId, { text: stored, at: Date.now() });
+    return stored;
   }
-  function fetchFor(id, force) {
-    if (!id)
-      return Promise.reject(new Error(t("Cannot detect the video id.", "无法识别当前视频 ID。")));
-    if (!force) {
-      const hit = cached(id);
-      if (hit)
-        return Promise.resolve(hit);
+
+  class TranscriptTimeoutError extends Error {
+    constructor(minutes) {
+      super(tr("The transcript service did not respond within {n} minute(s); the request was cancelled.", "字幕接口在 {n} 分钟内无响应，已自动取消请求。", { n: minutes }));
+      this.name = "TranscriptTimeoutError";
     }
-    const pending = inflight.get(id);
-    if (pending)
-      return pending;
+  }
+  function fetchTranscript(videoId, options = {}) {
+    if (!videoId)
+      return Promise.reject(new Error(tr("Cannot detect the current video ID.", "无法识别当前视频 ID。")));
+    if (!options.force) {
+      const cached = cachedTranscript(videoId);
+      if (cached)
+        return Promise.resolve(cached);
+      const running = inflight.get(videoId);
+      if (running)
+        return running.promise;
+    }
     const settings = getSettings();
-    if (!settings.endpoint)
-      return Promise.reject(new Error(t("Please configure the transcript endpoint first.", "请先配置字幕接口路径。")));
-    const headers = { "Content-Type": "application/json" };
-    if (settings.apiKey.trim())
-      headers.Authorization = `Bearer ${settings.apiKey.trim()}`;
-    const body = JSON.stringify({
-      model: settings.model,
-      messages: [{ role: "user", content: `https://www.youtube.com/watch?v=${id}` }]
-    });
-    const minutes = Math.round(settings.timeoutMs / 60000);
-    const controller = new AbortController;
-    let timer;
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => {
-        try {
-          controller.abort();
-        } catch {}
-        reject(new Error(t("The transcript endpoint did not respond within {n} minute(s); request cancelled.", "字幕接口在 {n} 分钟内无响应，已自动取消请求。", { n: minutes })));
+    if (!settings.endpoint.trim())
+      return Promise.reject(new Error(tr("Please configure the transcript endpoint first.", "请先配置字幕接口路径。")));
+    const token = ++tokenSeq;
+    const promise = (async () => {
+      const headers = { "Content-Type": "application/json" };
+      if (settings.apiKey.trim())
+        headers.Authorization = `Bearer ${settings.apiKey.trim()}`;
+      const body = JSON.stringify({
+        model: settings.model || DEFAULT_MODEL,
+        messages: [{ role: "user", content: (options.videoUrl || "").trim() || watchUrl(videoId) }]
+      });
+      const controller = typeof AbortController === "function" ? new AbortController : null;
+      let timedOut = false;
+      const timer = window.setTimeout(() => {
+        timedOut = true;
+        controller?.abort();
       }, settings.timeoutMs);
-    });
-    const requestText = (async () => {
-      const res = await fetch(settings.endpoint, { method: "POST", headers, body, signal: controller.signal });
-      const rawText = await res.text();
-      let payload = rawText;
       try {
-        payload = rawText ? JSON.parse(rawText) : null;
-      } catch {}
-      if (!res.ok) {
-        const detail = payload?.error?.message || payload?.message || rawText || `HTTP ${res.status}`;
-        throw new Error(String(detail));
+        let text;
+        let status;
+        try {
+          const res = await fetch(settings.endpoint, { method: "POST", headers, body, signal: controller?.signal, credentials: "omit", cache: "no-store" });
+          status = res.status;
+          text = await res.text();
+        } catch (err) {
+          if (timedOut)
+            throw new TranscriptTimeoutError(timeoutMinutes(settings.timeoutMs));
+          throw err;
+        }
+        let payload = null;
+        if (text) {
+          try {
+            payload = JSON.parse(text);
+          } catch {
+            payload = text;
+          }
+        }
+        if (status < 200 || status >= 300) {
+          const p = payload;
+          const message = p && typeof p === "object" && (p.error && p.error.message || p.message) || text || `HTTP ${status}`;
+          throw new Error(String(message));
+        }
+        const result = extractText(payload).trim();
+        if (!result)
+          throw new Error(tr("The transcript service returned no usable content.", "字幕接口未返回有效内容。"));
+        cache2.set(videoId, { text: result, at: Date.now() });
+        persist(videoId, result);
+        return result;
+      } finally {
+        clearTimeout(timer);
+        if (inflight.get(videoId)?.token === token)
+          inflight.delete(videoId);
       }
-      const text = extractText(payload);
-      if (!text)
-        throw new Error(t("The transcript endpoint returned no content.", "字幕接口未返回有效内容。"));
-      cache.set(id, { text, at: Date.now() });
-      updateIfExists(id, (rec) => Object.assign(rec, { videoTranscript: text, videoTranscriptUpdatedAt: Date.now() }));
-      return text;
     })();
-    const promise = Promise.race([requestText, timeout]).finally(() => {
-      clearTimeout(timer);
-      inflight.delete(id);
-    });
-    inflight.set(id, promise);
+    inflight.set(videoId, { promise, token });
     return promise;
   }
 
-  // src/plugins/transcript/TranscriptPane.ts
-  function TranscriptPane(ctx) {
+  // src/plugins/transcript/index.ts
+  function renderTab(pane) {
     const settings = getSettings();
-    const endpoint = h("input", { class: "ysrp-input", type: "text", placeholder: "https://example.com/v1/chat/completions", autocomplete: "off", spellcheck: "false" });
-    const model = h("input", { class: "ysrp-input", type: "text", placeholder: "transcript", autocomplete: "off", spellcheck: "false" });
-    const apiKey = secretInput("sk-***", () => t("Show", "显示"), () => t("Hide", "隐藏"), "--ysrp-transcript");
-    const timeout = h("input", { class: "ysrp-input", type: "number", min: String(MIN_MINUTES), max: String(MAX_MINUTES), step: "1", placeholder: "10" });
-    endpoint.value = settings.endpoint;
-    model.value = settings.model;
-    apiKey.input.value = settings.apiKey;
-    timeout.value = String(Math.round(settings.timeoutMs / 60000));
-    let timer;
-    const persist = () => {
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        const minutes = parseFloat(timeout.value);
-        saveSettings({
-          endpoint: endpoint.value,
-          model: model.value,
-          apiKey: apiKey.input.value,
-          timeoutMs: Number.isFinite(minutes) && minutes > 0 ? minutes * 60000 : undefined
-        });
-      }, 250);
+    const endpoint = h("input", { class: "ysrp-input", type: "text", value: settings.endpoint, placeholder: "https://example.com/v1/chat/completions", autocomplete: "off", spellcheck: false });
+    const model = h("input", { class: "ysrp-input", type: "text", value: settings.model, placeholder: "transcript", autocomplete: "off", spellcheck: false });
+    const apiKey = h("input", { class: "ysrp-input", type: "password", value: settings.apiKey, placeholder: "sk-***", autocomplete: "new-password", spellcheck: false });
+    const minutes = Math.min(60, Math.max(1, timeoutMinutes(settings.timeoutMs)));
+    const timeout = h("input", { class: "ysrp-input", type: "number", min: "1", max: "60", step: "1", value: String(minutes), placeholder: "10" });
+    let timer = 0;
+    const save = () => {
+      const mins = parseFloat(timeout.value);
+      updateSettings({
+        endpoint: endpoint.value,
+        model: model.value,
+        apiKey: apiKey.value,
+        timeoutMinutes: Number.isFinite(mins) && mins > 0 ? mins : undefined
+      });
     };
-    for (const input of [endpoint, model, apiKey.input, timeout]) {
-      input.addEventListener("input", persist);
-      input.addEventListener("change", persist);
+    const schedule = () => {
+      if (timer)
+        clearTimeout(timer);
+      timer = window.setTimeout(save, 250);
+    };
+    for (const el of [endpoint, model, apiKey, timeout]) {
+      el.addEventListener("input", schedule);
+      el.addEventListener("change", schedule);
     }
-    const videoTitle = h("span");
-    const videoId = h("span", { class: "ysrp-mono" });
-    const videoIdRow = h("div", { class: "ysrp-info-row" }, h("b", { text: t("Video ID", "视频 ID") }), videoId);
-    function updateVideo() {
-      const id = currentId();
+    const settingsCard = card({
+      icon: "closed-captioning",
+      title: tr("Subtitles · Transcript", "字幕与接口设置"),
+      desc: tr("Configure the OpenAI-compatible endpoint used for subtitles. Fetching lives in the Records tab.", "配置字幕接口（兼容 OpenAI）。字幕获取功能位于“记录”标签。")
+    }, h("div", { class: "ysrp-fields" }, field(tr("API Endpoint", "API 接口路径"), endpoint), field(tr("Model", "模型名称"), model), field(tr("API Key", "API 密钥"), secretInput(apiKey, { show: tr("Show", "显示"), hide: tr("Hide", "隐藏") }), tr("Leave empty to send no key.", "留空则不发送密钥。")), field(tr("Timeout (minutes)", "超时时长（分钟）"), timeout)));
+    const titleValue = h("span", { class: "ysrp-info-value" });
+    const idValue = h("span", { class: "ysrp-info-value ysrp-mono" });
+    const idRow = infoRow(tr("Video ID", "视频 ID"), idValue);
+    const titleLabel = h("span", { class: "ysrp-info-label", text: tr("Active video", "当前视频") });
+    const update = (status) => {
+      const id = status && status.videoId || urlVideoId();
       if (!id) {
-        videoTitle.textContent = t("No active video detected", "未检测到可用的影片");
-        videoIdRow.style.display = "none";
+        titleValue.textContent = tr("No active video detected", "未检测到可用的影片");
+        idRow.style.display = "none";
         return;
       }
-      const rec = get(id);
-      videoTitle.textContent = knownDeArrow(id) || knownOriginal(id) || (rec && !isPlaceholderTitle(rec.videoName) ? rec.videoName : "") || UNKNOWN_TITLE;
-      videoId.textContent = id;
-      videoIdRow.style.display = "";
-    }
-    updateVideo();
-    ctx.listen(document, EVT_VIDEO, updateVideo);
-    return {
-      node: h("div", {}, card("closed-captioning", "--ysrp-transcript", t("Subtitles · Transcript", "字幕与接口设置"), t("Configure the OpenAI-compatible endpoint used for subtitles. Fetching lives in the Records tab.", "配置字幕接口（兼容 OpenAI）。字幕获取功能位于“记录”标签。"), field(t("API Endpoint", "API 接口路径"), endpoint), field(t("Model", "模型名称"), model), field(t("API Key", "API 密钥"), apiKey.node), field(t("Timeout (minutes)", "超时时长（分钟）"), timeout)), card("pen-to-square", "--ysrp-fg", t("Status & Tips", "状态与提示"), t("These settings apply instantly. Use the Records tab to fetch transcripts for specific videos.", "设置立即生效，具体字幕获取请在“记录”标签中触发。"), h("div", { class: "ysrp-info" }, h("div", { class: "ysrp-info-row" }, h("b", { text: t("Active video", "当前视频") }), videoTitle), videoIdRow))),
-      refresh: updateVideo
+      titleValue.textContent = status && status.videoId === id && !status.isLoading ? status.title : status && status.videoId === id ? tr("Loading title…", "正在获取标题…") : UNKNOWN_TITLE;
+      idValue.textContent = id;
+      idRow.style.display = "";
+    };
+    update(currentStatus());
+    const onStatus = (ev) => update(ev.detail || null);
+    document.addEventListener(EVT_VIDEO_STATUS, onStatus);
+    const statusCard = card({ icon: "pen-to-square", title: tr("Status & Tips", "状态与提示") }, h("div", { class: "ysrp-hint", text: tr("These settings apply instantly. Use the Records tab to fetch transcripts for specific videos.", "设置立即生效，具体字幕获取请在“记录”标签中触发。") }), h("div", { class: "ysrp-info" }, h("div", { class: "ysrp-info-row" }, titleLabel, titleValue), idRow));
+    pane.append(settingsCard, statusCard);
+    return () => {
+      document.removeEventListener(EVT_VIDEO_STATUS, onStatus);
+      if (timer) {
+        clearTimeout(timer);
+        save();
+      }
     };
   }
-
-  // src/plugins/transcript/index.ts
-  var openState = new Set;
-  function TranscriptAction({ id }) {
-    const status = h("span", { class: "ysrp-status" });
-    const output = h("textarea", { class: "ysrp-textarea is-mono", readonly: "readonly", rows: "5", placeholder: t("Transcript will appear here…", "字幕内容加载后会显示在这里…") });
-    let loading = false;
-    const setStatus = (text, isError = false) => {
-      status.textContent = text || "";
-      status.classList.toggle("is-error", isError);
+  function createRowParts(ctx) {
+    const ui = ctx.ui;
+    const status = h("span", { class: "ysrp-panel-status" });
+    const refreshBtn = iconButton("arrows-rotate", tr("Refresh transcript", "刷新字幕"), "is-refresh");
+    const copyBtn = iconButton("copy", tr("Copy transcript", "复制字幕"), "is-copy");
+    copyBtn.disabled = true;
+    const area = h("textarea", { class: "ysrp-textarea ysrp-transcript-text", readOnly: true, rows: 5, placeholder: tr("Transcript will appear here…", "字幕内容加载后会显示在这里…") });
+    const panel = h("div", { class: "ysrp-panel ysrp-transcript-container" }, h("div", { class: "ysrp-panel-head" }, h("span", { class: "ysrp-panel-label" }, tr("Transcript", "字幕"), " ", status), h("span", { class: "ysrp-panel-tools" }, refreshBtn, copyBtn)), area);
+    const button = iconButton("closed-captioning", "", "is-transcript");
+    let loaded = false;
+    let busy = false;
+    const setStatus = (text, tone = "neutral") => {
+      status.textContent = text;
+      status.classList.toggle("is-error", tone === "error");
+      status.classList.toggle("is-success", tone === "success");
+      area.title = text || area.placeholder;
     };
-    const refresh = iconButton("arrows-rotate", t("Refresh transcript", "刷新字幕"), () => load(true));
-    const copy = iconButton("copy", t("Copy transcript", "复制字幕"), async () => {
-      if (!output.value.trim())
-        return setStatus(t("No transcript content to copy.", "暂无字幕内容可复制。"));
-      try {
-        await navigator.clipboard.writeText(output.value.trim());
-        setStatus(t("Transcript copied.", "字幕内容已复制。"));
-      } catch (err) {
-        setStatus(t("Copy failed: {message}", "复制失败：{message}", { message: errorMessage(err) }), true);
-      }
-    }, "is-link");
-    const panel = h("div", { class: "ysrp-panel ysrp-transcript-container" }, h("div", { class: "ysrp-panel-head" }, h("div", { class: "ysrp-header-left" }, h("strong", { class: "ysrp-panel-label", text: t("Transcript", "字幕") }), status), h("div", { class: "ysrp-header-left" }, refresh, copy)), output);
-    const button = iconButton("closed-captioning", t("Show transcript", "获取字幕"), () => setOpen(!panel.classList.contains("is-open")), "is-transcript");
-    function setOpen(open) {
-      panel.classList.toggle("is-open", open);
-      button.title = open ? t("Hide transcript", "隐藏字幕") : t("Show transcript", "获取字幕");
-      if (open)
-        openState.add(id);
-      else
-        openState.delete(id);
-      if (open && !output.value)
-        load(false);
-    }
-    function load(force) {
-      if (loading)
+    const setOpen = (open) => {
+      ui.transcriptOpen = open;
+      panel.style.display = open ? "flex" : "none";
+      const tip = open ? tr("Hide transcript", "隐藏字幕") : tr("Show transcript", "显示字幕");
+      button.title = tip;
+      button.setAttribute("aria-label", tip);
+    };
+    const setBusy = (on) => {
+      busy = on;
+      button.disabled = false;
+      refreshBtn.disabled = on;
+      refreshBtn.querySelector("i")?.classList.toggle("fa-spin", on);
+    };
+    const show = (text) => {
+      area.value = text;
+      copyBtn.disabled = !text.trim();
+      area.style.opacity = text.trim() ? "1" : "0.7";
+    };
+    const load = (force) => {
+      if (busy)
         return;
-      if (!force) {
-        const hit = cached(id);
-        if (hit) {
-          output.value = hit;
-          copy.disabled = false;
-          setStatus(t("Transcript loaded from cache.", "字幕来自缓存。"));
-          return;
-        }
-      }
-      loading = true;
-      refresh.disabled = true;
-      button.disabled = true;
-      setStatus(t("Loading…", "正在获取…"));
-      fetchFor(id, force).then((text) => {
-        output.value = text;
-        setStatus(t("Transcript updated ({time})", "字幕已更新（{time}）", { time: new Date().toLocaleTimeString() }));
-      }).catch((err) => setStatus(t("Transcript failed: {message}", "字幕获取失败：{message}", { message: errorMessage(err) }), true)).finally(() => {
-        loading = false;
-        refresh.disabled = false;
-        button.disabled = false;
-        copy.disabled = !output.value;
-      });
-    }
-    if (openState.has(id))
+      setBusy(true);
+      setStatus(loaded ? tr("Refreshing…", "正在重新获取…") : tr("Loading…", "正在获取…"));
+      fetchTranscript(ctx.videoId, { force, videoUrl: ctx.url }).then((text) => {
+        show(text);
+        loaded = true;
+        setStatus(tr("Updated ({time})", "已更新（{time}）", { time: new Date().toLocaleTimeString() }), "success");
+      }).catch((err) => {
+        setStatus(tr("Failed: {message}", "获取失败：{message}", { message: errorMessage(err) }), "error");
+      }).finally(() => setBusy(false));
+    };
+    button.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const open = ui.transcriptOpen !== true;
+      setOpen(open);
+      if (open && !loaded)
+        load(false);
+    });
+    refreshBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
       setOpen(true);
+      load(true);
+    });
+    copyBtn.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const text = area.value.trim();
+      if (!text) {
+        setStatus(tr("No transcript content to copy.", "暂无字幕内容可复制。"));
+        return;
+      }
+      copyText(text).then(() => {
+        setIcon(copyBtn, "check");
+        copyBtn.classList.add("is-success");
+        window.setTimeout(() => {
+          setIcon(copyBtn, "copy");
+          copyBtn.classList.remove("is-success");
+        }, 1000);
+        setStatus(tr("Copied.", "已复制。"), "success");
+      }).catch((err) => setStatus(tr("Copy failed: {message}", "复制失败：{message}", { message: errorMessage(err) }), "error"));
+    });
+    const cached = cachedTranscript(ctx.videoId);
+    if (cached) {
+      show(cached);
+      loaded = true;
+      setStatus(tr("Loaded from cache.", "来自缓存。"));
+    }
+    setOpen(ui.transcriptOpen === true);
+    if (ui.transcriptOpen === true && !loaded)
+      load(false);
     return { button, panel };
   }
   var transcript_default = definePlugin({
     name: "Transcript",
-    title: () => t("Transcript", "字幕"),
-    description: () => t("Fetch a video's transcript from an OpenAI-compatible endpoint, from the records list.", "在记录列表里通过兼容 OpenAI 的接口获取视频字幕。"),
-    icon: "closed-captioning",
-    authors: [Devs.V],
-    enabledByDefault: true,
-    settingsTab: {
-      id: "transcript",
-      group: "plugins",
-      order: 20,
-      icon: "closed-captioning",
-      label: () => t("Transcript", "字幕"),
-      render: TranscriptPane
+    displayName: { en: "Transcript", zh: "字幕" },
+    description: {
+      en: "Transcript endpoint settings plus fetching and copying transcripts from the records list.",
+      zh: "字幕接口设置，以及在记录列表中获取、复制字幕。"
     },
-    recordAction: {
-      id: "transcript",
-      order: 10,
-      create: TranscriptAction,
-      onRemoved: (id) => openState.delete(id)
+    authors: ["0_V"],
+    icon: "closed-captioning",
+    enabledByDefault: true,
+    start(ctx) {
+      ctx.addTab({
+        id: "transcript",
+        group: "plugins",
+        order: 20,
+        icon: "closed-captioning",
+        label: () => tr("Transcript", "字幕"),
+        render: renderTab
+      });
+      ctx.addRowButton({ id: "transcript", order: 10, panelOrder: 20, create: createRowParts });
+      ctx.onDispose(recordChanges.on((change) => {
+        if (change.kind === "delete")
+          forgetTranscript(change.videoId);
+      }));
     }
   });
 
-  // virtual:~plugins
-  var __plugins_default = { [engine_default.name]: engine_default, [playerBadge_default.name]: playerBadge_default, [settings_default.name]: settings_default, [badgeToggle_default.name]: badgeToggle_default, [driveSync_default.name]: driveSync_default, [transcript_default.name]: transcript_default };
-
-  // src/api/PluginManager.ts
-  var logger6 = new Logger("PluginManager");
-  var plugins = {};
-  var order = [];
-  var toggleListeners = new Set;
-  for (const plugin of Object.values(__plugins_default)) {
-    plugin.started = false;
-    if (plugin.settings)
-      plugin.settings.pluginName = plugin.name;
-    plugins[plugin.name] = plugin;
-    order.push(plugin.name);
-  }
-  onPluginSettingChange((name, key) => {
-    const plugin = plugins[name];
-    if (key === "enabled" || !plugin?.started)
-      return;
-    try {
-      plugin.onSettingsChange?.(key);
-    } catch (err) {
-      logger6.error(`${name}.onSettingsChange failed`, err);
-    }
-  });
-  function listPlugins() {
-    return order.map((name) => plugins[name]);
-  }
-  function isPluginEnabled(name) {
-    const plugin = plugins[name];
-    if (!plugin)
-      return false;
-    if (plugin.required)
-      return true;
-    return getPluginSettings(name)?.enabled ?? plugin.enabledByDefault ?? false;
-  }
-  function startPlugin(plugin) {
-    if (plugin.started)
-      return true;
-    try {
-      plugin.start?.();
-      if (plugin.settingsTab)
-        addSettingsTab(plugin.settingsTab);
-      if (plugin.recordAction)
-        addRecordAction(plugin.recordAction);
-      if (plugin.beforeRestore)
-        addRestoreHook(plugin.name, plugin.beforeRestore.bind(plugin));
-      plugin.started = true;
-      return true;
-    } catch (err) {
-      logger6.error(`Failed to start ${plugin.name}`, err);
-      return false;
-    }
-  }
-  function stopPlugin(plugin) {
-    if (!plugin.started)
-      return true;
-    try {
-      if (plugin.settingsTab)
-        removeSettingsTab(plugin.settingsTab.id);
-      if (plugin.recordAction)
-        removeRecordAction(plugin.recordAction.id);
-      removeRestoreHook(plugin.name);
-      plugin.stop?.();
-      plugin.started = false;
-      return true;
-    } catch (err) {
-      logger6.error(`Failed to stop ${plugin.name}`, err);
-      return false;
-    }
-  }
-  function setPluginEnabled(name, enabled) {
-    const plugin = plugins[name];
-    if (!plugin || plugin.required)
-      return false;
-    setPluginSetting(name, "enabled", enabled);
-    const ok = enabled ? startPlugin(plugin) : stopPlugin(plugin);
-    for (const listener of toggleListeners)
-      listener();
-    return ok;
-  }
-  function onPluginToggle(listener) {
-    toggleListeners.add(listener);
-    return () => toggleListeners.delete(listener);
-  }
-  function startAllPlugins() {
-    for (const name of order) {
-      if (isPluginEnabled(name))
-        startPlugin(plugins[name]);
-    }
-  }
-
-  // src/styles.css
-  var styles_default2 = `/* Sizes are in px: YouTube sets html { font-size: 10px }, so rem would shrink everything.
-   Monochrome tokens modelled on void++'s settings UI (Grok surface/fg scale). */
-.ysrp-theme, .last-save-info-container {
-  --ysrp-bg: #ffffff; --ysrp-nav-bg: #f7f7f7; --ysrp-card: #fafafa; --ysrp-l2: #f0f0f0;
-  --ysrp-border: rgba(0, 0, 0, .08); --ysrp-border-strong: rgba(0, 0, 0, .16);
-  --ysrp-fg: #0d0d0d; --ysrp-sub: #5e5e5e; --ysrp-tertiary: #8f8f8f; --ysrp-hover: rgba(0, 0, 0, .05);
-  --ysrp-input: #ffffff; --ysrp-input-border: rgba(0, 0, 0, .12);
-  --ysrp-danger: #d93025; --ysrp-ok: #188038; --ysrp-backdrop: rgba(0, 0, 0, .4);
-  --ysrp-thumb: rgba(0, 0, 0, .2); --ysrp-track: transparent;
-  --ysrp-accent: var(--ysrp-fg); --ysrp-link: var(--ysrp-fg); --ysrp-note: var(--ysrp-fg);
-  --ysrp-storage: var(--ysrp-fg); --ysrp-display: var(--ysrp-fg); --ysrp-transcript: var(--ysrp-fg);
-  --ysrp-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
-}
-@media (prefers-color-scheme: dark) {
-  .ysrp-theme, .last-save-info-container {
-    --ysrp-bg: #1a1a1a; --ysrp-nav-bg: #161616; --ysrp-card: #212121; --ysrp-l2: #2a2a2a;
-    --ysrp-border: rgba(255, 255, 255, .08); --ysrp-border-strong: rgba(255, 255, 255, .16);
-    --ysrp-fg: #fafafa; --ysrp-sub: #a3a3a3; --ysrp-tertiary: #737373; --ysrp-hover: rgba(255, 255, 255, .06);
-    --ysrp-input: #1f1f1f; --ysrp-input-border: rgba(255, 255, 255, .12);
-    --ysrp-danger: #f28b82; --ysrp-ok: #81c995; --ysrp-backdrop: rgba(0, 0, 0, .6);
-    --ysrp-thumb: rgba(255, 255, 255, .18);
-  }
-}
-
-/* Player badge */
-.last-save-info-container { display: flex; align-items: center; margin-left: 8px; font-family: var(--ysrp-font); font-size: 13px; line-height: normal; text-shadow: none; }
-.last-save-info { display: flex; align-items: center; gap: 6px; padding: 4px 4px 4px 8px; border-radius: 999px; background: var(--ysrp-bg); color: var(--ysrp-fg); }
-.last-save-info-text { white-space: nowrap; font-variant-numeric: tabular-nums; }
-.last-save-info-text.is-error { color: var(--ysrp-danger); font-weight: 600; }
-.last-save-info-text.is-resumed { color: var(--ysrp-ok); font-weight: 600; }
-.ysrp-settings-button { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 999px; background: transparent; color: var(--ysrp-fg); cursor: pointer; font-size: 13px; }
-.ysrp-settings-button:hover { background: var(--ysrp-hover); }
-
-/* Dialog shell: left nav + main column */
-.ysrp-backdrop { position: fixed; inset: 0; background: var(--ysrp-backdrop); z-index: 9998; }
-.ysrp-settings-container { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 9999; box-sizing: border-box;
-  display: flex; flex-direction: row; width: min(896px, 92vw); height: min(640px, 85vh); padding: 0; border-radius: 16px;
-  border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); color: var(--ysrp-fg); box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
-  font-family: var(--ysrp-font); font-size: 14px; line-height: 1.5; text-align: left; overflow: hidden; }
-.ysrp-settings-container *, .ysrp-settings-container *::before, .ysrp-settings-container *::after { box-sizing: border-box; }
-.ysrp-settings-container, .ysrp-settings-container * { scrollbar-width: thin; scrollbar-color: var(--ysrp-thumb) var(--ysrp-track); }
-.ysrp-settings-container ::-webkit-scrollbar { width: 8px; height: 8px; }
-.ysrp-settings-container ::-webkit-scrollbar-track { background: transparent; }
-.ysrp-settings-container ::-webkit-scrollbar-thumb { background: var(--ysrp-thumb); border-radius: 999px; }
-.ysrp-settings-container button, .ysrp-settings-container input, .ysrp-settings-container select, .ysrp-settings-container textarea { font: inherit; color: inherit; }
-.ysrp-settings-container a { color: inherit; }
-.ysrp-settings-container [hidden] { display: none !important; }
-
-.ysrp-nav { display: flex; flex-direction: column; gap: 2px; flex: 0 0 208px; width: 208px; padding: 16px 12px 12px; background: var(--ysrp-nav-bg); border-right: 1px solid var(--ysrp-border); overflow-y: auto; }
-.ysrp-nav-group { padding: 12px 10px 4px; font-size: 12px; font-weight: 500; color: var(--ysrp-tertiary); }
-.ysrp-nav-group:first-child { padding-top: 4px; }
-.ysrp-tab { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 6px 10px; border: none; border-radius: 10px; background: transparent; color: var(--ysrp-sub); cursor: pointer; font-size: 14px; font-weight: 500; text-align: left; white-space: nowrap; }
-.ysrp-tab > i { width: 16px; text-align: center; font-size: 14px; }
-.ysrp-tab > span { overflow: hidden; text-overflow: ellipsis; }
-.ysrp-tab:hover { background: var(--ysrp-hover); color: var(--ysrp-fg); }
-.ysrp-tab.is-active { background: var(--ysrp-l2); color: var(--ysrp-fg); }
-.ysrp-version { margin-top: auto; padding: 12px 10px 0; font-size: 11px; line-height: 1.4; opacity: .3; overflow-wrap: anywhere; }
-.ysrp-version a { text-decoration: none; }
-.ysrp-version a:hover { text-decoration: underline; }
-
-.ysrp-main { position: relative; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; padding: 20px 24px 16px; }
-.ysrp-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; margin-bottom: 16px; }
-.ysrp-header-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.ysrp-header h3 { margin: 0; font-size: 18px; font-weight: 600; color: var(--ysrp-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ysrp-badge { font-size: 12px; padding: 1px 10px; border-radius: 999px; border: 1px solid var(--ysrp-border-strong); color: var(--ysrp-sub); white-space: nowrap; }
-.ysrp-spinner { display: none; color: var(--ysrp-sub); }
-.ysrp-spinner.is-active { display: inline-flex; }
-.ysrp-close { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 32px; height: 32px; padding: 0; border: none; border-radius: 999px; background: transparent; color: var(--ysrp-sub); cursor: pointer; font-size: 16px; }
-.ysrp-close:hover { background: var(--ysrp-hover); color: var(--ysrp-fg); }
-.ysrp-body { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
-.ysrp-pane { overscroll-behavior: contain; display: none; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; margin-right: -12px; padding-right: 12px; -webkit-overflow-scrolling: touch; }
-.ysrp-pane.is-active { display: flex; }
-.ysrp-pane-hint { color: var(--ysrp-sub); font-size: 13px; }
-
-/* Shared controls */
-.ysrp-separator { flex: 0 0 auto; height: 1px; width: 100%; background: var(--ysrp-border); }
-.ysrp-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 16px; border-radius: 999px; border: 1px solid var(--ysrp-border-strong); color: var(--ysrp-fg) !important; background: transparent; font-size: 14px; font-weight: 500; cursor: pointer; flex: 1 1 auto; white-space: nowrap; transition: background .15s; }
-.ysrp-btn:hover:not(:disabled) { background: var(--ysrp-hover); }
-.ysrp-btn:disabled { opacity: .5; cursor: default; }
-.ysrp-btn.is-small { min-height: 30px; padding: 0 12px; font-size: 13px; flex: 0 0 auto; }
-.ysrp-btn.is-armed { border-color: var(--ysrp-danger); color: var(--ysrp-danger) !important; }
-.ysrp-ibtn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; flex: 0 0 auto; padding: 0; border: none; border-radius: 999px; background: transparent; cursor: pointer; color: var(--ysrp-sub); }
-.ysrp-ibtn:hover:not(:disabled) { background: var(--ysrp-hover); color: var(--ysrp-fg); }
-.ysrp-ibtn:disabled { cursor: default; }
-.ysrp-textarea, .ysrp-input, .ysrp-select { width: 100%; min-height: 36px; padding: 6px 12px; border: 1px solid var(--ysrp-input-border); border-radius: 10px; background: var(--ysrp-input); color: var(--ysrp-fg); font: inherit; font-size: 14px; outline: none; }
-.ysrp-input::placeholder, .ysrp-textarea::placeholder { color: var(--ysrp-tertiary); }
-.ysrp-textarea { resize: vertical; min-height: 72px; padding: 8px 12px; }
-.ysrp-textarea.is-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
-.ysrp-textarea:focus, .ysrp-input:focus, .ysrp-select:focus { border-color: var(--ysrp-border-strong); box-shadow: 0 0 0 2px var(--ysrp-hover); }
-.ysrp-select { width: auto; padding-right: 8px; cursor: pointer; }
-.ysrp-switch { position: relative; flex: 0 0 auto; width: 36px; height: 20px; padding: 0; border: none; border-radius: 999px; background: var(--ysrp-border-strong); cursor: pointer; transition: background .15s; }
-.ysrp-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform .15s; }
-.ysrp-switch[aria-checked="true"] { background: var(--ysrp-fg); }
-.ysrp-switch[aria-checked="true"]::after { transform: translateX(16px); background: var(--ysrp-bg); }
-.ysrp-switch:disabled { opacity: .5; cursor: default; }
-.ysrp-check { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; }
-.ysrp-check input { width: 16px; height: 16px; margin: 0; accent-color: var(--ysrp-fg); }
-.ysrp-field { display: flex; flex-direction: column; gap: 6px; }
-.ysrp-field > span { font-weight: 500; color: var(--ysrp-sub); font-size: 13px; }
-.ysrp-inline { display: flex; gap: 8px; }
-.ysrp-inline .ysrp-btn { flex: 0 0 auto; }
-.ysrp-row-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.ysrp-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.ysrp-msg { color: var(--ysrp-sub); font-size: 13px; }
-.ysrp-msg.is-ok { color: var(--ysrp-ok); }
-.ysrp-msg.is-error { color: var(--ysrp-danger); }
-.ysrp-empty { color: var(--ysrp-tertiary); padding: 24px 0; text-align: center; }
-
-/* Section cards (storage, transcript, sync, display) */
-.ysrp-card { display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 16px; border: 1px solid var(--ysrp-border); background: var(--ysrp-card); }
-.ysrp-card-title { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; }
-.ysrp-card-icon, .ysrp-plugin-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 28px; height: 28px; border-radius: 8px; background: var(--ysrp-l2); color: var(--ysrp-fg); font-size: 13px; }
-.ysrp-card-sub { color: var(--ysrp-sub); font-size: 13px; margin-top: -4px; }
-.ysrp-choice { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); cursor: pointer; transition: border-color .15s, background .15s; }
-.ysrp-choice:hover:not(.is-disabled) { background: var(--ysrp-hover); }
-.ysrp-choice input { display: none; }
-.ysrp-choice.is-selected { border-color: var(--ysrp-fg); box-shadow: 0 0 0 1px var(--ysrp-fg); }
-.ysrp-choice.is-disabled { opacity: .5; cursor: not-allowed; }
-.ysrp-choice-badge { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; color: var(--ysrp-sub); border: 1px solid var(--ysrp-border-strong); flex: 0 0 auto; }
-.ysrp-choice.is-selected .ysrp-choice-badge { background: var(--ysrp-fg); border-color: var(--ysrp-fg); color: var(--ysrp-bg); }
-.ysrp-choice-text { display: flex; flex-direction: column; min-width: 0; }
-.ysrp-choice-label { font-weight: 500; }
-.ysrp-choice-hint { color: var(--ysrp-sub); font-size: 12px; }
-.ysrp-file { position: relative; overflow: hidden; display: flex; align-items: center; gap: 8px; flex: 1 1 200px; min-height: 36px; padding: 6px 14px; border: 1px dashed var(--ysrp-border-strong); border-radius: 999px; cursor: pointer; color: var(--ysrp-sub); }
-.ysrp-file:hover, .ysrp-file:focus-within { color: var(--ysrp-fg); background: var(--ysrp-hover); }
-.ysrp-file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ysrp-file input { display: none; }
-.ysrp-file.is-ios input { display: block; position: absolute; inset: 0; width: 100%; height: 100%; opacity: .01; margin: 0; cursor: pointer; }
-.ysrp-info { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: 12px; background: var(--ysrp-bg); border: 1px solid var(--ysrp-border); }
-.ysrp-info-row { display: flex; gap: 8px; flex-wrap: wrap; }
-.ysrp-info-row b { color: var(--ysrp-sub); font-weight: 500; white-space: nowrap; }
-
-/* Records list */
-.ysrp-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.ysrp-row { display: flex; flex-direction: column; gap: 6px; padding: 8px 8px 8px 12px; border-radius: 14px; border: 1px solid var(--ysrp-border); background: var(--ysrp-card); color: var(--ysrp-fg); }
-.ysrp-row.is-current { border-color: var(--ysrp-border-strong); box-shadow: inset 3px 0 0 var(--ysrp-fg); }
-.ysrp-row-top { display: flex; align-items: center; gap: 2px; }
-.ysrp-pct { min-width: 48px; margin-right: 8px; color: var(--ysrp-sub); font-size: 13px; font-variant-numeric: tabular-nums; }
-.ysrp-title { flex: 1; min-width: 0; word-break: break-word; }
-.ysrp-ibtn.ysrp-da.is-pending { filter: grayscale(1); opacity: .4; }
-.ysrp-ibtn.ysrp-da.is-off { filter: grayscale(1); opacity: .6; }
-.ysrp-ibtn.is-delete:hover:not(:disabled) { color: var(--ysrp-danger); }
-.ysrp-ibtn.is-copied { color: var(--ysrp-ok); }
-.ysrp-panel { display: none; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 12px; background: var(--ysrp-bg); border: 1px solid var(--ysrp-border); }
-.ysrp-panel.is-open { display: flex; }
-.ysrp-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
-.ysrp-panel-label { font-weight: 500; color: var(--ysrp-sub); font-size: 13px; }
-.ysrp-status { font-size: 12px; color: var(--ysrp-sub); }
-.ysrp-status.is-error { color: var(--ysrp-danger); }
-.ysrp-url { display: flex; align-items: center; gap: 4px; word-break: break-all; color: var(--ysrp-sub); text-align: left; }
-.ysrp-url span { flex: 1; }
-.ysrp-note-text { white-space: pre-wrap; word-break: break-word; }
-.ysrp-note-text.is-empty { color: var(--ysrp-tertiary); }
-
-/* Plugins tab: search bar + two-column card grid */
-.ysrp-plugins { display: flex; flex-direction: column; gap: 12px; }
-.ysrp-search-bar { display: flex; gap: 8px; }
-.ysrp-search-bar .ysrp-search { flex: 1; min-width: 0; }
-.ysrp-search-bar .ysrp-filter { flex: 0 0 auto; }
-.ysrp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.ysrp-grid:empty { display: none; }
-.ysrp-plugin { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: 16px; border: 1px solid var(--ysrp-border); background: var(--ysrp-card); transition: border-color .15s; }
-.ysrp-plugin:hover { border-color: var(--ysrp-border-strong); }
-.ysrp-plugin.is-required { opacity: .4; }
-.ysrp-plugin.is-required:hover { opacity: .7; }
-.ysrp-plugin-body { display: flex; flex-direction: column; gap: 6px; flex: 1; }
-.ysrp-plugin-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.ysrp-plugin-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.ysrp-plugin-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ysrp-plugin-tag { display: inline-flex; color: var(--ysrp-tertiary); font-size: 12px; }
-.ysrp-card-controls { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
-.ysrp-plugin-desc { color: var(--ysrp-sub); font-size: 13px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 2.9em; }
-.ysrp-plugin-footer { color: var(--ysrp-tertiary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-/* Nested plugin config dialog */
-.ysrp-dialog-layer { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; padding: 24px; background: var(--ysrp-backdrop); }
-.ysrp-dialog { position: relative; display: flex; flex-direction: column; gap: 14px; width: min(512px, 100%); max-height: 100%; padding: 24px; border-radius: 16px; border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); box-shadow: 0 16px 48px rgba(0, 0, 0, .3); overflow-y: auto; overscroll-behavior: contain; }
-.ysrp-dialog-close { position: absolute; top: 12px; right: 12px; }
-.ysrp-dialog-header { display: flex; flex-direction: column; gap: 4px; padding-right: 32px; }
-.ysrp-dialog-title { font-size: 18px; font-weight: 600; }
-.ysrp-dialog-desc { color: var(--ysrp-sub); font-size: 13px; }
-.ysrp-dialog-field { display: flex; flex-direction: column; gap: 8px; }
-.ysrp-dialog-label { font-size: 12px; font-weight: 500; color: var(--ysrp-tertiary); }
-.ysrp-dialog-text { color: var(--ysrp-sub); }
-.ysrp-dialog-settings { display: flex; flex-direction: column; border-radius: 14px; border: 1px solid var(--ysrp-border); background: var(--ysrp-card); }
-.ysrp-dialog-footer { display: flex; justify-content: flex-end; }
-.ysrp-setting-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; }
-.ysrp-setting-row + .ysrp-setting-row { border-top: 1px solid var(--ysrp-border); }
-.ysrp-setting-row.is-stacked { flex-direction: column; align-items: stretch; gap: 8px; }
-.ysrp-row-label { min-width: 0; }
-.ysrp-row-title { font-size: 14px; }
-
-/* In-player &t= choice (F-2.6) */
-.ysrp-resume { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 1000; box-sizing: border-box;
-  display: flex; flex-direction: column; gap: 10px; width: 360px; max-width: calc(100% - 32px); padding: 18px; border-radius: 16px;
-  border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); color: var(--ysrp-fg); box-shadow: 0 8px 32px rgba(0, 0, 0, .4);
-  font-family: var(--ysrp-font); font-size: 14px; line-height: 1.5; text-align: left; text-shadow: none; }
-.ysrp-resume * { box-sizing: border-box; }
-.ysrp-resume button { font: inherit; }
-.ysrp-resume-title { font-size: 16px; font-weight: 600; }
-.ysrp-resume-sub { color: var(--ysrp-sub); font-size: 13px; }
-.ysrp-resume .ysrp-btn { font-variant-numeric: tabular-nums; }
-.ysrp-resume-saved { background: var(--ysrp-fg) !important; border-color: var(--ysrp-fg) !important; color: var(--ysrp-bg) !important; }
-
-/* Narrow screens: nav becomes a scrolling top row */
-@media (max-width: 640px) {
-  .ysrp-settings-container { flex-direction: column; width: 94vw; height: 88vh; }
-  .ysrp-nav { flex: 0 0 auto; width: auto; flex-direction: row; gap: 4px; padding: 8px; border-right: none; border-bottom: 1px solid var(--ysrp-border); overflow-x: auto; overflow-y: hidden; }
-  .ysrp-nav-group, .ysrp-version { display: none; }
-  .ysrp-tab { width: auto; flex: 0 0 auto; }
-  .ysrp-main { padding: 16px; }
-  .ysrp-grid { grid-template-columns: minmax(0, 1fr); }
-}
-`;
+  // src/generated/plugins.ts
+  var plugins = [engine_default, playerBadge_default, settings_default, badgeToggle_default, driveSync_default, transcript_default];
 
   // src/index.ts
-  var logger7 = new Logger("Core");
-  var flag = "__ysrpVideoMemory";
-  var host = window;
-  if (!host[flag]) {
-    host[flag] = { version: "[20261010] v2.1.0", plugins };
+  function bootstrap() {
+    const root = document.documentElement;
+    if (root.dataset.ysrpVideoMemory)
+      return;
+    root.dataset.ysrpVideoMemory = VERSION;
+    getMode();
     try {
-      registerStyle("core", styles_default2);
-      ensureFontAwesome();
-      startAllPlugins();
+      cleanupRecords();
     } catch (err) {
-      logger7.error("Fatal init error", err);
+      console.error("[Video Memory] Startup cleanup failed:", err);
     }
+    addStyle(theme_default, "ysrp-theme");
+    startPlugins(plugins);
   }
+  bootstrap();
 })();

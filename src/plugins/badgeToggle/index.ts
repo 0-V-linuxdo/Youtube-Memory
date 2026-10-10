@@ -1,75 +1,72 @@
-/*
- * [Youtube] Video Memory
- * Copyright (c) 2025 0-V-linuxdo
- * SPDX-License-Identifier: MIT
- */
+// 💾 badge toggle (N-6): a button before the badge that shows / hides it.
 
-import * as Badge from "@api/Badge";
-import { definePluginSettings } from "@api/Settings";
-import { Devs } from "@utils/constants";
-import { registerStyle, unregisterStyle } from "@utils/css";
-import { h, shieldFromPlayer } from "@utils/dom";
-import { t } from "@utils/i18n";
-import definePlugin, { OptionType } from "@utils/types";
+import { badgeContainer, badgeMounted } from '../../api/badge';
+import { definePlugin } from '../../api/plugins';
+import { CLS_BADGE_CONTAINER, EVT_LANGUAGE } from '../../utils/constants';
+import { h, swallow } from '../../utils/dom';
+import { tr } from '../../utils/i18n';
+import css from './style.css';
 
-import css from "./styles.css";
-
-const settings = definePluginSettings({
-    startHidden: {
-        type: OptionType.BOOLEAN,
-        default: true,
-        description: () => t("Hide the badge when a page opens", "打开页面时先隐藏徽标"),
-    },
-});
-
-let button: HTMLButtonElement | null = null;
-let hidden = true;
-let offMount: (() => void) | null = null;
-
-function render(badge: HTMLElement | null) {
-    if (!button) return;
-    button.setAttribute("aria-pressed", String(!hidden));
-    button.title = hidden ? t("Show progress badge", "显示进度徽标") : t("Hide progress badge", "隐藏进度徽标");
-    button.setAttribute("aria-label", button.title);
-    if (badge) badge.classList.toggle("ysrp-badge-hidden", hidden);
-}
-
-// P-B.1: one 💾 button right before the badge, re-attached whenever the badge is rebuilt.
-function attach(badge: HTMLElement) {
-    if (!button) {
-        button = h("button", { type: "button", class: "ysrp-badge-toggle", text: "💾" });
-        shieldFromPlayer(button, () => {
-            hidden = !hidden;
-            render(Badge.current());
-        });
-    }
-    if (button.nextElementSibling !== badge) badge.before(button);
-    render(badge);
-}
+const HIDDEN_CLASS = 'ysrp-badge-hidden';
 
 export default definePlugin({
-    name: "BadgeToggle",
-    title: () => t("Badge toggle", "徽标开关"),
-    description: () => t("Adds a 💾 button that shows or hides the progress badge.", "在徽标旁加一个 💾 按钮，点击显示或隐藏进度徽标。"),
-    icon: "floppy-disk",
-    authors: [Devs.V],
-    enabledByDefault: true,
-    settings,
+  name: 'BadgeToggle',
+  displayName: { en: 'Badge toggle', zh: '徽标开关' },
+  description: {
+    en: 'Adds a 💾 button in front of the badge to show or hide it with one click.',
+    zh: '在徽标前添加 💾 按钮，一键显示或隐藏徽标。'
+  },
+  authors: ['0_V'],
+  icon: 'floppy-disk',
+  enabledByDefault: true,
+  settings: {
+    startHidden: {
+      type: 'switch',
+      default: true,
+      label: { en: 'Hide the badge when a page opens', zh: '打开页面时先隐藏徽标' }
+    }
+  },
+  start(ctx) {
+    ctx.addStyle(css);
+    let hidden = ctx.settings.get<boolean>('startHidden') !== false;
 
-    start() {
-        hidden = settings.store.startHidden;
-        registerStyle("badgeToggle", css);
-        offMount = Badge.onMount(attach);
-        const badge = Badge.current();
-        if (badge) attach(badge);
-    },
+    const button = h('button', { class: 'ysrp-badge-toggle', type: 'button', text: '💾' });
+    const refreshTitle = () => {
+      const tip = hidden ? tr('Show the badge', '显示徽标') : tr('Hide the badge', '隐藏徽标');
+      button.title = tip;
+      button.setAttribute('aria-label', tip);
+      button.setAttribute('aria-pressed', String(!hidden));
+    };
+    // N-6.3: same interception as the gear button; nothing reaches the player.
+    button.addEventListener('pointerdown', ev => {
+      swallow(ev);
+      hidden = !hidden;
+      apply();
+    }, true);
+    button.addEventListener('click', swallow, true);
+    button.addEventListener('touchstart', swallow, { capture: true, passive: false });
 
-    stop() {
-        offMount?.();
-        offMount = null;
-        button?.remove();
-        button = null;
-        Badge.current()?.classList.remove("ysrp-badge-hidden");
-        unregisterStyle("badgeToggle");
-    },
+    const container = () => badgeContainer() || (document.querySelector(`.${CLS_BADGE_CONTAINER}`) as HTMLElement | null);
+    const apply = () => {
+      const badge = container();
+      if (!badge) return;
+      if (button.nextElementSibling !== badge) badge.before(button);
+      badge.classList.toggle(HIDDEN_CLASS, hidden);
+      refreshTitle();
+    };
+
+    ctx.onDispose(badgeMounted.on(() => apply()));
+    // A rebuilt badge or a removed button is put back in place (N-6.1: always exactly one).
+    ctx.observe(document.documentElement, { childList: true, subtree: true }, () => {
+      const badge = container();
+      if (badge && (button.nextElementSibling !== badge || badge.classList.contains(HIDDEN_CLASS) !== hidden)) apply();
+    });
+    ctx.listen(document, EVT_LANGUAGE, refreshTitle);
+    ctx.onDispose(() => {
+      // N-6.4: plugin off -> button removed, badge visible.
+      button.remove();
+      for (const el of Array.from(document.querySelectorAll(`.${HIDDEN_CLASS}`))) el.classList.remove(HIDDEN_CLASS);
+    });
+    apply();
+  }
 });

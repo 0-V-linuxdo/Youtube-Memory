@@ -1,0 +1,91 @@
+/* Player badge (L-57, sizes converted to px) and resume dialog (N-3.2). */
+.last-save-info-container {
+  all: initial;
+  font-family: var(--ysrp-font);
+  font-size: 13px;
+  margin-left: 5px;
+  display: flex;
+  align-items: center;
+}
+.last-save-info-container .last-save-info {
+  text-shadow: none;
+  background: var(--ysrp-bg);
+  color: var(--ysrp-text);
+  padding: 5px;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  line-height: 1.2;
+}
+.last-save-info-container .last-save-info-text.is-error {
+  color: var(--ysrp-error);
+}
+.last-save-info-container .ysrp-settings-button {
+  background: var(--ysrp-layer);
+  color: var(--ysrp-text);
+  border: none;
+  margin: 0 0 0 5px;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.ysrp-resume {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 70;
+  box-sizing: border-box;
+  padding: 20px;
+  border-radius: 16px;
+  background: var(--ysrp-bg);
+  color: var(--ysrp-text);
+  border: 1px solid var(--ysrp-border);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
+  font-family: var(--ysrp-font);
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: left;
+  text-shadow: none;
+}
+.ysrp-resume-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+.ysrp-resume-text {
+  color: var(--ysrp-text-2);
+  margin: 0 0 16px;
+}
+.ysrp-resume-actions {
+  display: flex;
+  gap: 8px;
+}
+.ysrp-resume-btn {
+  flex: 1 1 0;
+  height: 36px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border: 1px solid var(--ysrp-border-strong);
+  background: transparent;
+  color: var(--ysrp-text);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ysrp-resume-btn:hover { background: var(--ysrp-hover); }
+.ysrp-resume-btn:focus-visible { outline: 2px solid var(--ysrp-border-strong); outline-offset: 2px; }
+.ysrp-resume-saved {
+  background: var(--ysrp-text);
+  border-color: var(--ysrp-text);
+  color: var(--ysrp-bg);
+}
+.ysrp-resume-saved:hover { background: var(--ysrp-text); opacity: .88; }

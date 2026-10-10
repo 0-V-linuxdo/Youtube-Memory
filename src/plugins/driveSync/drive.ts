@@ -1,203 +1,216 @@
-/*
- * [Youtube] Video Memory
- * Copyright (c) 2025 0-V-linuxdo
- * SPDX-License-Identifier: MIT
- */
+// Google OAuth token + Drive v3 client used by the DriveSync plugin (N-7.2..N-7.5).
 
-import type { VideoRecord } from "@api/Store";
-import { KEY_DRIVE, UNKNOWN_TITLE } from "@utils/constants";
-import { request } from "@utils/http";
-import { readSecret, writeSecret } from "@utils/storage";
+import { KEY_DRIVE, UNKNOWN_TITLE } from '../../utils/constants';
+import { httpRequest, type HttpResponse } from '../../utils/net';
+import { readSecretSetting, writeSecretSetting } from '../../utils/storage';
 
-const TOKEN_URL = "https://oauth2.googleapis.com/token";
-const FILES_URL = "https://www.googleapis.com/drive/v3/files";
-const UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files";
-export const FOLDER_NAME = "[Youtube] Video Memory";
-export const LEGACY_FILE_NAME = "[Youtube] Video Memory Sync.json";
-const FOLDER_MIME = "application/vnd.google-apps.folder";
-const JSON_MIME = "application/json";
-const FILE_FIELDS = "id,name,modifiedTime";
+export const FOLDER_NAME = '[Youtube] Video Memory';
+export const FOLDER_MIME = 'application/vnd.google-apps.folder';
+export const LEGACY_FILE_NAME = '[Youtube] Video Memory Sync.json';
+const TOKEN_URL = 'https://oauth2.googleapis.com/token';
+const API = 'https://www.googleapis.com/drive/v3/files';
+const UPLOAD = 'https://www.googleapis.com/upload/drive/v3/files';
 
-export interface Credentials {
-    clientId: string;
-    clientSecret: string;
-    refreshToken: string;
+export interface DriveCredentials {
+  clientId: string;
+  clientSecret: string;
+  refreshToken: string;
 }
 
 export interface DriveFile {
-    id: string;
-    name: string;
-    modifiedTime: string;
+  id: string;
+  name: string;
+  modifiedTime: string;
 }
 
-export interface RecordPayload {
-    version: string;
-    videoId: string;
-    videoUrl: string;
-    exportedAt: number;
-    record: VideoRecord;
-}
-
-export class DriveError extends Error {
-    constructor(message: string, public status = 0) {
-        super(message);
-    }
-}
-
-// F-1.2: same key and shape as v1.4.0, so credentials it left behind keep working.
-export function readCredentials(): Credentials {
-    let stored: Partial<Credentials> = {};
-    try { stored = JSON.parse(readSecret(KEY_DRIVE) || "{}") || {}; } catch {}
+export function readCredentials(): DriveCredentials {
+  const empty = { clientId: '', clientSecret: '', refreshToken: '' };
+  const raw = readSecretSetting(KEY_DRIVE);
+  if (!raw) return empty;
+  try {
+    let parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+    if (!parsed || typeof parsed !== 'object') return empty;
+    const p = parsed as Record<string, unknown>;
     return {
-        clientId: typeof stored.clientId === "string" ? stored.clientId.trim() : "",
-        clientSecret: typeof stored.clientSecret === "string" ? stored.clientSecret.trim() : "",
-        refreshToken: typeof stored.refreshToken === "string" ? stored.refreshToken.trim() : "",
+      clientId: typeof p.clientId === 'string' ? p.clientId.trim() : '',
+      clientSecret: typeof p.clientSecret === 'string' ? p.clientSecret.trim() : '',
+      refreshToken: typeof p.refreshToken === 'string' ? p.refreshToken.trim() : ''
     };
+  } catch {
+    return empty;
+  }
 }
 
-export function writeCredentials(creds: Credentials) {
-    let stored: Record<string, unknown> = {};
-    try { stored = JSON.parse(readSecret(KEY_DRIVE) || "{}") || {}; } catch {}
-    writeSecret(KEY_DRIVE, JSON.stringify({ ...stored, ...creds }));
+export function saveCredentials(creds: DriveCredentials): void {
+  writeSecretSetting(KEY_DRIVE, JSON.stringify({
+    clientId: creds.clientId.trim(),
+    clientSecret: creds.clientSecret.trim(),
+    refreshToken: creds.refreshToken.trim()
+  }));
 }
 
-export const hasCredentials = (c: Credentials) => Boolean(c.clientId && c.clientSecret && c.refreshToken);
-
-// P-D.4
-export function fileNameFor(title: unknown, videoId: string) {
-    const clean = String(title ?? "")
-        .replace(/[\u0000-\u001f\u007f]/g, "")
-        .replace(/[\\/:*?"<>|]/g, "-")
-        .replace(/\s+/g, " ")
-        .trim()
-        .slice(0, 120)
-        .trim();
-    return `${clean || UNKNOWN_TITLE}｜${videoId}.json`;
+export function hasCredentials(creds: DriveCredentials): boolean {
+  return Boolean(creds.clientId && creds.clientSecret && creds.refreshToken);
 }
 
-export function videoIdFromName(name: string) {
-    const m = /(?:｜([\w-]+)|\[([\w-]+)\])\.json$/.exec(name);
-    return m ? m[1] || m[2] : null;
+/** N-7.4 file name: "<title>｜<videoId>.json". */
+export function fileNameFor(title: unknown, videoId: string): string {
+  let clean = typeof title === 'string' ? title : '';
+  clean = clean.replace(/[\u0000-\u001f\u007f]/g, '').replace(/[\\/:*?"<>|]/g, '-').trim();
+  if (clean.length > 120) clean = clean.slice(0, 120).trim();
+  if (!clean) clean = UNKNOWN_TITLE;
+  return `${clean}｜${videoId}.json`;
 }
 
-const quote = (value: string) => `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+/** Video id from "…｜<id>.json" or "…[<id>].json". */
+export function videoIdFromName(name: string): string | null {
+  const m = /｜([^｜]+)\.json$/.exec(name) || /\[([^\]]+)\]\.json$/.exec(name);
+  return m ? m[1] : null;
+}
 
-function describe(status: number, text: string) {
-    try {
-        const body = JSON.parse(text);
-        const message = body?.error?.message || body?.error_description || body?.error;
-        if (message) return `HTTP ${status}: ${typeof message === "string" ? message : JSON.stringify(message)}`;
-    } catch {}
-    return `HTTP ${status}`;
+const quote = (value: string) => value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+
+function errorFrom(res: HttpResponse): Error {
+  let message = `HTTP ${res.status}`;
+  try {
+    const data = res.json<{ error?: { message?: string } | string; error_description?: string }>();
+    if (data && typeof data.error === 'object' && data.error.message) message = data.error.message;
+    else if (data && data.error_description) message = data.error_description;
+    else if (data && typeof data.error === 'string') message = data.error;
+  } catch { /* keep HTTP status */ }
+  const err = new Error(message) as Error & { status?: number };
+  err.status = res.status;
+  return err;
 }
 
 export class DriveClient {
-    private token: { value: string; expiresAt: number; } | null = null;
-    private folder: string | null = null;
+  private token: { value: string; expiresAt: number } | null = null;
+  private folder: string | null = null;
+  private folderTask: Promise<string> | null = null;
 
-    constructor(private credentials: () => Credentials) {}
+  constructor(private readonly creds: () => DriveCredentials) {}
 
-    reset() {
+  reset(): void {
+    this.token = null;
+    this.folder = null;
+    this.folderTask = null;
+  }
+
+  /** N-7.2: refresh-token grant, cached until 60 s before expiry. */
+  async accessToken(force = false): Promise<string> {
+    if (!force && this.token && Date.now() < this.token.expiresAt) return this.token.value;
+    const c = this.creds();
+    if (!hasCredentials(c)) throw new Error('Missing Google Drive credentials');
+    const body = new URLSearchParams({
+      client_id: c.clientId,
+      client_secret: c.clientSecret,
+      refresh_token: c.refreshToken,
+      grant_type: 'refresh_token'
+    }).toString();
+    const res = await httpRequest({ method: 'POST', url: TOKEN_URL, headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body, timeoutMs: 30000 });
+    if (!res.ok) throw errorFrom(res);
+    const data = res.json<{ access_token?: string; expires_in?: number }>();
+    if (!data.access_token) throw new Error('No access token in response');
+    const ttl = Number(data.expires_in) > 0 ? Number(data.expires_in) * 1000 : 3600000;
+    this.token = { value: data.access_token, expiresAt: Date.now() + ttl - 60000 };
+    return data.access_token;
+  }
+
+  /** Authorised request; a 401 drops the cached token and retries once. */
+  private async call(method: string, url: string, body?: string, headers: Record<string, string> = {}): Promise<HttpResponse> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const token = await this.accessToken(attempt > 0);
+      const res = await httpRequest({ method, url, body, headers: { ...headers, Authorization: `Bearer ${token}` }, timeoutMs: 60000 });
+      if (res.status === 401 && attempt === 0) {
         this.token = null;
-        this.folder = null;
+        continue;
+      }
+      if (!res.ok) throw errorFrom(res);
+      return res;
     }
+    throw new Error('Unauthorized');
+  }
 
-    // P-D.2
-    async accessToken(force = false) {
-        if (!force && this.token && Date.now() < this.token.expiresAt) return this.token.value;
-        const c = this.credentials();
-        if (!hasCredentials(c)) throw new DriveError("Missing credentials");
-        const body = new URLSearchParams({
-            client_id: c.clientId,
-            client_secret: c.clientSecret,
-            refresh_token: c.refreshToken,
-            grant_type: "refresh_token",
-        }).toString();
-        const res = await request({ method: "POST", url: TOKEN_URL, headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
-        if (!res.ok) throw new DriveError(describe(res.status, res.text), res.status);
-        const data = res.json<{ access_token?: string; expires_in?: number; }>();
-        if (!data?.access_token) throw new DriveError("Token response has no access_token");
-        const lifetime = (Number(data.expires_in) || 3600) * 1000;
-        this.token = { value: data.access_token, expiresAt: Date.now() + Math.max(0, lifetime - 60000) };
-        return this.token.value;
-    }
+  async list(q: string): Promise<DriveFile[]> {
+    const params = new URLSearchParams({
+      q,
+      orderBy: 'modifiedTime desc',
+      fields: 'files(id,name,modifiedTime)',
+      pageSize: '100',
+      spaces: 'drive'
+    });
+    const res = await this.call('GET', `${API}?${params.toString()}`);
+    const data = res.json<{ files?: DriveFile[] }>();
+    return Array.isArray(data.files) ? data.files : [];
+  }
 
-    private async call(method: string, url: string, init: { headers?: Record<string, string>; body?: string; } = {}, retry = true): Promise<string> {
-        const token = await this.accessToken();
-        const res = await request({ method, url, headers: { ...init.headers, Authorization: `Bearer ${token}` }, body: init.body });
-        if (res.status === 401 && retry) {
-            this.token = null;
-            return this.call(method, url, init, false);
-        }
-        if (!res.ok && !(method === "DELETE" && res.status === 404)) throw new DriveError(describe(res.status, res.text), res.status);
-        return res.text;
+  /** N-7.3: the "[Youtube] Video Memory" folder, created when missing; id cached for the page. */
+  folderId(): Promise<string> {
+    if (this.folder) return Promise.resolve(this.folder);
+    if (!this.folderTask) {
+      this.folderTask = (async () => {
+        const found = await this.list(`name = '${quote(FOLDER_NAME)}' and mimeType = '${FOLDER_MIME}' and trashed = false`);
+        if (found.length) return found[0].id;
+        const res = await this.call('POST', `${API}?fields=id`, JSON.stringify({ name: FOLDER_NAME, mimeType: FOLDER_MIME }), { 'Content-Type': 'application/json' });
+        const id = res.json<{ id?: string }>().id;
+        if (!id) throw new Error('Folder creation returned no id');
+        return id;
+      })().then(id => {
+        this.folder = id;
+        return id;
+      }).finally(() => { this.folderTask = null; });
     }
+    return this.folderTask;
+  }
 
-    private async list(q: string, orderBy?: string): Promise<DriveFile[]> {
-        const params = new URLSearchParams({ q, fields: `files(${FILE_FIELDS})`, pageSize: "100", spaces: "drive" });
-        if (orderBy) params.set("orderBy", orderBy);
-        const text = await this.call("GET", `${FILES_URL}?${params}`);
-        return JSON.parse(text || "{}").files ?? [];
-    }
+  /** N-7.5: files of one video in the folder, newest first, matching the parsed id exactly. */
+  async filesFor(videoId: string): Promise<DriveFile[]> {
+    const folder = await this.folderId();
+    const files = await this.list(`name contains '${quote(videoId)}' and mimeType = 'application/json' and '${quote(folder)}' in parents and trashed = false`);
+    return files.filter(f => videoIdFromName(f.name) === videoId);
+  }
 
-    // P-D.3
-    async folderId() {
-        if (this.folder) return this.folder;
-        const found = await this.list(`name = ${quote(FOLDER_NAME)} and mimeType = ${quote(FOLDER_MIME)} and trashed = false`, "createdTime");
-        if (found[0]) return (this.folder = found[0].id);
-        const text = await this.call("POST", `${FILES_URL}?fields=id`, {
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ name: FOLDER_NAME, mimeType: FOLDER_MIME }),
-        });
-        return (this.folder = JSON.parse(text).id as string);
-    }
+  async findByName(name: string): Promise<DriveFile[]> {
+    return this.list(`name = '${quote(name)}' and trashed = false`);
+  }
 
-    // P-D.5
-    async filesFor(videoId: string) {
-        const folder = await this.folderId();
-        const files = await this.list(
-            `name contains ${quote(videoId)} and mimeType = ${quote(JSON_MIME)} and trashed = false and ${quote(folder)} in parents`,
-            "modifiedTime desc",
-        );
-        return files.filter(f => videoIdFromName(f.name) === videoId);
-    }
+  async download(fileId: string): Promise<string> {
+    const res = await this.call('GET', `${API}/${encodeURIComponent(fileId)}?alt=media`);
+    return res.text;
+  }
 
-    async findByName(name: string) {
-        return this.list(`name = ${quote(name)} and trashed = false`, "modifiedTime desc");
-    }
+  private multipart(metadata: Record<string, unknown>, content: string): { body: string; type: string } {
+    const boundary = `ysrp${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+    const body = [
+      `--${boundary}`,
+      'Content-Type: application/json; charset=UTF-8',
+      '',
+      JSON.stringify(metadata),
+      `--${boundary}`,
+      'Content-Type: application/json',
+      '',
+      content,
+      `--${boundary}--`,
+      ''
+    ].join('\r\n');
+    return { body, type: `multipart/related; boundary=${boundary}` };
+  }
 
-    async download<T = unknown>(fileId: string): Promise<T> {
-        const text = await this.call("GET", `${FILES_URL}/${encodeURIComponent(fileId)}?alt=media`);
-        return JSON.parse(text);
-    }
+  async create(name: string, content: string): Promise<DriveFile> {
+    const folder = await this.folderId();
+    const { body, type } = this.multipart({ name, parents: [folder], mimeType: 'application/json' }, content);
+    const res = await this.call('POST', `${UPLOAD}?uploadType=multipart&fields=id,name,modifiedTime`, body, { 'Content-Type': type });
+    return res.json<DriveFile>();
+  }
 
-    async upload(name: string, content: unknown, existingId?: string): Promise<DriveFile> {
-        const boundary = `ysrp-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
-        const metadata: Record<string, unknown> = { name, mimeType: JSON_MIME };
-        if (!existingId) metadata.parents = [await this.folderId()];
-        const body = [
-            `--${boundary}`,
-            "Content-Type: application/json; charset=UTF-8",
-            "",
-            JSON.stringify(metadata),
-            `--${boundary}`,
-            "Content-Type: application/json; charset=UTF-8",
-            "",
-            JSON.stringify(content),
-            `--${boundary}--`,
-            "",
-        ].join("\r\n");
-        const url = existingId
-            ? `${UPLOAD_URL}/${encodeURIComponent(existingId)}?uploadType=multipart&fields=${FILE_FIELDS}`
-            : `${UPLOAD_URL}?uploadType=multipart&fields=${FILE_FIELDS}`;
-        const text = await this.call(existingId ? "PATCH" : "POST", url, {
-            headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
-            body,
-        });
-        return JSON.parse(text);
-    }
+  async update(fileId: string, name: string, content: string): Promise<DriveFile> {
+    const { body, type } = this.multipart({ name }, content);
+    const res = await this.call('PATCH', `${UPLOAD}/${encodeURIComponent(fileId)}?uploadType=multipart&fields=id,name,modifiedTime`, body, { 'Content-Type': type });
+    return res.json<DriveFile>();
+  }
 
-    async remove(fileId: string) {
-        await this.call("DELETE", `${FILES_URL}/${encodeURIComponent(fileId)}`);
-    }
+  async remove(fileId: string): Promise<void> {
+    await this.call('DELETE', `${API}/${encodeURIComponent(fileId)}`);
+  }
 }
