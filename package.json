@@ -1,0 +1,13 @@
+{
+  "name": "youtube-memory",
+  "version": "2.2.0",
+  "private": true,
+  "type": "module",
+  "description": "[Youtube] Video Memory userscript: save & resume YouTube playback progress (void++-style plugin architecture).",
+  "license": "MIT",
+  "scripts": {
+    "build": "bun run build.ts",
+    "tsc": "tsc --noEmit",
+    "test": "node tests/acceptance.mjs"
+  }
+}
