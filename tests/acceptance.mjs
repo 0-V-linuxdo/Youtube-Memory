@@ -749,7 +749,10 @@ const tests = {
     const page = await newPage(ctx);
     await goto(page, 'v=a24dialog');
     await sleep(2000);
+    // YouTube sets html { font-size: 10px }; the dialog must not shrink with it.
+    await page.evaluate(() => { document.documentElement.style.fontSize = '10px'; });
     await openSettings(page);
+    const width = await page.evaluate(() => Math.round(document.querySelector('.ysrp-settings-container').getBoundingClientRect().width));
     await page.click('.ysrp-tab[data-tab-id="plugins"]');
     const groups = await page.$$eval('.ysrp-nav-group', els => els.length);
     const visible = () => page.$$eval('.ysrp-plugin', els => els.filter(e => e.offsetParent).map(e => e.dataset.plugin).join(','));
@@ -773,10 +776,10 @@ const tests = {
     await page.keyboard.press('Escape');
     const dialogGone = await page.locator('.ysrp-dialog').count() === 0;
     const modalOpen = await page.isVisible('.ysrp-settings-container');
-    check('A-24', 'plugins tab: grouped nav, search and filter, config dialog edits and resets settings, Esc closes the dialog first',
-      groups === 2 && searched === 'Transcript' && disabledOnly === '' && emptyShown && title === '徽标开关' &&
+    check('A-24', 'plugins tab: full-size dialog under html 10px, grouped nav, search and filter, config dialog edits and resets settings, Esc closes the dialog first',
+      width === 896 && groups === 2 && searched === 'Transcript' && disabledOnly === '' && emptyShown && title === '徽标开关' &&
       afterToggle === false && afterOneClick === false && afterReset === true && switchOn === 'true' && dialogGone && modalOpen,
-      `groups ${groups}, search "${searched}", disabled "${disabledOnly}" empty ${emptyShown}, title ${title}, stored ${afterToggle}/${afterOneClick}/${afterReset}, switch ${switchOn}, dialog gone ${dialogGone}, modal open ${modalOpen}`);
+      `width ${width}, groups ${groups}, search "${searched}", disabled "${disabledOnly}" empty ${emptyShown}, title ${title}, stored ${afterToggle}/${afterOneClick}/${afterReset}, switch ${switchOn}, dialog gone ${dialogGone}, modal open ${modalOpen}`);
     await ctx.close();
   }
 };
