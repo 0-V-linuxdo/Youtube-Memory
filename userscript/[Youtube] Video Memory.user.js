@@ -1,4915 +1,3367 @@
 // ==UserScript==
-// @name         [Youtube] Video Memory [20251116] v1.0.1
+// @name         [Youtube] Video Memory [20261010] v2.1.0
 // @namespace    0_V userscripts/Youtube Save & Resume Progress
-// @description  Save & resume YouTube playback progress. Storage backend selection (localStorage or GM storage) with migration, import/export under a settings sub-tab. Fix: On YouTube new UI, the settings popup opens reliably on the page (not on the player), without causing player zoom/jitter, even right after page load.
-// @version      [20251116] v1.0.1
-// @update-log   [20251116] v1.0.1 · Export JSON uses localized filename format [Youtube] Video Memory「YYYY MM DD」「HH:MM:SS」.json
+// @description  Save & resume YouTube playback progress: per-video sessions that survive in-site navigation, ads, slow loads and multiple tabs. Records list with DeArrow titles, notes and transcripts; localStorage / GM storage with import & export; plugins for a badge toggle and Google Drive sync; Chinese / English UI.
+// @version      [20261010] v2.1.0
+// @update-log   [20261010] v2.1.0 · Rebuilt on a plugin architecture (after void++): TypeScript sources, a Plugins tab, the 💾 badge toggle built in, and Google Drive sync back as a plugin.
+// @author       0_V
 // @license      MIT
-//
+// @homepageURL  https://github.com/0-V-linuxdo/Youtube-Memory
+// @supportURL   https://github.com/0-V-linuxdo/Youtube-Memory/issues
 // @match        *://*.youtube.com/*
-//
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @grant        GM_listValues
-//
+// @grant        GM_xmlhttpRequest
+// @connect      oauth2.googleapis.com
+// @connect      www.googleapis.com
 // @icon         https://github.com/0-V-linuxdo/Youtube-Memory/raw/refs/heads/main/main_icon/main_icon.svg
 // ==/UserScript==
 
-// ================================================
-// 原脚本信息：
-// 名称：Youtube Save/Resume Progress
-// 作者：Costin Alexandru Sandu
-// 链接：https://greasyfork.org/scripts/487305
-// 版本：v1.5.1
-// ================================================
-
-/* ===================== IMPORTANT · NOTICE · START =====================
- *
- * 1. [编辑指引 | Edit Guidance]
- *    • ⚠️ 这是一个自动生成的文件：请在 `src/modules` 目录下的模块中进行修改，然后运行 `npm run build` 在 `dist/` 目录下重新生成。
- *    • ⚠️ This project bundles auto-generated artifacts. Make changes inside the modules under `src/modules`, then run `npm run build` to regenerate everything under `dist/`.
- *
- * ----------------------------------------------------------------------
- *
- * 2. [安全提示 | Safety Reminder]
- *    • ✅ 必须使用 `setTrustedHTML`，不得使用 `innerHTML`。
- *    • ✅ Always call `setTrustedHTML`; never rely on `innerHTML`.
- *
- * ====================== IMPORTANT · NOTICE · END ======================
+/**
+ * [Youtube] Video Memory [20261010] v2.1.0
+ * (c) 2025 0-V-linuxdo · MIT License
+ * Source: https://github.com/0-V-linuxdo/Youtube-Memory (src/, built with `bun run build`)
+ * Behaviour spec: docs/functional-spec.md
  */
-
-/* -------------------------------------------------------------------------- *
- * Module 01 · Global constants and key identifiers
- * -------------------------------------------------------------------------- */
-
-(function () {
-  'use strict';
-
-  // ========== Constants ==========
-  const KEY_PREFIX = 'Youtube_SaveResume_Progress-';
-  const SETTINGS_MODE_KEY = 'YSRP_StorageMode';
-  const TRANSCRIPT_CONFIG_KEY = 'YSRP_TranscriptSettings';
-  const DEFAULT_VIDEO_NAME = 'Unknown Title';
-  const TITLE_PENDING_PLACEHOLDER = '正在获取标题…';
-
-/* -------------------------------------------------------------------------- *
- * Module 02 · Runtime configuration defaults and flags
- * -------------------------------------------------------------------------- */
-
-  // ========== Config ==========
-  const configData = {
-    savedProgressAlreadySet: false,
-    savingInterval: 1500,
-    currentVideoId: null,
-    lastSaveTime: 0,
-    storageMode: null,
-    cachedVideoTitle: {
-      videoId: null,
-      value: DEFAULT_VIDEO_NAME,
-      updatedAt: 0,
-      isFallback: true,
-      source: 'default',
-      confidence: 0
-    },
-    transcript: {
-      endpoint: 'https://0-v-YouTube-Transcript-Generator-api.hf.space/v1/chat/completions',
-      apiKey: 'sk-asdlfjalalfja',
-      model: 'transcript',
-      timeoutMs: 600000,
-      lastVideoId: null,
-      lastFetchedAt: 0,
-      lastTranscript: '',
-      lastError: null,
-      isFetching: false
-    },
-    dependenciesURLs: {
-      fontAwesomeIcons: 'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css'
-    }
-  };
-
-/* -------------------------------------------------------------------------- *
- * Module 03 · Font Awesome icon presets for UI buttons
- * -------------------------------------------------------------------------- */
-
-  // ========== Icons ==========
-  const FontAwesomeIcons = {
-    trash: ['fa-solid', 'fa-trash-can'],
-    gear: ['fa-solid', 'fa-gear'],
-    link: ['fa-solid', 'fa-link'],
-    edit: ['fa-solid', 'fa-pencil'],
-    note: ['fa-solid', 'fa-pen-to-square'],
-    save: ['fa-solid', 'fa-save'],
-    copy: ['fa-solid', 'fa-copy'],
-    check: ['fa-solid', 'fa-check'],
-    captions: ['fa-solid', 'fa-closed-captioning'],
-    open: ['fa-solid', 'fa-arrow-up-right-from-square'],
-    database: ['fa-solid', 'fa-database'],
-    download: ['fa-solid', 'fa-file-arrow-down'],
-    upload: ['fa-solid', 'fa-file-arrow-up'],
-    arrows: ['fa-solid', 'fa-right-left'],
-    refresh: ['fa-solid', 'fa-arrows-rotate'],
-    globe: ['fa-solid', 'fa-globe']
-  };
-
-/* -------------------------------------------------------------------------- *
- * Module 04 · Theme palettes plus helpers for prefers-color-scheme
- * -------------------------------------------------------------------------- */
-
-  // ========== Theme ==========
-  const themeStyles = {
-    light: {
-      background: '#ffffff',
-      color: '#000000',
-      border: '1px solid #d5d5d5',
-      buttonBackground: '#ffffff',
-      buttonBorder: 'rgba(0, 0, 0, 0.3) 1px solid',
-      deleteButtonColor: '#e74c3c',
-      linkButtonColor: '#3498db',
-      editButtonColor: '#2ecc71',
-      saveButtonColor: '#f1c40f',
-      copyButtonColor: '#2980b9',
-      openButtonColor: '#27ae60',
-      urlTextColor: '#555555',
-      urlBackground: '#f9f9f9',
-      recordBackground: '#f0f0f0',
-      progressTextColor: '#333333',
-      copySuccessBackground: '#2980b9',
-      copySuccessTextColor: '#ffffff',
-      tabActive: '#0b57d0',
-      tabInactive: '#666666',
-      badgeBg: '#eef4ff',
-      badgeText: '#0b57d0',
-      inputBg: '#ffffff',
-      inputBorder: '#d0d7de',
-      subtleText: '#777777',
-      scrollbarThumb: '#9aa0a6',
-      scrollbarThumbHover: '#7a7f85',
-      scrollbarTrack: '#e6e8ea',
-      scrollbarCorner: 'transparent',
-      backdrop: 'rgba(0,0,0,0.35)'
-    },
-    dark: {
-      background: '#2c2c2c',
-      color: '#ffffff',
-      border: '1px solid #444444',
-      buttonBackground: '#3c3c3c',
-      buttonBorder: 'rgba(255, 255, 255, 0.3) 1px solid',
-      deleteButtonColor: '#e74c3c',
-      linkButtonColor: '#3498db',
-      editButtonColor: '#2ecc71',
-      saveButtonColor: '#f1c40f',
-      copyButtonColor: '#1abc9c',
-      openButtonColor: '#16a085',
-      urlTextColor: '#dddddd',
-      urlBackground: '#3c3c3c',
-      recordBackground: '#3a3a3a',
-      progressTextColor: '#dddddd',
-      copySuccessBackground: '#1abc9c',
-      copySuccessTextColor: '#2c2c2c',
-      tabActive: '#7aa2ff',
-      tabInactive: '#aaaaaa',
-      badgeBg: '#3a4a6a',
-      badgeText: '#cfe0ff',
-      inputBg: '#2f2f2f',
-      inputBorder: '#555',
-      subtleText: '#bbbbbb',
-      scrollbarThumb: '#6b7280',
-      scrollbarThumbHover: '#9ca3af',
-      scrollbarTrack: '#2f2f2f',
-      scrollbarCorner: 'transparent',
-      backdrop: 'rgba(0,0,0,0.45)'
-    }
-  };
-  function getCurrentTheme() {
-    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+(() => {
+  // src/api/RecordActions.ts
+  var actions = new Map;
+  var listeners = new Set;
+  var version = 0;
+  function addRecordAction(action) {
+    actions.set(action.id, action);
+    version++;
+    for (const listener of listeners)
+      listener();
   }
-  const currentTheme = getCurrentTheme();
-  const styles = themeStyles[currentTheme] || themeStyles.light;
-
-  const CLASS_NAMES = Object.freeze({
-    infoContainer: 'last-save-info-container',
-    settingsContainer: 'ysrp-settings-container',
-    settingsContainerBody: 'ysrp-settings-container-body'
-  });
-
-  const SELECTORS = Object.freeze({
-    infoContainer: `.${CLASS_NAMES.infoContainer}`,
-    settingsContainer: `.${CLASS_NAMES.settingsContainer}`,
-    settingsContainerBody: `.${CLASS_NAMES.settingsContainerBody}`
-  });
-
-/* -------------------------------------------------------------------------- *
- * Module 05 · Generic DOM, timing, and formatting utilities
- * -------------------------------------------------------------------------- */
-
-  // ========== Utilities ==========
-  function createIcon(iconName, color) {
-    const icon = document.createElement('i');
-    const cssClasses = FontAwesomeIcons[iconName];
-    if (cssClasses) icon.classList.add(...cssClasses);
-    icon.style.color = color;
-    return icon;
-  }
-
-  function createDeArrowIcon(size) {
-    const svgNS = 'http://www.w3.org/2000/svg';
-    const svg = document.createElementNS(svgNS, 'svg');
-    svg.setAttribute('viewBox', '0 0 36 36');
-    svg.setAttribute('width', String(size || 20));
-    svg.setAttribute('height', String(size || 20));
-    svg.setAttribute('aria-hidden', 'true');
-    svg.setAttribute('focusable', 'false');
-    svg.setAttribute('role', 'img');
-
-    const outer = document.createElementNS(svgNS, 'path');
-    outer.setAttribute('fill', '#1213BD');
-    outer.setAttribute('d', 'M36 18.302c0 4.981-2.46 9.198-5.655 12.462s-7.323 5.152-12.199 5.152s-9.764-1.112-12.959-4.376S0 23.283 0 18.302s2.574-9.38 5.769-12.644S13.271 0 18.146 0s9.394 2.178 12.589 5.442C33.931 8.706 36 13.322 36 18.302z');
-
-    const mid = document.createElementNS(svgNS, 'path');
-    mid.setAttribute('fill', '#88c9f9');
-    mid.setAttribute('d', 'm 30.394282,18.410186 c 0,3.468849 -1.143025,6.865475 -3.416513,9.137917 -2.273489,2.272442 -5.670115,2.92874 -9.137918,2.92874 -3.467803,0 -6.373515,-1.147212 -8.6470033,-3.419654 -2.2734888,-2.272442 -3.5871299,-5.178154 -3.5871299,-8.647003 0,-3.46885 0.9420533,-6.746149 3.2144954,-9.0196379 2.2724418,-2.2734888 5.5507878,-3.9513905 9.0196378,-3.9513905 3.46885,0 6.492841,1.9322561 8.76633,4.204698 2.273489,2.2724424 3.788101,5.2974804 3.788101,8.7663304 z');
-
-    const inner = document.createElementNS(svgNS, 'path');
-    inner.setAttribute('fill', '#0a62a5');
-    inner.setAttribute('d', 'm 23.95823,17.818306 c 0,3.153748 -2.644888,5.808102 -5.798635,5.808102 -3.153748,0 -5.599825,-2.654354 -5.599825,-5.808102 0,-3.153747 2.446077,-5.721714 5.599825,-5.721714 3.153747,0 5.798635,2.567967 5.798635,5.721714 z');
-
-    svg.appendChild(outer);
-    svg.appendChild(mid);
-    svg.appendChild(inner);
-    return svg;
-  }
-
-  const originalTitleCache = new Map();
-  const pendingOriginalTitleFetches = new Map();
-  const OEMBED_ENDPOINT = 'https://www.youtube.com/oembed?format=json&url=';
-
-  function getOriginalTitle(videoId) {
-    if (!videoId) return Promise.resolve(null);
-    if (originalTitleCache.has(videoId)) {
-      return Promise.resolve(originalTitleCache.get(videoId));
-    }
-    if (pendingOriginalTitleFetches.has(videoId)) {
-      return pendingOriginalTitleFetches.get(videoId);
-    }
-    const videoUrl = `https://youtu.be/${videoId}`;
-    const requestUrl = `${OEMBED_ENDPOINT}${encodeURIComponent(videoUrl)}`;
-    const fetchPromise = fetch(requestUrl, { credentials: 'omit', cache: 'no-store' })
-      .then(async res => {
-        if (!res.ok) throw new Error(`oEmbed HTTP ${res.status}`);
-        const data = await res.json();
-        const title = data && typeof data.title === 'string' ? data.title.trim() : null;
-        originalTitleCache.set(videoId, title);
-        try { if (typeof setTitleSource === 'function') setTitleSource(videoId, 'original', title); } catch {}
-        try { updateStoredOriginalTitle(videoId, title); } catch {}
-        return title;
-      })
-      .catch(err => {
-        console.error('Failed to fetch original title:', err);
-        originalTitleCache.set(videoId, null);
-        try { if (typeof setTitleSource === 'function') setTitleSource(videoId, 'original', null); } catch {}
-        try { updateStoredOriginalTitle(videoId, null); } catch {}
-        return null;
-      })
-      .finally(() => {
-        pendingOriginalTitleFetches.delete(videoId);
-      });
-    pendingOriginalTitleFetches.set(videoId, fetchPromise);
-    return fetchPromise;
-  }
-
-  function fancyTimeFormat(duration) {
-    const hrs = Math.floor(duration / 3600);
-    const mins = Math.floor((duration % 3600) / 60);
-    const secs = Math.floor(duration % 60);
-    let ret = '';
-    if (hrs > 0) ret += `${hrs}:` + (mins < 10 ? '0' : '');
-    ret += `${mins}:` + (secs < 10 ? '0' : '');
-    ret += `${secs}`;
-    return ret;
-  }
-
-  function waitForElm(selector) {
-    return new Promise(resolve => {
-      const element = document.querySelector(selector);
-      if (element) return resolve(element);
-      const observer = new MutationObserver(() => {
-        const el = document.querySelector(selector);
-        if (el) {
-          observer.disconnect();
-          resolve(el);
-        }
-      });
-      observer.observe(document.body, { childList: true, subtree: true });
-    });
-  }
-
-/* -------------------------------------------------------------------------- *
- * Module 05a · Internationalization helpers and language preference storage
- * -------------------------------------------------------------------------- */
-
-  const LANGUAGE_STORAGE_KEY = 'YSRP_LanguagePreference';
-  const LANGUAGE_CHANGED_EVENT = 'ysrp-language-changed';
-  const LANGUAGE_PREFERENCE_OPTIONS = Object.freeze(['auto', 'zh', 'en']);
-  const LANGUAGE_FALLBACK = 'en';
-
-  function normalizeLanguagePreference(value) {
-    const raw = (value || '').toString().trim().toLowerCase();
-    if (raw === 'auto') return 'auto';
-    if (raw.startsWith('zh')) return 'zh';
-    if (raw === 'en' || raw.startsWith('en')) return 'en';
-    return 'auto';
-  }
-
-  function detectBrowserLanguage() {
-    const candidates = [];
-    if (Array.isArray(navigator.languages) && navigator.languages.length > 0) {
-      candidates.push(...navigator.languages);
-    }
-    if (typeof navigator.language === 'string') {
-      candidates.push(navigator.language);
-    }
-    if (typeof navigator.userLanguage === 'string') {
-      candidates.push(navigator.userLanguage);
-    }
-    const match = candidates.find(lang => typeof lang === 'string' && lang.trim());
-    if (!match) return LANGUAGE_FALLBACK;
-    const normalized = match.trim().toLowerCase();
-    if (normalized.startsWith('zh')) return 'zh';
-    return 'en';
-  }
-
-  function readStoredLanguagePreference() {
-    let stored = null;
-    try {
-      if (window.localStorage) {
-        stored = window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
-      }
-    } catch {}
-    if (!stored && typeof GM_getValue === 'function') {
-      try {
-        stored = GM_getValue(LANGUAGE_STORAGE_KEY);
-      } catch {}
-    }
-    return normalizeLanguagePreference(stored);
-  }
-
-  function persistLanguagePreference(value) {
-    const normalized = normalizeLanguagePreference(value);
-    try {
-      if (window.localStorage) {
-        window.localStorage.setItem(LANGUAGE_STORAGE_KEY, normalized);
-      }
-    } catch {}
-    if (typeof GM_setValue === 'function') {
-      try {
-        GM_setValue(LANGUAGE_STORAGE_KEY, normalized);
-      } catch {}
-    }
-  }
-
-  function deepMerge(target, source) {
-    if (!source || typeof source !== 'object') return target;
-    const output = target && typeof target === 'object' ? target : {};
-    Object.keys(source).forEach(key => {
-      const value = source[key];
-      if (value && typeof value === 'object' && !Array.isArray(value)) {
-        output[key] = deepMerge(output[key], value);
-      } else {
-        output[key] = value;
-      }
-    });
-    return output;
-  }
-
-  const translationStore = { en: {}, zh: {} };
-
-  function resolveMessage(lang, path) {
-    if (!path) return null;
-    const segments = path.split('.');
-    let current = translationStore[lang];
-    for (const segment of segments) {
-      if (!current || typeof current !== 'object') {
-        return null;
-      }
-      current = current[segment];
-    }
-    return typeof current === 'string' ? current : null;
-  }
-
-  function formatTemplate(template, params) {
-    if (typeof template !== 'string' || !params) return template;
-    return template.replace(/\{([^}]+)\}/g, (_, token) => {
-      const key = token.trim();
-      if (!key) return '';
-      return Object.prototype.hasOwnProperty.call(params, key) ? String(params[key]) : '';
-    });
-  }
-
-  let languagePreference = readStoredLanguagePreference();
-  if (!LANGUAGE_PREFERENCE_OPTIONS.includes(languagePreference)) {
-    languagePreference = 'auto';
-  }
-
-  function getResolvedLanguage() {
-    if (languagePreference === 'auto') {
-      return detectBrowserLanguage();
-    }
-    return languagePreference;
-  }
-
-  function updateConfigLanguageState() {
-    if (!configData || typeof configData !== 'object') return;
-    const resolved = getResolvedLanguage();
-    configData.language = Object.assign({}, configData.language || {}, {
-      preference: languagePreference,
-      resolved,
-      eventName: LANGUAGE_CHANGED_EVENT
-    });
-  }
-
-  updateConfigLanguageState();
-
-  const I18n = (() => {
-    function extend(messages) {
-      if (!messages || typeof messages !== 'object') return;
-      Object.keys(messages).forEach(langKey => {
-        if (!langKey) return;
-        const normalizedLang = langKey.toLowerCase().startsWith('zh') ? 'zh' : 'en';
-        translationStore[normalizedLang] = deepMerge(translationStore[normalizedLang], messages[langKey] || {});
-      });
-    }
-
-    function pick(messages, params) {
-      if (!messages || typeof messages !== 'object') return '';
-      const resolved = getResolvedLanguage();
-      const candidate = Object.prototype.hasOwnProperty.call(messages, resolved)
-        ? messages[resolved]
-        : (messages.en ?? messages.zh ?? messages[LANGUAGE_FALLBACK]);
-      let value = candidate;
-      if (typeof candidate === 'function') {
-        try {
-          value = candidate(params || {});
-        } catch {
-          value = '';
-        }
-      }
-      if (typeof value === 'string') {
-        return formatTemplate(value, params);
-      }
-      return '';
-    }
-
-    function t(path, params, fallback) {
-      if (!path) return typeof fallback === 'string' ? fallback : path;
-      const resolvedLang = getResolvedLanguage();
-      const primary = resolveMessage(resolvedLang, path);
-      if (primary) {
-        return formatTemplate(primary, params);
-      }
-      const secondary = resolveMessage('en', path);
-      if (secondary) {
-        return formatTemplate(secondary, params);
-      }
-      const tertiary = resolveMessage('zh', path);
-      if (tertiary) {
-        return formatTemplate(tertiary, params);
-      }
-      if (typeof fallback === 'string') return formatTemplate(fallback, params);
-      return path;
-    }
-
-    function setPreference(value) {
-      const normalized = normalizeLanguagePreference(value);
-      if (normalized === languagePreference) return;
-      languagePreference = normalized;
-      persistLanguagePreference(languagePreference);
-      updateConfigLanguageState();
-      try {
-        document.dispatchEvent(new CustomEvent(LANGUAGE_CHANGED_EVENT, {
-          detail: {
-            preference: languagePreference,
-            resolved: getResolvedLanguage()
-          }
-        }));
-      } catch {}
-    }
-
-    function getPreference() {
-      return languagePreference;
-    }
-
-    function getOptions() {
-      return LANGUAGE_PREFERENCE_OPTIONS.slice();
-    }
-
-    return {
-      t,
-      extend,
-      setPreference,
-      getPreference,
-      getResolvedLanguage,
-      getOptions,
-      detectBrowserLanguage,
-      getEventName: () => LANGUAGE_CHANGED_EVENT,
-      pick
-    };
-  })();
-
-  I18n.extend({
-    en: {
-      language: {
-        tabLabel: 'Display',
-        heading: 'Language',
-        description: 'Choose how the script UI should appear.',
-        options: {
-          auto: 'Auto',
-          zh: 'Chinese',
-          en: 'English'
-        },
-        optionHints: {
-          auto: 'Match the browser language automatically.',
-          zh: 'Always use Simplified Chinese.',
-          en: 'Always use English.'
-        },
-        badges: {
-          auto: 'Auto',
-          zh: 'ZH',
-          en: 'EN'
-        }
-      }
-    },
-    zh: {
-      language: {
-        tabLabel: '界面',
-        heading: '界面语言',
-        description: '为脚本 UI 选择显示语言。',
-        options: {
-          auto: '自动',
-          zh: '中文',
-          en: '英文'
-        },
-        optionHints: {
-          auto: '自动跟随浏览器语言。',
-          zh: '始终使用简体中文。',
-          en: '始终使用英文。'
-        },
-        badges: {
-          auto: '自动',
-          zh: '中文',
-          en: '英文'
-        }
-      }
-    }
-  });
-
-  updateConfigLanguageState();
-
-/* -------------------------------------------------------------------------- *
- * Module 06 · YouTube player detection and DeArrow title fetching
- * -------------------------------------------------------------------------- */
-
-  const DEARROW_API_ENDPOINT = 'https://sponsor.ajay.app/api/branding?videoID=';
-  const DEARROW_CACHE_TTL = 1000 * 60 * 60 * 6; // 6 hours
-  const TITLE_REFRESH_DEBOUNCE_MS = 250;
-  const DEARROW_DUPLICATE_RETRY_INTERVAL = 1000 * 60 * 5;
-  const CURRENT_VIDEO_STATUS_EVENT = 'ysrp-current-video-status';
-  const DEARROW_TITLE_READY_EVENT = 'ysrp-dearrow-title-ready';
-  const RECORD_UPDATED_EVENT = 'ysrp-record-updated';
-
-  let titleEventsBound = false;
-  let pendingTitleRefresh = null;
-  let lastObservedVideoId = null;
-  let videoIdMonitorInterval = null;
-  const dearrowCache = new Map();   // videoId -> { title, fetchedAt }
-  const dearrowFetches = new Map(); // videoId -> Promise
-  const dearrowRetryTimestamps = new Map();
-  const titleSources = new Map();   // videoId -> { original, dearrow }
-  configData.titleSources = titleSources;
-
-  function getPlayerElement() {
-    return document.querySelector('#movie_player');
-  }
-
-  function normalizeTitleText(text) {
-    if (!text) return '';
-    return String(text).replace(/\s+/g, ' ').trim();
-  }
-
-  function titlesEqual(a, b) {
-    if (!a || !b) return false;
-    return normalizeTitleText(a).toLowerCase() === normalizeTitleText(b).toLowerCase();
-  }
-
-  function scheduleDeArrowRetry(videoId) {
-    if (!videoId) return;
-    const now = Date.now();
-    const last = dearrowRetryTimestamps.get(videoId) || 0;
-    if ((now - last) < DEARROW_DUPLICATE_RETRY_INTERVAL) return;
-    dearrowRetryTimestamps.set(videoId, now);
-    setTimeout(() => {
-      try { requestDeArrowTitle(videoId, { force: true }); } catch (err) { console.error('Retry DeArrow fetch failed:', err); }
-    }, 1500);
-  }
-
-  function setTitleSource(videoId, type, value) {
-    if (!videoId) return false;
-    const normalized = normalizeTitleText(value);
-    const entry = titleSources.get(videoId) || { original: null, dearrow: null };
-    if (type === 'original') {
-      entry.original = normalized || null;
-      if (entry.dearrow && normalized && titlesEqual(entry.dearrow, normalized)) {
-        entry.dearrow = null;
-        scheduleDeArrowRetry(videoId);
-      }
-    } else if (type === 'dearrow') {
-      if (!normalized) {
-        entry.dearrow = null;
-      } else if (entry.original && titlesEqual(entry.original, normalized)) {
-        entry.dearrow = null;
-        scheduleDeArrowRetry(videoId);
-        titleSources.set(videoId, entry);
-        return false;
-      } else {
-        entry.dearrow = normalized;
-      }
-    }
-    titleSources.set(videoId, entry);
-    return Boolean(type === 'dearrow' ? entry.dearrow : entry.original);
-  }
-
-  function resolveEffectiveTitle(videoId, fallbackTitle) {
-    const fallback = normalizeTitleText(fallbackTitle) || DEFAULT_VIDEO_NAME;
-    if (!videoId) return { title: fallback, source: 'fallback', type: 'fallback' };
-    const entry = titleSources.get(videoId);
-    if (entry) {
-      if (entry.dearrow) return { title: entry.dearrow, source: 'dearrow', type: 'dearrow' };
-      if (entry.original) return { title: entry.original, source: 'original', type: 'original' };
-    }
-    return { title: fallback, source: 'fallback', type: 'fallback' };
-  }
-
-  configData.resolveEffectiveTitle = resolveEffectiveTitle;
-
-  function publishCurrentVideoStatus() {
-    try {
-      const cached = configData.cachedVideoTitle || {};
-      const detail = {
-        videoId: cached.videoId || null,
-        title: cached.value || DEFAULT_VIDEO_NAME,
-        isLoading: Boolean(!cached.videoId || cached.isFallback || cached.value === TITLE_PENDING_PLACEHOLDER),
-        source: cached.source || 'unknown',
-        updatedAt: cached.updatedAt || Date.now()
-      };
-      document.dispatchEvent(new CustomEvent(CURRENT_VIDEO_STATUS_EVENT, { detail }));
-    } catch {}
-  }
-
-  function cacheVideoTitle(videoId, title, options) {
-    const resolved = resolveEffectiveTitle(videoId, title);
-    const normalized = resolved.title || DEFAULT_VIDEO_NAME;
-    const opts = Object.assign({ source: resolved.source || 'unknown', confidence: 0 }, options || {});
-    const isPlaceholderValue = resolved.type === 'fallback' || normalized === DEFAULT_VIDEO_NAME || normalized === TITLE_PENDING_PLACEHOLDER;
-    configData.cachedVideoTitle = {
-      videoId,
-      value: normalized,
-      updatedAt: Date.now(),
-      isFallback: isPlaceholderValue,
-      source: opts.source,
-      confidence: opts.confidence
-    };
-    publishCurrentVideoStatus();
-    return normalized;
-  }
-
-  function ensureVideoCache(videoId) {
-    if (configData.cachedVideoTitle.videoId !== videoId) {
-      cacheVideoTitle(videoId, TITLE_PENDING_PLACEHOLDER, { source: 'loading', confidence: 0 });
-    }
-  }
-
-  function parseDeArrowPayload(data) {
-    if (!data || !Array.isArray(data.titles) || data.titles.length === 0) return null;
-    const validEntry = data.titles.find(entry => {
-      if (!entry || typeof entry.title !== 'string') return false;
-      if (entry.original === true) return false;
-      const votes = typeof entry.votes === 'number' ? entry.votes : 0;
-      const locked = Boolean(entry.locked);
-      if (!locked && votes < 0) return false;
-      return true;
-    });
-    return validEntry ? validEntry.title : null;
-  }
-
-  async function fetchDeArrowTitle(videoId) {
-    if (!videoId) return null;
-    const url = `${DEARROW_API_ENDPOINT}${encodeURIComponent(videoId)}`;
-    try {
-      const response = await fetch(url, { credentials: 'omit', cache: 'no-store' });
-      if (!response.ok) return null;
-      const data = await response.json();
-      return parseDeArrowPayload(data);
-    } catch (error) {
-      console.error('Failed to fetch DeArrow title:', error);
-      return null;
-    }
-  }
-
-  function requestDeArrowTitle(videoId, options) {
-    if (!videoId) return Promise.resolve(null);
-    const opts = Object.assign({ force: false }, options || {});
-
-    if (!opts.force) {
-      const cached = dearrowCache.get(videoId);
-      if (cached && (Date.now() - cached.fetchedAt) < DEARROW_CACHE_TTL) {
-        setTitleSource(videoId, 'dearrow', cached.title);
-        cacheVideoTitle(videoId, cached.title, { source: 'dearrow-cache', confidence: 1 });
-        return Promise.resolve(cached.title);
-      }
-    }
-
-    if (dearrowFetches.has(videoId)) {
-      return dearrowFetches.get(videoId);
-    }
-    const fetchPromise = fetchDeArrowTitle(videoId)
-      .then(title => {
-        if (title) {
-          const accepted = setTitleSource(videoId, 'dearrow', title);
-          if (accepted) {
-            dearrowCache.set(videoId, { title, fetchedAt: Date.now() });
-            cacheVideoTitle(videoId, title, { source: 'dearrow', confidence: 1 });
-            try {
-              document.dispatchEvent(new CustomEvent(DEARROW_TITLE_READY_EVENT, {
-                detail: { videoId, title }
-              }));
-            } catch (err) {
-              console.error('Failed to dispatch DeArrow title ready event:', err);
-            }
-          }
-        }
-        return title || null;
-      })
-      .catch(() => null)
-      .finally(() => {
-        dearrowFetches.delete(videoId);
-      });
-    dearrowFetches.set(videoId, fetchPromise);
-    return fetchPromise;
-  }
-
-  function debounceTitleRefresh() {
-    if (pendingTitleRefresh) {
-      clearTimeout(pendingTitleRefresh);
-    }
-    pendingTitleRefresh = setTimeout(() => {
-      pendingTitleRefresh = null;
-      const videoId = getVideoId();
-      if (videoId) requestDeArrowTitle(videoId, { force: true });
-    }, TITLE_REFRESH_DEBOUNCE_MS);
-  }
-
-  function bindTitleRefreshEvents() {
-    if (titleEventsBound) return;
-    titleEventsBound = true;
-
-    const navigationEvents = ['yt-page-data-fetched', 'yt-page-data-updated', 'yt-navigate-start', 'yt-navigate-finish'];
-    navigationEvents.forEach(evt => {
-      window.addEventListener(evt, () => {
-        debounceTitleRefresh();
-        handleVideoIdChange(getVideoId());
-      }, true);
-    });
-
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) {
-        debounceTitleRefresh();
-        handleVideoIdChange(getVideoId());
-      }
-    });
-
-    window.addEventListener('popstate', () => handleVideoIdChange(getVideoId()));
-    window.addEventListener('yt-history-popstate', () => handleVideoIdChange(getVideoId()));
-    window.addEventListener('yt-viewport-change', () => handleVideoIdChange(getVideoId()), true);
-
-    waitForElm('#title').then(titleEl => {
-      const observer = new MutationObserver(() => {
-        debounceTitleRefresh();
-        handleVideoIdChange(getVideoId());
-      });
-      observer.observe(titleEl, { childList: true, subtree: true, characterData: true });
-    }).catch(() => {});
-
-    startVideoIdMonitor();
-  }
-
-  // ========== YouTube Player Helpers ==========
-  function getVideoCurrentTime() {
-    const player = getPlayerElement();
-    if (player && typeof player.getCurrentTime === 'function') {
-      return player.getCurrentTime();
-    }
-    return 0;
-  }
-
-  function getVideoId() {
-    const urlParams = new URLSearchParams(window.location.search);
-    return urlParams.get('v');
-  }
-
-  function getVideoDuration() {
-    const player = getPlayerElement();
-    if (player && typeof player.getDuration === 'function') {
-      return player.getDuration();
-    }
-    return 0;
-  }
-
-  function playerExists() {
-    return Boolean(getPlayerElement());
-  }
-
-  function setVideoProgress(progress) {
-    const player = getPlayerElement();
-    if (player && typeof player.seekTo === 'function') {
-      player.seekTo(progress, true);
-    }
-  }
-
-  function ensureTitleFetchForVideo(videoId, options) {
-    if (!videoId) return;
-    ensureVideoCache(videoId);
-    const dearrowPromise = requestDeArrowTitle(videoId, options);
-    if (dearrowPromise && typeof dearrowPromise.catch === 'function') {
-      dearrowPromise.catch(() => null);
-    }
-    getOriginalTitle(videoId)
-      .then(title => {
-        if (!title) return null;
-        const cached = configData.cachedVideoTitle;
-        const stillLoading = cached.videoId === videoId &&
-          (cached.value === TITLE_PENDING_PLACEHOLDER || cached.isFallback);
-        if (stillLoading) {
-          cacheVideoTitle(videoId, title, { source: 'original', confidence: 0.7 });
-        }
-        return title;
-      })
-      .catch(() => null);
-  }
-
-  function handleVideoIdChange(newVideoId) {
-    if (newVideoId === lastObservedVideoId) return;
-    lastObservedVideoId = newVideoId || null;
-    if (!newVideoId) {
-      cacheVideoTitle(null, DEFAULT_VIDEO_NAME, { source: 'idle', confidence: 0 });
+  function removeRecordAction(id) {
+    if (!actions.delete(id))
       return;
+    version++;
+    for (const listener of listeners)
+      listener();
+  }
+  function getRecordActions() {
+    return [...actions.values()].sort((a, b) => a.order - b.order);
+  }
+  function onRecordActionsChange(listener) {
+    listeners.add(listener);
+    return () => listeners.delete(listener);
+  }
+
+  // src/utils/Logger.ts
+  class Logger {
+    name;
+    constructor(name) {
+      this.name = name;
     }
-    ensureTitleFetchForVideo(newVideoId, { force: true });
-    try { saveVideoProgress(); } catch (err) { console.error('Failed to seed progress on navigation:', err); }
-  }
-
-  function startVideoIdMonitor() {
-    if (videoIdMonitorInterval) return;
-    lastObservedVideoId = getVideoId();
-    videoIdMonitorInterval = setInterval(() => {
-      const current = getVideoId();
-      if (current !== lastObservedVideoId) {
-        handleVideoIdChange(current);
-      }
-    }, 500);
-  }
-
-  function getVideoName() {
-    const videoId = getVideoId();
-    if (!videoId) return DEFAULT_VIDEO_NAME;
-
-    bindTitleRefreshEvents();
-    startVideoIdMonitor();
-    ensureTitleFetchForVideo(videoId);
-
-    return configData.cachedVideoTitle.value || DEFAULT_VIDEO_NAME;
-  }
-
-/* -------------------------------------------------------------------------- *
- * Module 07 · Storage mode abstraction with GM/local backends
- * -------------------------------------------------------------------------- */
-
-  // ========== Storage Backend Abstraction ==========
-  const hasGM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function' &&
-                typeof GM_listValues === 'function' && typeof GM_deleteValue === 'function';
-
-  const LocalBackend = {
-    mode: 'local',
-    getItem(key) { try { return window.localStorage.getItem(key); } catch { return null; } },
-    setItem(key, value) { try { window.localStorage.setItem(key, value); } catch {} },
-    removeItem(key) { try { window.localStorage.removeItem(key); } catch {} },
-    keys() { try { return Object.keys(window.localStorage) || []; } catch { return []; } },
-    entriesWithPrefix(prefix) {
-      try { return Object.entries(window.localStorage).filter(([k]) => k.startsWith(prefix)); } catch { return []; }
+    prefix() {
+      return `[Video Memory] ${this.name}:`;
     }
-  };
+    info(...args) {
+      console.info(this.prefix(), ...args);
+    }
+    warn(...args) {
+      console.warn(this.prefix(), ...args);
+    }
+    error(...args) {
+      console.error(this.prefix(), ...args);
+    }
+  }
 
-  const GMBackend = {
-    mode: 'gm',
-    getItem(key) { try { return hasGM ? (GM_getValue(key) ?? null) : null; } catch { return null; } },
-    setItem(key, value) { try { if (hasGM) GM_setValue(key, value); } catch {} },
-    removeItem(key) { try { if (hasGM) GM_deleteValue(key); } catch {} },
-    keys() { try { return hasGM ? (GM_listValues() || []) : []; } catch { return []; } },
-    entriesWithPrefix(prefix) {
+  // src/api/RestoreHooks.ts
+  var logger = new Logger("RestoreHooks");
+  var hooks = new Map;
+  function addRestoreHook(owner, hook) {
+    hooks.set(owner, hook);
+  }
+  function removeRestoreHook(owner) {
+    hooks.delete(owner);
+  }
+  function runRestoreHooks(videoId) {
+    const pending = [];
+    for (const [owner, hook] of hooks) {
       try {
-        if (!hasGM) return [];
-        const keys = GM_listValues() || [];
-        const filtered = keys.filter(k => k.startsWith(prefix));
-        return filtered.map(k => [k, GM_getValue(k)]);
-      } catch { return []; }
+        const result = hook(videoId);
+        if (result)
+          pending.push(result.catch((err) => logger.warn(`${owner} failed`, err)));
+      } catch (err) {
+        logger.warn(`${owner} failed`, err);
+      }
     }
+    return pending;
+  }
+
+  // src/utils/constants.ts
+  var RECORD_PREFIX = "Youtube_SaveResume_Progress-";
+  var KEY_STORAGE_MODE = "YSRP_StorageMode";
+  var KEY_TRANSCRIPT = "YSRP_TranscriptSettings";
+  var KEY_LANGUAGE = "YSRP_LanguagePreference";
+  var KEY_PLUGINS = "YSRP_Plugins";
+  var KEY_DRIVE = "YSRP_DriveSettings";
+  var KEY_DRIVE_FULL_SYNC = "YSRP_DriveFullSyncDone";
+  var UNKNOWN_TITLE = "Unknown Title";
+  var PLACEHOLDER_TITLES = new Set(["unknown title", "正在获取标题…"]);
+  var EVT_RECORD = "ysrp-record-updated";
+  var EVT_VIDEO = "ysrp-current-video-status";
+  var EVT_TITLE = "ysrp-dearrow-title-ready";
+  var EVT_LANG = "ysrp-language-changed";
+  var EVT_DRIVE_STATUS = "ysrp-drive-sync-status";
+  var TICK_MS = 500;
+  var SAVE_THROTTLE_MS = 1500;
+  var MIN_SAVE_DELTA = 0.5;
+  var MIN_RESTORE_POSITION = 1;
+  var END_GUARD_SECONDS = 5;
+  var RESTORE_TOLERANCE = 3;
+  var RESTORE_MAX_ATTEMPTS = 8;
+  var RESTORE_TIMEOUT_MS = 15000;
+  var RESTORE_RETRY_MS = 1200;
+  var RESUMED_NOTICE_MS = 3000;
+  var BEFORE_RESTORE_TIMEOUT_MS = 4000;
+  var FONT_AWESOME_CSS = "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css";
+  var DEARROW_API = "https://sponsor.ajay.app/api/branding?videoID=";
+  var OEMBED_API = "https://www.youtube.com/oembed?format=json&url=";
+  var DEARROW_TTL_MS = 6 * 60 * 60 * 1000;
+  var Devs = {
+    V: "0_V"
   };
 
-  const Storage = (() => {
-    const backends = { local: LocalBackend, gm: GMBackend };
-    let mode = null;
-
-    function detectInitialMode() {
-      let saved = null;
-      try { saved = LocalBackend.getItem(SETTINGS_MODE_KEY); } catch {}
-      if (hasGM && !saved) {
-        try { saved = GMBackend.getItem(SETTINGS_MODE_KEY); } catch {}
-      }
-      if (saved === 'gm' && hasGM) return 'gm';
-      return 'local';
+  // src/utils/storage.ts
+  var hasGM = typeof GM_getValue === "function" && typeof GM_setValue === "function" && typeof GM_deleteValue === "function" && typeof GM_listValues === "function";
+  function readSetting(key) {
+    let value = null;
+    try {
+      value = window.localStorage.getItem(key);
+    } catch {}
+    if ((value === null || value === "") && hasGM) {
+      try {
+        value = GM_getValue(key, null);
+      } catch {}
     }
-
-    function persistMode(newMode) {
-      try { LocalBackend.setItem(SETTINGS_MODE_KEY, newMode); } catch {}
-      if (hasGM) { try { GMBackend.setItem(SETTINGS_MODE_KEY, newMode); } catch {} }
+    if (value === undefined || value === null)
+      return null;
+    return typeof value === "string" ? value : JSON.stringify(value);
+  }
+  function writeSetting(key, value) {
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {}
+    if (hasGM) {
+      try {
+        GM_setValue(key, value);
+      } catch {}
     }
+  }
+  function readJsonSetting(key) {
+    const raw = readSetting(key);
+    if (!raw)
+      return null;
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  function readSecret(key) {
+    if (hasGM) {
+      try {
+        const value = GM_getValue(key, null);
+        if (value !== null && value !== undefined && value !== "")
+          return typeof value === "string" ? value : JSON.stringify(value);
+      } catch {}
+    }
+    try {
+      return window.localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  }
+  function writeSecret(key, value) {
+    if (hasGM) {
+      try {
+        GM_setValue(key, value);
+        return;
+      } catch {}
+    }
+    try {
+      window.localStorage.setItem(key, value);
+    } catch {}
+  }
 
-    function setMode(newMode, opts) {
-      const options = Object.assign({ migrate: true, clearSource: true }, opts || {});
-      if (!backends[newMode]) return;
-      if (!mode) mode = detectInitialMode();
-      if (mode === newMode) return;
+  // src/utils/types.ts
+  function definePlugin(p) {
+    return p;
+  }
 
-      const src = backends[mode];
-      const dst = backends[newMode];
-      if (options.migrate && src) {
-        const items = src.entriesWithPrefix(KEY_PREFIX);
-        for (const [k, v] of items) { try { dst.setItem(k, v); } catch {} }
-        if (options.clearSource) {
-          for (const [k] of items) { try { src.removeItem(k); } catch {} }
+  // src/api/Settings.ts
+  function load() {
+    const stored = readJsonSetting(KEY_PLUGINS);
+    const plugins = stored?.plugins && typeof stored.plugins === "object" ? stored.plugins : {};
+    return { plugins };
+  }
+  var data = load();
+  var listeners2 = new Set;
+  function save() {
+    writeSetting(KEY_PLUGINS, JSON.stringify(data));
+  }
+  function getPluginSettings(name) {
+    return data.plugins[name];
+  }
+  function setPluginSetting(name, key, value) {
+    const bag = data.plugins[name] ??= {};
+    if (bag[key] === value)
+      return;
+    bag[key] = value;
+    save();
+    for (const listener of listeners2)
+      listener(name, key);
+  }
+  function onPluginSettingChange(listener) {
+    listeners2.add(listener);
+    return () => listeners2.delete(listener);
+  }
+  function defaultValue(def) {
+    if (def.type === 3 /* SELECT */)
+      return (def.options.find((o) => o.default) ?? def.options[0])?.value;
+    if ("default" in def && def.default !== undefined)
+      return def.default;
+    return def.type === 2 /* BOOLEAN */ ? false : def.type === 1 /* NUMBER */ ? 0 : "";
+  }
+  function definePluginSettings(def) {
+    const settings = {
+      def,
+      pluginName: "",
+      store: new Proxy({}, {
+        get(_, key) {
+          const stored = data.plugins[settings.pluginName]?.[key];
+          return stored !== undefined ? stored : def[key] ? defaultValue(def[key]) : undefined;
+        },
+        set(_, key, value) {
+          setPluginSetting(settings.pluginName, key, value);
+          return true;
         }
-      }
-      mode = newMode;
-      persistMode(newMode);
-    }
-
-    function getMode() {
-      if (!mode) {
-        mode = detectInitialMode();
-        persistMode(mode);
-      }
-      return mode;
-    }
-
-    function backend() { return backends[getMode()] || LocalBackend; }
-
-    function getItem(key) { return backend().getItem(key); }
-    function setItem(key, value) { backend().setItem(key, value); }
-    function removeItem(key) { backend().removeItem(key); }
-    function keys() { return backend().keys(); }
-    function listEntriesWithPrefix(prefix) { return backend().entriesWithPrefix(prefix); }
-
-    function listSavedVideos() {
-      return listEntriesWithPrefix(KEY_PREFIX);
-    }
-
-    function exportAll() {
-      const entries = listSavedVideos();
-      const out = {};
-      for (const [k, v] of entries) out[k] = v;
-      return {
-        version: '1',
-        exportedAt: Date.now(),
-        storageMode: getMode(),
-        entries: out
-      };
-    }
-
-    function importPayload(payload, options) {
-      const { clearExisting = false } = options || {};
-      if (!payload || typeof payload !== 'object' || !payload.entries || typeof payload.entries !== 'object') {
-        throw new Error('Invalid import payload');
-      }
-      if (clearExisting) {
-        const entries = listSavedVideos();
-        for (const [k] of entries) removeItem(k);
-      }
-      const entriesObj = payload.entries;
-      let count = 0;
-      for (const k of Object.keys(entriesObj)) {
-        if (k.startsWith(KEY_PREFIX)) {
-          try { setItem(k, entriesObj[k]); count++; } catch {}
-        }
-      }
-      return count;
-    }
-
-    return {
-      getMode, setMode, persistMode,
-      getItem, setItem, removeItem, keys, listEntriesWithPrefix,
-      listSavedVideos, exportAll, importPayload
+      })
     };
+    return settings;
+  }
+
+  // src/api/SettingsTabs.ts
+  var tabs = new Map;
+  var listeners3 = new Set;
+  function addSettingsTab(tab) {
+    tabs.set(tab.id, tab);
+    for (const listener of listeners3)
+      listener();
+  }
+  function removeSettingsTab(id) {
+    if (!tabs.delete(id))
+      return;
+    for (const listener of listeners3)
+      listener();
+  }
+  function getSettingsTabs() {
+    const rank = (g) => g === "general" ? 0 : 1;
+    return [...tabs.values()].sort((a, b) => rank(a.group) - rank(b.group) || a.order - b.order);
+  }
+  function onSettingsTabsChange(listener) {
+    listeners3.add(listener);
+    return () => listeners3.delete(listener);
+  }
+
+  // src/utils/misc.ts
+  function emit(name, detail) {
+    try {
+      document.dispatchEvent(new CustomEvent(name, { detail }));
+    } catch {}
+  }
+  function on(name, handler) {
+    const listener = (event) => handler(event.detail);
+    document.addEventListener(name, listener);
+    return () => document.removeEventListener(name, listener);
+  }
+  function formatTime(seconds) {
+    const total = Math.max(0, Math.floor(Number(seconds) || 0));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor(total % 3600 / 60);
+    const ss = String(total % 60).padStart(2, "0");
+    return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+  }
+  var normTitle = (text) => String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+  var sameTitle = (a, b) => Boolean(a) && Boolean(b) && normTitle(a).toLowerCase() === normTitle(b).toLowerCase();
+  var isPlaceholderTitle = (text) => !normTitle(text) || PLACEHOLDER_TITLES.has(normTitle(text).toLowerCase());
+  var errorMessage = (err) => err instanceof Error ? err.message : String(err);
+  var runtime = (() => {
+    const ua = String(navigator.userAgent || "").toLowerCase();
+    const isIOS = /\b(ipad|iphone|ipod)\b/.test(ua) || ua.includes("mac") && typeof navigator.maxTouchPoints === "number" && navigator.maxTouchPoints > 1;
+    let canShareFile = false;
+    if (isIOS && typeof File === "function" && typeof navigator.share === "function") {
+      canShareFile = true;
+      if (typeof navigator.canShare === "function") {
+        try {
+          canShareFile = navigator.canShare({ files: [new File(["{}"], "probe.json", { type: "application/json" })] });
+        } catch {
+          canShareFile = false;
+        }
+      }
+    }
+    return { isIOS, canShareFile };
   })();
 
-/* -------------------------------------------------------------------------- *
- * Module 07a · Transcript settings persistence and subtitle API helpers
- * -------------------------------------------------------------------------- */
-
-  // ========== Transcript Settings & API ==========
-  const TRANSCRIPT_DEFAULT_BASE = 'https://0-v-YouTube-Transcript-Generator-api.hf.space';
-  const TRANSCRIPT_ENDPOINT_SUFFIX = '/v1/chat/completions';
-  const TRANSCRIPT_TIMEOUT_MIN_MINUTES = 1;
-  const TRANSCRIPT_TIMEOUT_MAX_MINUTES = 60;
-  const TRANSCRIPT_TIMEOUT_DEFAULT_MINUTES = 10;
-  const TRANSCRIPT_TIMEOUT_MIN_MS = TRANSCRIPT_TIMEOUT_MIN_MINUTES * 60 * 1000;
-  const TRANSCRIPT_TIMEOUT_MAX_MS = TRANSCRIPT_TIMEOUT_MAX_MINUTES * 60 * 1000;
-  const TRANSCRIPT_DEFAULT_TIMEOUT_MS = TRANSCRIPT_TIMEOUT_DEFAULT_MINUTES * 60 * 1000;
-
-  function clampTranscriptTimeoutMs(value) {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric) || numeric <= 0) {
-      return TRANSCRIPT_DEFAULT_TIMEOUT_MS;
+  // src/utils/i18n.ts
+  function detectBrowserLanguage() {
+    const candidates = [].concat(navigator.languages || [], navigator.language || []).filter(Boolean);
+    return candidates.length && String(candidates[0]).toLowerCase().startsWith("zh") ? "zh" : "en";
+  }
+  function normalizeLanguagePreference(value) {
+    const raw = String(value || "").trim().toLowerCase();
+    if (raw.startsWith("zh"))
+      return "zh";
+    if (raw.startsWith("en"))
+      return "en";
+    return "auto";
+  }
+  var preference = normalizeLanguagePreference(readSetting(KEY_LANGUAGE));
+  var languagePreference = () => preference;
+  var resolvedLanguage = () => preference === "auto" ? detectBrowserLanguage() : preference;
+  function t(en, zh, params) {
+    let text = resolvedLanguage() === "zh" ? zh : en;
+    if (params) {
+      text = text.replace(/\{(\w+)\}/g, (_, key) => Object.prototype.hasOwnProperty.call(params, key) ? String(params[key]) : "");
     }
-    return Math.max(
-      TRANSCRIPT_TIMEOUT_MIN_MS,
-      Math.min(TRANSCRIPT_TIMEOUT_MAX_MS, Math.round(numeric))
-    );
+    return text;
+  }
+  function setLanguagePreference(value) {
+    const next = normalizeLanguagePreference(value);
+    if (next === preference)
+      return false;
+    preference = next;
+    writeSetting(KEY_LANGUAGE, next);
+    emit(EVT_LANG, { preference: next, resolved: resolvedLanguage() });
+    return true;
   }
 
-  function transcriptMinutesToMs(minutes) {
-    return clampTranscriptTimeoutMs(Number(minutes) * 60 * 1000);
-  }
-
-  function transcriptMsToMinutes(ms) {
-    const numeric = Number(ms);
-    if (!Number.isFinite(numeric) || numeric <= 0) {
-      return TRANSCRIPT_TIMEOUT_DEFAULT_MINUTES;
-    }
-    return Math.round(numeric / 60000);
-  }
-
-  function normalizeTranscriptEndpoint(value) {
-    if (!value || typeof value !== 'string') return '';
-    let trimmed = value.trim();
-    if (!trimmed) return '';
-    if (!/^https?:\/\//i.test(trimmed)) {
-      trimmed = `https://${trimmed}`;
-    }
-    try {
-      const url = new URL(trimmed);
-      const normalizedPath = (url.pathname || '').replace(/\/+$/, '');
-      const hasSuffix = normalizedPath.toLowerCase().includes(TRANSCRIPT_ENDPOINT_SUFFIX);
-      if (!hasSuffix) {
-        if (!normalizedPath || normalizedPath === '' || normalizedPath === '/') {
-          url.pathname = TRANSCRIPT_ENDPOINT_SUFFIX;
-        } else {
-          url.pathname = normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`;
+  // src/api/Store.ts
+  var logger2 = new Logger("Store");
+  var backends = {
+    local: {
+      available: true,
+      get(key) {
+        try {
+          return window.localStorage.getItem(key);
+        } catch {
+          return null;
         }
-      } else if (!normalizedPath) {
-        url.pathname = TRANSCRIPT_ENDPOINT_SUFFIX;
-      } else {
-        url.pathname = normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`;
+      },
+      set(key, value) {
+        window.localStorage.setItem(key, value);
+      },
+      remove(key) {
+        try {
+          window.localStorage.removeItem(key);
+        } catch {}
+      },
+      keys() {
+        try {
+          const out = [];
+          for (let i = 0;i < window.localStorage.length; i++)
+            out.push(window.localStorage.key(i));
+          return out;
+        } catch {
+          return [];
+        }
       }
-      return url.toString().replace(/\/+$/, '');
-    } catch {
-      const withoutTrailing = trimmed.replace(/\/+$/, '');
-      if (withoutTrailing.toLowerCase().includes(TRANSCRIPT_ENDPOINT_SUFFIX)) {
-        return withoutTrailing;
+    },
+    gm: {
+      available: hasGM,
+      get(key) {
+        if (!hasGM)
+          return null;
+        try {
+          const value = GM_getValue(key, null);
+          if (value === null || value === undefined)
+            return null;
+          return typeof value === "string" ? value : JSON.stringify(value);
+        } catch {
+          return null;
+        }
+      },
+      set(key, value) {
+        if (!hasGM)
+          throw new Error("GM storage is not available");
+        GM_setValue(key, value);
+      },
+      remove(key) {
+        if (hasGM) {
+          try {
+            GM_deleteValue(key);
+          } catch {}
+        }
+      },
+      keys() {
+        if (!hasGM)
+          return [];
+        try {
+          return GM_listValues() || [];
+        } catch {
+          return [];
+        }
       }
-      return `${withoutTrailing}${TRANSCRIPT_ENDPOINT_SUFFIX}`;
+    }
+  };
+  var mode = null;
+  var listeners4 = new Set;
+  function notify(change) {
+    for (const listener of listeners4) {
+      try {
+        listener(change);
+      } catch (err) {
+        logger2.error("change listener failed", err);
+      }
     }
   }
-
-  const DEFAULT_TRANSCRIPT_SETTINGS = Object.freeze({
-    endpoint: normalizeTranscriptEndpoint(
-      (configData.transcript && configData.transcript.endpoint) || TRANSCRIPT_DEFAULT_BASE
-    ),
-    model: (configData.transcript && configData.transcript.model) || 'transcript',
-    apiKey: (configData.transcript && configData.transcript.apiKey) || 'sk-asdlfjalalfja',
-    timeoutMs: clampTranscriptTimeoutMs(
-      (configData.transcript && configData.transcript.timeoutMs) || TRANSCRIPT_DEFAULT_TIMEOUT_MS
-    )
-  });
-  const TRANSCRIPT_CACHE_TTL = 1000 * 60 * 30; // 30 minutes
-  const transcriptCache = new Map();
-  const transcriptFetches = new Map();
-
-  function getVideoStorageKey(videoId) {
-    if (!videoId) return null;
-    return `${KEY_PREFIX}${videoId}`;
+  function getMode() {
+    if (!mode)
+      mode = readSetting(KEY_STORAGE_MODE) === "gm" && hasGM ? "gm" : "local";
+    return mode;
   }
-
-  function readVideoRecord(videoId) {
-    const storageKey = getVideoStorageKey(videoId);
-    if (!storageKey) return null;
-    const raw = Storage.getItem(storageKey);
-    if (!raw) return null;
+  var backend = () => backends[getMode()];
+  var keyOf = (id) => RECORD_PREFIX + id;
+  function parse(raw) {
+    if (raw === null || raw === undefined)
+      return null;
     try {
-      return JSON.parse(raw) || {};
+      const obj = JSON.parse(raw);
+      return obj && typeof obj === "object" && !Array.isArray(obj) ? obj : null;
     } catch {
       return null;
     }
   }
-
-  function persistTranscriptForVideo(videoId, transcriptText) {
-    const storageKey = getVideoStorageKey(videoId);
-    if (!storageKey) return;
-    let record = readVideoRecord(videoId) || {};
-    const trimmed = typeof transcriptText === 'string' ? transcriptText.trim() : '';
-    if (trimmed) {
-      record.videoTranscript = trimmed;
-      record.videoTranscriptUpdatedAt = Date.now();
-    } else {
-      delete record.videoTranscript;
-      delete record.videoTranscriptUpdatedAt;
-    }
+  function rawEntries(be) {
+    return be.keys().filter((k) => typeof k === "string" && k.startsWith(RECORD_PREFIX)).map((k) => [k, be.get(k)]).filter((entry) => entry[1] !== null && entry[1] !== undefined);
+  }
+  function onRecordChange(listener) {
+    listeners4.add(listener);
+    return () => listeners4.delete(listener);
+  }
+  function get(id) {
+    return id ? parse(backend().get(keyOf(id))) : null;
+  }
+  function update(id, mutate, options = {}) {
+    const key = keyOf(id);
+    const current = parse(backend().get(key)) || {};
+    const next = mutate({ ...current }) || current;
+    if (options.touch !== false)
+      next.updatedAt = Date.now();
+    backend().set(key, JSON.stringify(next));
+    notify({ id, type: "set", source: options.source ?? "local" });
+    return next;
+  }
+  function updateIfExists(id, mutate, options) {
+    if (!get(id))
+      return null;
     try {
-      Storage.setItem(storageKey, JSON.stringify(record));
+      return update(id, mutate, options);
     } catch (err) {
-      console.error('Failed to persist transcript to storage:', err);
-    }
-  }
-
-  function readStoredTranscriptForVideo(videoId) {
-    const record = readVideoRecord(videoId);
-    if (!record || typeof record.videoTranscript !== 'string' || !record.videoTranscript.trim()) {
+      logger2.error("update failed", err);
       return null;
     }
-    return {
-      text: record.videoTranscript.trim(),
-      fetchedAt: record.videoTranscriptUpdatedAt || 0
-    };
   }
-
-  function sanitizeTranscriptSettings(raw) {
-    if (!raw || typeof raw !== 'object') return {};
-    const out = {};
-    ['endpoint', 'model', 'apiKey'].forEach(key => {
-      if (typeof raw[key] !== 'string') return;
-      const value = raw[key].trim();
-      if (!value) return;
-      if (key === 'endpoint') {
-        out[key] = normalizeTranscriptEndpoint(value);
-      } else {
-        out[key] = value;
-      }
-    });
-    if (typeof raw.timeoutMs !== 'undefined') {
-      const numeric = Number(raw.timeoutMs);
-      if (Number.isFinite(numeric) && numeric > 0) {
-        out.timeoutMs = clampTranscriptTimeoutMs(numeric);
-      }
-    } else if (typeof raw.timeoutMinutes !== 'undefined') {
-      const minutes = Number(raw.timeoutMinutes);
-      if (Number.isFinite(minutes) && minutes > 0) {
-        out.timeoutMs = clampTranscriptTimeoutMs(minutes * 60 * 1000);
-      }
+  function remove(id) {
+    backend().remove(keyOf(id));
+    notify({ id, type: "remove", source: "local" });
+  }
+  function list() {
+    const out = [];
+    for (const [key, raw] of rawEntries(backend())) {
+      const rec = parse(raw);
+      if (rec)
+        out.push({ id: key.slice(RECORD_PREFIX.length), rec });
     }
     return out;
   }
-
-  function readStoredTranscriptSettings() {
-    let stored = null;
-    try {
-      stored = window.localStorage ? window.localStorage.getItem(TRANSCRIPT_CONFIG_KEY) : null;
-    } catch {}
-    if (!stored && typeof GM_getValue === 'function') {
-      try {
-        stored = GM_getValue(TRANSCRIPT_CONFIG_KEY);
-      } catch {}
-    }
-    if (!stored) return null;
-    if (typeof stored === 'string') {
-      try { return JSON.parse(stored); } catch { return null; }
-    }
-    if (typeof stored === 'object') return stored;
-    return null;
+  function setMode(next) {
+    if (!backends[next]?.available)
+      throw new Error(`Storage "${next}" is not available`);
+    const current = getMode();
+    if (current === next)
+      return 0;
+    const src = backends[current];
+    const dst = backends[next];
+    const items = rawEntries(src);
+    for (const [k, v] of items)
+      dst.set(k, v);
+    for (const [k] of items)
+      src.remove(k);
+    mode = next;
+    writeSetting(KEY_STORAGE_MODE, next);
+    notify({ id: null, type: "bulk", source: "local" });
+    return items.length;
   }
-
-  function persistTranscriptSettings(settings) {
-    try {
-      if (window.localStorage) {
-        window.localStorage.setItem(TRANSCRIPT_CONFIG_KEY, JSON.stringify(settings));
+  function exportAll() {
+    const entries = {};
+    for (const [k, v] of rawEntries(backend()))
+      entries[k] = v;
+    return { version: "1", exportedAt: Date.now(), storageMode: getMode(), entries };
+  }
+  function importPayload(payload, options = {}) {
+    const entries = payload?.entries;
+    if (!payload || typeof payload !== "object" || !entries || typeof entries !== "object") {
+      throw new Error(t("Invalid import payload", "导入内容格式无效"));
+    }
+    const be = backend();
+    if (options.overwrite)
+      for (const [k] of rawEntries(be))
+        be.remove(k);
+    let count = 0;
+    for (const [k, v] of Object.entries(entries)) {
+      if (!k.startsWith(RECORD_PREFIX) || v === null || v === undefined)
+        continue;
+      const text = typeof v === "string" ? v : JSON.stringify(v);
+      if (options.accept) {
+        const incoming = parse(text);
+        if (!incoming || !options.accept(k.slice(RECORD_PREFIX.length), incoming, parse(be.get(k))))
+          continue;
       }
-    } catch {}
-    if (typeof GM_setValue === 'function') {
-      try { GM_setValue(TRANSCRIPT_CONFIG_KEY, JSON.stringify(settings)); } catch {}
+      be.set(k, text);
+      count++;
     }
+    notify({ id: null, type: "bulk", source: options.source ?? "local" });
+    return count;
   }
-
-  function hydrateTranscriptSettings() {
-    const stored = readStoredTranscriptSettings();
-    const merged = Object.assign({}, DEFAULT_TRANSCRIPT_SETTINGS, stored || {});
-    merged.endpoint = normalizeTranscriptEndpoint(merged.endpoint || DEFAULT_TRANSCRIPT_SETTINGS.endpoint);
-    merged.timeoutMs = clampTranscriptTimeoutMs(merged.timeoutMs || DEFAULT_TRANSCRIPT_SETTINGS.timeoutMs);
-    configData.transcript = Object.assign({}, configData.transcript || {}, merged);
-    return configData.transcript;
-  }
-  hydrateTranscriptSettings();
-
-  function getTranscriptSettings() {
-    if (!configData.transcript) {
-      return hydrateTranscriptSettings();
-    }
-    const { endpoint, model, apiKey, timeoutMs } = configData.transcript;
-    return {
-      endpoint: normalizeTranscriptEndpoint(endpoint || DEFAULT_TRANSCRIPT_SETTINGS.endpoint),
-      model: model || DEFAULT_TRANSCRIPT_SETTINGS.model,
-      apiKey: apiKey || '',
-      timeoutMs: clampTranscriptTimeoutMs(timeoutMs || DEFAULT_TRANSCRIPT_SETTINGS.timeoutMs)
-    };
-  }
-
-  function updateTranscriptSettings(partial) {
-    const sanitized = sanitizeTranscriptSettings(partial);
-    const prev = readStoredTranscriptSettings() || {};
-    const merged = Object.assign({}, DEFAULT_TRANSCRIPT_SETTINGS, prev, sanitized);
-    persistTranscriptSettings(merged);
-    configData.transcript = Object.assign({}, configData.transcript || {}, merged);
-    return Object.assign({}, configData.transcript);
-  }
-
-  function getCachedTranscript(videoId) {
-    if (!videoId) return null;
-    const cached = transcriptCache.get(videoId);
-    if (cached) {
-      if ((Date.now() - cached.fetchedAt) > TRANSCRIPT_CACHE_TTL) {
-        transcriptCache.delete(videoId);
-      } else {
-        return cached.text;
+  function cleanup() {
+    const be = backend();
+    for (const [key, raw] of rawEntries(be)) {
+      const rec = parse(raw);
+      if (!rec) {
+        be.remove(key);
+        continue;
       }
-    }
-    const stored = readStoredTranscriptForVideo(videoId);
-    if (stored && stored.text) {
-      transcriptCache.set(videoId, {
-        text: stored.text,
-        fetchedAt: stored.fetchedAt || Date.now()
-      });
-      return stored.text;
-    }
-    return null;
-  }
-
-  function setTranscriptError(message) {
-    configData.transcript.lastError = message || '';
-  }
-
-  function buildTranscriptPrompt(videoId, context) {
-    const ctxUrl = context && typeof context.videoUrl === 'string' ? context.videoUrl.trim() : '';
-    return ctxUrl || `https://www.youtube.com/watch?v=${videoId}`;
-  }
-
-  function buildTranscriptRequestBody(videoId, context) {
-    const settings = getTranscriptSettings();
-    const videoUrl = buildTranscriptPrompt(videoId, context);
-    return {
-      model: settings.model || DEFAULT_TRANSCRIPT_SETTINGS.model,
-      messages: [
-        { role: 'user', content: videoUrl }
-      ]
-    };
-  }
-
-  function extractTranscriptText(payload) {
-    if (!payload) return '';
-    if (typeof payload === 'string') return payload.trim();
-    if (Array.isArray(payload)) {
-      return payload.map(item => extractTranscriptText(item)).filter(Boolean).join('\n').trim();
-    }
-    if (payload.error && payload.error.message) {
-      throw new Error(payload.error.message);
-    }
-    if (typeof payload.transcript === 'string') return payload.transcript.trim();
-    if (Array.isArray(payload.transcript)) return payload.transcript.join('\n').trim();
-    if (payload.output_text) {
-      if (Array.isArray(payload.output_text)) return payload.output_text.join('\n').trim();
-      if (typeof payload.output_text === 'string') return payload.output_text.trim();
-    }
-    if (Array.isArray(payload.output)) {
-      const pieces = [];
-      payload.output.forEach(entry => {
-        if (entry && Array.isArray(entry.content)) {
-          entry.content.forEach(part => {
-            if (part && typeof part.text === 'string') {
-              pieces.push(part.text);
-            }
-          });
-        }
-      });
-      const joined = pieces.join('\n').trim();
-      if (joined) return joined;
-    }
-    if (Array.isArray(payload.choices)) {
-      const collected = payload.choices.map(choice => {
-        if (!choice) return '';
-        if (choice.message && typeof choice.message.content === 'string') {
-          return choice.message.content;
-        }
-        if (choice.message && Array.isArray(choice.message.content)) {
-          return choice.message.content.map(part => part && part.text ? part.text : '').join('\n');
-        }
-        if (typeof choice.text === 'string') return choice.text;
-        return '';
-      }).filter(Boolean);
-      const joined = collected.join('\n').trim();
-      if (joined) return joined;
-    }
-    if (typeof payload.text === 'string') return payload.text.trim();
-    if (payload.data && typeof payload.data === 'string') return payload.data.trim();
-    return '';
-  }
-
-  async function fetchTranscriptForVideo(videoId, options) {
-    const opts = Object.assign({ force: false }, options || {});
-    if (!videoId) throw new Error('无法识别当前视频 ID。');
-    if (!opts.force) {
-      const cachedValue = getCachedTranscript(videoId);
-      if (cachedValue) return cachedValue;
-      if (transcriptFetches.has(videoId)) {
-        return transcriptFetches.get(videoId);
-      }
-    }
-
-    const settings = getTranscriptSettings();
-    const endpoint = (settings.endpoint || '').trim();
-    if (!endpoint) throw new Error('请先配置字幕接口路径。');
-
-    const headers = { 'Content-Type': 'application/json' };
-    if (settings.apiKey && settings.apiKey.trim()) {
-      headers.Authorization = `Bearer ${settings.apiKey.trim()}`;
-    }
-
-    const timeoutMs = clampTranscriptTimeoutMs(settings.timeoutMs || DEFAULT_TRANSCRIPT_SETTINGS.timeoutMs);
-    const timeoutMinutesLabel = transcriptMsToMinutes(timeoutMs);
-    const requestBody = buildTranscriptRequestBody(videoId, { videoTitle: opts.videoTitle, videoUrl: opts.videoUrl });
-    const fetchPromise = (async () => {
-      configData.transcript.isFetching = true;
-      configData.transcript.lastVideoId = videoId;
-      let timeoutId = null;
-      try {
-        const controller = typeof AbortController === 'function' ? new AbortController() : null;
-        const response = await Promise.race([
-          fetch(endpoint, {
-            method: 'POST',
-            headers,
-            body: JSON.stringify(requestBody),
-            signal: controller ? controller.signal : undefined
-          }),
-          new Promise((_, reject) => {
-            timeoutId = setTimeout(() => {
-              const timeoutError = new Error(`字幕接口在 ${timeoutMinutesLabel} 分钟内无响应，已自动取消请求。`);
-              timeoutError.name = 'TranscriptTimeoutError';
-              if (controller && typeof controller.abort === 'function') {
-                try { controller.abort(); } catch {}
-              }
-              reject(timeoutError);
-            }, timeoutMs);
-          })
-        ]);
-        if (timeoutId) {
-          clearTimeout(timeoutId);
-          timeoutId = null;
-        }
-        const rawText = await response.text();
-        let payload = null;
-        if (rawText) {
-          try { payload = JSON.parse(rawText); } catch { payload = rawText; }
-        }
-        if (!response.ok) {
-          const detail = (payload && payload.error && payload.error.message) ||
-                        (payload && payload.message) ||
-                        (typeof rawText === 'string' ? rawText : '') ||
-                        `HTTP ${response.status}`;
-          throw new Error(detail);
-        }
-        const transcriptText = extractTranscriptText(payload);
-        if (!transcriptText || !transcriptText.trim()) {
-          throw new Error('字幕接口未返回有效内容。');
-        }
-        const normalized = transcriptText.trim();
-        const fetchedAt = Date.now();
-        transcriptCache.set(videoId, { text: normalized, fetchedAt });
-        persistTranscriptForVideo(videoId, normalized);
-        configData.transcript.lastTranscript = normalized;
-        configData.transcript.lastFetchedAt = fetchedAt;
-        setTranscriptError('');
-        return normalized;
-      } catch (error) {
-        if (timeoutId) {
-          clearTimeout(timeoutId);
-          timeoutId = null;
-        }
-        const message = (error && error.message) ? error.message : String(error);
-        setTranscriptError(message);
-        throw error;
-      } finally {
-        configData.transcript.isFetching = false;
-        transcriptFetches.delete(videoId);
-      }
-    })();
-
-    transcriptFetches.set(videoId, fetchPromise);
-    return fetchPromise;
-  }
-
-/* -------------------------------------------------------------------------- *
- * Module 08 · "Last saved" info banner rendering and updates
- * -------------------------------------------------------------------------- */
-
-  // ========== UI: Last save info ==========
-  function updateLastSaved(videoProgress) {
-    const lastSaveEl = document.querySelector('.last-save-info-text');
-    if (lastSaveEl) {
-      lastSaveEl.textContent = fancyTimeFormat(videoProgress);
-      if (lastSaveEl.dataset) {
-        delete lastSaveEl.dataset.i18nKey;
-      }
-    }
-  }
-
-/* -------------------------------------------------------------------------- *
- * Module 09 · Video progress saving, restoration, and migration
- * -------------------------------------------------------------------------- */
-
-  // ========== Save / Load Progress ==========
-  function saveVideoProgress() {
-    const videoProgress = getVideoCurrentTime();
-    const videoId = getVideoId();
-    if (!videoId) return;
-
-    const videoName = getVideoName() || DEFAULT_VIDEO_NAME;
-    configData.currentVideoId = videoId;
-    configData.lastSaveTime = Date.now();
-    updateLastSaved(videoProgress);
-
-    const idToStore = `${KEY_PREFIX}${videoId}`;
-    const originalTitle = originalTitleCache.get(videoId) || null;
-    let previousData = null;
-    try {
-      const existingRecord = Storage.getItem(idToStore);
-      if (existingRecord) {
-        previousData = JSON.parse(existingRecord) || {};
-      }
-    } catch {
-      previousData = null;
-    }
-    const progressData = Object.assign({}, previousData || {}, {
-      videoProgress,
-      saveDate: Date.now(),
-      videoName,
-      originalTitle
-    });
-    try {
-      Storage.setItem(idToStore, JSON.stringify(progressData));
-      try {
-        document.dispatchEvent(new CustomEvent(RECORD_UPDATED_EVENT, { detail: { videoId, videoProgress } }));
-      } catch (evtErr) {
-        console.error('Failed to dispatch record update event:', evtErr);
-      }
-    } catch (e) {
-      console.error('Failed to save video progress:', e);
-    }
-  }
-  function updateStoredOriginalTitle(videoId, originalTitle) {
-    if (!videoId) return;
-    const idToStore = `${KEY_PREFIX}${videoId}`;
-    const savedVideoData = Storage.getItem(idToStore);
-    if (!savedVideoData) return;
-    try {
-      const parsed = JSON.parse(savedVideoData) || {};
-      if (parsed.originalTitle === originalTitle) return;
-      parsed.originalTitle = originalTitle || null;
-      Storage.setItem(idToStore, JSON.stringify(parsed));
-      try { if (typeof setTitleSource === 'function') setTitleSource(videoId, 'original', originalTitle); } catch {}
-    } catch (err) {
-      console.error('Failed to persist original title:', err);
-    }
-  }
-
-  function getSavedVideoList() {
-    return Storage.listSavedVideos();
-  }
-
-  function getSavedVideoProgress() {
-    const videoId = getVideoId();
-    if (!videoId) return null;
-    const idToStore = `${KEY_PREFIX}${videoId}`;
-    const savedVideoData = Storage.getItem(idToStore);
-    if (!savedVideoData) return null;
-    try {
-      const { videoProgress } = JSON.parse(savedVideoData);
-      return videoProgress;
-    } catch { return null; }
-  }
-
-  function setSavedProgress() {
-    const savedProgress = getSavedVideoProgress();
-    if (savedProgress !== null) {
-      setVideoProgress(savedProgress);
-      configData.savedProgressAlreadySet = true;
-    }
-  }
-
-  async function onPlayerElementExist(callback) {
-    await waitForElm('#movie_player');
-    callback();
-  }
-
-  function isReadyToSetSavedProgress() {
-    return !configData.savedProgressAlreadySet && playerExists() && getSavedVideoProgress() !== null && getVideoDuration() > 0;
-  }
-
-/* -------------------------------------------------------------------------- *
- * Module 10 · DOM insertion helpers for host/backdrop/buttons
- * -------------------------------------------------------------------------- */
-
-  // ========== UI: Insert helpers ==========
-  function insertInfoElement(element) {
-    if (!element) return;
-    const leftControls = document.querySelector('.ytp-left-controls');
-    if (leftControls && !document.querySelector(SELECTORS.infoContainer)) {
-      leftControls.appendChild(element);
-    }
-  }
-
-  function insertInfoElementInChaptersContainer(element) {
-    if (!element) return;
-    const chaptersContainer = document.querySelector('.ytp-chapter-container[style=""]');
-    if (chaptersContainer && !document.querySelector(SELECTORS.infoContainer)) {
-      chaptersContainer.style.display = 'flex';
-      chaptersContainer.appendChild(element);
-    }
-  }
-
-  // Prefer a host within the page, not inside the player
-  function getHostRoot() {
-    return (
-      document.querySelector('ytd-app #content') ||
-      document.querySelector('#content') ||
-      document.querySelector('#page-manager') ||
-      document.body
-    );
-  }
-
-  // Backdrop to avoid player handling clicks behind the popup
-  function ensureBackdrop(host) {
-    let bd = document.querySelector('.ysrp-backdrop');
-    if (bd) return bd;
-    bd = document.createElement('div');
-    bd.className = 'ysrp-backdrop';
-    Object.assign(bd.style, {
-      position: 'fixed',
-      inset: '0',
-      background: styles.backdrop,
-      zIndex: '9998',
-      display: 'none'
-    });
-    host.appendChild(bd);
-    return bd;
-  }
-
-  // Body scroll lock while settings popup is open
-  function lockBodyScroll() {
-    if (!document.body.hasAttribute('data-ysrp-body-overflow')) {
-      document.body.setAttribute('data-ysrp-body-overflow', document.body.style.overflow || '');
-    }
-    document.body.style.overflow = 'hidden';
-  }
-  function unlockBodyScroll() {
-    const prev = document.body.getAttribute('data-ysrp-body-overflow');
-    if (prev !== null) {
-      document.body.style.overflow = prev;
-      document.body.removeAttribute('data-ysrp-body-overflow');
-    } else {
-      document.body.style.overflow = '';
-    }
-  }
-
-  // Centered popup positioning (fixed in viewport)
-  function centerSettingsContainer() {
-    const settingsContainer = document.querySelector(SELECTORS.settingsContainer);
-    if (!settingsContainer) return;
-    Object.assign(settingsContainer.style, {
-      position: 'fixed',
-      left: '50%',
-      top: '50%',
-      transform: 'translate(-50%, -50%)',
-      margin: '0',
-      maxWidth: '90vw',
-      maxHeight: '80vh'
-    });
-  }
-
-  function getSettingsElements() {
-    return {
-      button: document.querySelector('.ysrp-settings-button'),
-      container: document.querySelector(SELECTORS.settingsContainer),
-      backdrop: document.querySelector('.ysrp-backdrop')
-    };
-  }
-
-  // Attach robust, early toggle binding that prevents player jitter
-  function bindSettingsToggle() {
-    const { button: settingsButton, container: settingsContainer, backdrop } = getSettingsElements();
-    if (!settingsButton || !settingsContainer || !backdrop) return;
-
-    centerSettingsContainer();
-
-    // Idempotent
-    if (!settingsContainer.style.display) settingsContainer.style.display = 'none';
-
-    const openPopup = () => {
-      settingsContainer.style.display = 'flex';
-      backdrop.style.display = 'block';
-      centerSettingsContainer();
-      injectSettingsScrollbarsCSS();
-      lockBodyScroll();
-    };
-    const closePopup = () => {
-      settingsContainer.style.display = 'none';
-      backdrop.style.display = 'none';
-      unlockBodyScroll();
-    };
-
-    // Avoid duplicate bindings
-    if (!settingsButton._ysrpBound) {
-      settingsButton._ysrpBound = true;
-
-      // Use pointerdown in capture phase to preempt player handlers (prevents zoom/jitter)
-      const handlerPointerDown = (e) => {
+      const name = typeof rec.videoName === "string" && rec.videoName.trim() ? rec.videoName.trim() : UNKNOWN_TITLE;
+      if (name !== rec.videoName) {
+        rec.videoName = name;
         try {
-          e.preventDefault();
-          e.stopImmediatePropagation();
-          e.stopPropagation();
+          be.set(key, JSON.stringify(rec));
         } catch {}
-        const hidden = (settingsContainer.style.display === 'none' || !settingsContainer.style.display);
-        if (hidden) openPopup();
-      };
-      settingsButton.addEventListener('pointerdown', handlerPointerDown, { capture: true });
-      // Also guard click bubbling to player
-      settingsButton.addEventListener('click', (e) => {
-        try { e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); } catch {}
-      }, { capture: true });
-      // Touchstart fallback for some mobile browsers
-      settingsButton.addEventListener('touchstart', (e) => {
-        try { e.preventDefault(); e.stopImmediatePropagation(); e.stopPropagation(); } catch {}
-      }, { capture: true, passive: false });
-    }
-
-    if (!backdrop._ysrpBound) {
-      backdrop._ysrpBound = true;
-      backdrop.addEventListener('click', (event) => {
-        try {
-          event.preventDefault();
-          event.stopImmediatePropagation();
-          event.stopPropagation();
-        } catch {}
-      });
-    }
-
-    // Expose for programmatic toggles
-    settingsContainer._ysrpClose = closePopup;
-    settingsContainer._ysrpOpen = openPopup;
-
-    // Keep centered on resize
-    if (!window._ysrpResizeBound) {
-      window._ysrpResizeBound = true;
-      window.addEventListener('resize', centerSettingsContainer);
+      }
     }
   }
 
-/* -------------------------------------------------------------------------- *
- * Module 11 · Settings panel UI, tabs, and event bindings
- * -------------------------------------------------------------------------- */
-
-  // ========== UI: Settings Panel (with sub-tabs) ==========
-  const PLACEHOLDER_DEARROW = new Set([
-    DEFAULT_VIDEO_NAME.toLowerCase(),
-    (TITLE_PENDING_PLACEHOLDER || '').toLowerCase()
-  ]);
-  const LANGUAGE_EVENT_NAME = (typeof I18n !== 'undefined' && I18n && typeof I18n.getEventName === 'function')
-    ? I18n.getEventName()
-    : 'ysrp-language-changed';
-
-  const SETTINGS_TABS = Object.freeze({
-    records: 'records',
-    storage: 'storage',
-    transcript: 'transcript',
-    display: 'display'
-  });
-
-  const runtimeBrowserInfo = (() => {
-    if (typeof navigator === 'undefined') {
-      return { isIOS: false, isOrion: false };
+  // src/utils/css.ts
+  var active = new Map;
+  function root() {
+    return document.head || document.documentElement;
+  }
+  function registerStyle(name, css) {
+    const existing = active.get(name);
+    if (existing?.isConnected) {
+      if (existing.textContent !== css)
+        existing.textContent = css;
+      return;
     }
-    const ua = String(navigator.userAgent || navigator.vendor || '').toLowerCase();
-    const isIOS = /\b(ipad|iphone|ipod)\b/.test(ua) ||
-      (ua.includes('mac') && typeof navigator.maxTouchPoints === 'number' && navigator.maxTouchPoints > 1);
-    const isOrion = /\borion\//.test(ua);
-    return { isIOS, isOrion };
-  })();
-
-  const iosShareCapabilities = (() => {
-    if (!runtimeBrowserInfo.isIOS) {
-      return { canShareFile: false };
-    }
-    if (typeof navigator === 'undefined' || typeof File !== 'function' || typeof navigator.share !== 'function') {
-      return { canShareFile: false };
-    }
-    if (typeof navigator.canShare === 'function') {
-      try {
-        const probe = new File(['{}'], 'probe.json', { type: 'application/json' });
-        if (!navigator.canShare({ files: [probe] })) {
-          return { canShareFile: false };
-        }
-      } catch {
-        return { canShareFile: false };
-      }
-    }
-    return { canShareFile: true };
-  })();
-
-  function localizeText(enValue, zhValue, params) {
-    if (typeof I18n !== 'undefined' && I18n && typeof I18n.pick === 'function') {
-      return I18n.pick({ en: enValue, zh: zhValue }, params);
-    }
-    const fallback = typeof enValue !== 'undefined' ? enValue : zhValue;
-    if (typeof fallback === 'function') {
-      try {
-        return fallback(params || {});
-      } catch {
-        return '';
-      }
-    }
-    return typeof fallback === 'string' ? fallback : '';
+    const el = document.createElement("style");
+    el.dataset.ysrp = name;
+    el.textContent = css;
+    root().appendChild(el);
+    active.set(name, el);
+  }
+  function unregisterStyle(name) {
+    active.get(name)?.remove();
+    active.delete(name);
+  }
+  function ensureFontAwesome() {
+    if (document.getElementById("ysrp-fontawesome"))
+      return;
+    const link = document.createElement("link");
+    link.id = "ysrp-fontawesome";
+    link.rel = "stylesheet";
+    link.href = FONT_AWESOME_CSS;
+    root().appendChild(link);
   }
 
-  function getNoteEmptyPlaceholder() {
-    return localizeText('No notes yet', '暂无笔记');
+  // src/utils/dom.ts
+  function h(tag, props, ...children) {
+    const node = document.createElement(tag);
+    if (props) {
+      for (const [key, value] of Object.entries(props)) {
+        if (value === null || value === undefined || value === false)
+          continue;
+        if (key === "class")
+          node.className = String(value);
+        else if (key === "style")
+          Object.assign(node.style, value);
+        else if (key === "text")
+          node.textContent = String(value);
+        else if (key === "dataset")
+          Object.assign(node.dataset, value);
+        else if (key.startsWith("on") && typeof value === "function")
+          node.addEventListener(key.slice(2), value);
+        else if (typeof value === "boolean")
+          node[key] = value;
+        else
+          node.setAttribute(key, String(value));
+      }
+    }
+    for (const child of children.flat(Infinity)) {
+      if (child !== null && child !== undefined && child !== false)
+        node.append(child);
+    }
+    return node;
   }
-
-  function getLanguageStateSnapshot() {
-    const state = configData.language || {};
-    const preference = (state.preference ||
-      (typeof I18n !== 'undefined' && I18n && typeof I18n.getPreference === 'function' ? I18n.getPreference() : null) ||
-      'auto');
-    const resolved = (state.resolved ||
-      (typeof I18n !== 'undefined' && I18n && typeof I18n.getResolvedLanguage === 'function' ? I18n.getResolvedLanguage() : null) ||
-      'en');
-    const browser = (typeof I18n !== 'undefined' && I18n && typeof I18n.detectBrowserLanguage === 'function')
-      ? I18n.detectBrowserLanguage()
-      : 'en';
-    return { preference, resolved, browser };
+  var icon = (name) => h("i", { class: `fa-solid fa-${name} ysrp-icon`, "aria-hidden": "true" });
+  function setIcon(button, name) {
+    const el = button.firstElementChild;
+    if (el)
+      el.className = `fa-solid fa-${name} ysrp-icon`;
   }
-
-  const LANGUAGE_OPTION_PRESETS = Object.freeze({
-    auto: {
-      label: () => localizeText('Auto', '自动'),
-      hint: () => localizeText('Match the browser language automatically.', '自动跟随浏览器语言。'),
-      badge: () => localizeText('Auto', '自动')
-    },
-    zh: {
-      label: '中文',
-      hint: '始终使用简体中文。',
-      badge: '中文'
-    },
-    en: {
-      label: 'English',
-      hint: 'Always use English.',
-      badge: 'English'
-    }
-  });
-
-  function resolveLanguageOptionText(value, key) {
-    const entry = LANGUAGE_OPTION_PRESETS[value];
-    if (!entry) return '';
-    const val = entry[key];
-    if (typeof val === 'function') {
-      try { return val(); } catch { return ''; }
-    }
-    return typeof val === 'string' ? val : '';
+  function iconButton(name, title, onClick, extraClass = "") {
+    return h("button", { type: "button", class: `ysrp-ibtn ${extraClass}`, title, "aria-label": title, onclick: onClick }, icon(name));
   }
-
-  function getLanguageOptionLabel(value) {
-    const label = resolveLanguageOptionText(value, 'label');
-    if (label) return label;
-    return localizeText('Auto', '自动');
+  function textButton(name, label, onClick, extraClass = "") {
+    return h("button", { type: "button", class: `ysrp-btn ${extraClass}`, title: label, onclick: onClick }, icon(name), h("span", { text: label }));
   }
-
-  function getLanguageOptionHint(value) {
-    const hint = resolveLanguageOptionText(value, 'hint');
-    if (hint) return hint;
-    return localizeText('Match the browser language automatically.', '自动跟随浏览器语言。');
+  function deArrowIcon() {
+    const ns = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", "0 0 36 36");
+    svg.setAttribute("width", "22");
+    svg.setAttribute("height", "22");
+    svg.setAttribute("aria-hidden", "true");
+    for (const [r, fill] of [[18, "#1213BD"], [13, "#88C9F9"], [6, "#0A62A5"]]) {
+      const circle = document.createElementNS(ns, "circle");
+      circle.setAttribute("cx", "18");
+      circle.setAttribute("cy", "18");
+      circle.setAttribute("r", String(r));
+      circle.setAttribute("fill", fill);
+      svg.appendChild(circle);
+    }
+    return svg;
   }
-
-  function getLanguageBadgeLabel(value) {
-    const badge = resolveLanguageOptionText(value, 'badge');
-    if (badge) return badge;
-    return getLanguageOptionLabel(value);
-  }
-
-  function getLanguageDisplayName(code) {
-    if (code === 'zh') return '中文';
-    return 'English';
-  }
-
-  function isPlaceholderDeArrowTitle(text) {
-    if (!text) return true;
-    return PLACEHOLDER_DEARROW.has(text.trim().toLowerCase());
-  }
-
-  function areSameTitle(a, b) {
-    if (!a || !b) return false;
-    return a.trim().toLowerCase() === b.trim().toLowerCase();
-  }
-
-  const dearrowAvailabilityCache = new Map(); // videoId -> { status: 'available'|'missing', title?: string }
-  const pendingDeArrowLookups = new Map();
-  let currentVideoStatusListener = null;
-  let recordUpdatedListener = null;
-  let dearrowTitleReadyListener = null;
-  let lastRenderedVideoId = null;
-  let isRebuildingRecords = false;
-
-  function fetchDeArrowTitleOnce(videoId) {
-    if (!videoId) return Promise.resolve(null);
-    if (pendingDeArrowLookups.has(videoId)) {
-      return pendingDeArrowLookups.get(videoId);
-    }
-    const promise = requestDeArrowTitle(videoId, { force: true })
-      .finally(() => {
-        pendingDeArrowLookups.delete(videoId);
-      });
-    pendingDeArrowLookups.set(videoId, promise);
-    return promise;
-  }
-
-  const pendingOriginalTitleGuarantees = new Map();
-  const transcriptVisibilityState = new Map(); // videoId -> true when transcript section is expanded
-
-  function queueDearrowRetry(videoId) {
-    if (!videoId) return;
-    dearrowAvailabilityCache.delete(videoId);
-    if (typeof scheduleDeArrowRetry === 'function') {
-      scheduleDeArrowRetry(videoId);
-    }
-  }
-
-  function ensureOriginalTitleStoredBeforeDearrow(videoId) {
-    if (!videoId) return null;
-    if (pendingOriginalTitleGuarantees.has(videoId)) {
-      return pendingOriginalTitleGuarantees.get(videoId);
-    }
-    const promise = (async () => {
-      const storageKey = `${KEY_PREFIX}${videoId}`;
-      const saved = Storage.getItem(storageKey);
-      if (!saved) return;
-      let parsed;
-      try {
-        parsed = JSON.parse(saved) || {};
-      } catch {
-        return;
-      }
-      const originalAlreadyPresent = typeof parsed.originalTitle === 'string' && Boolean(parsed.originalTitle.trim());
-      if (originalAlreadyPresent) return;
-      try {
-        const original = await getOriginalTitle(videoId);
-        if (original) updateStoredOriginalTitle(videoId, original);
-      } catch (err) {
-        console.error('Failed to ensure original title before DeArrow:', err);
-      }
-    })().finally(() => {
-      pendingOriginalTitleGuarantees.delete(videoId);
-    });
-    pendingOriginalTitleGuarantees.set(videoId, promise);
-    return promise;
-  }
-
-  function persistRecordDeArrowTitle(videoId, title) {
-    if (!videoId || !title) return;
-    const storageKey = `${KEY_PREFIX}${videoId}`;
-    const commitDearrowTitle = () => {
-      const saved = Storage.getItem(storageKey);
-      if (!saved) return;
-      try {
-        const parsed = JSON.parse(saved) || {};
-        const originalTitle = typeof parsed.originalTitle === 'string' ? parsed.originalTitle : null;
-        if (originalTitle && areSameTitle(originalTitle, title)) {
-          queueDearrowRetry(videoId);
-          return;
-        }
-        if (parsed.videoName === title) return;
-        parsed.videoName = title;
-        Storage.setItem(storageKey, JSON.stringify(parsed));
-      } catch (err) {
-        console.error('Failed to persist DeArrow title to storage:', err);
-      }
-    };
-    const pendingOriginal = ensureOriginalTitleStoredBeforeDearrow(videoId);
-    if (pendingOriginal && typeof pendingOriginal.then === 'function') {
-      pendingOriginal.then(() => commitDearrowTitle()).catch(() => commitDearrowTitle());
-    } else {
-      commitDearrowTitle();
-    }
-  }
-
-  function normalizeDisplayTitle(text) {
-    if (typeof text !== 'string') return '';
-    return typeof normalizeTitleText === 'function'
-      ? normalizeTitleText(text)
-      : String(text).replace(/\s+/g, ' ').trim();
-  }
-
-  function resolveRecordTitle(videoId, fallbackTitle) {
-    const fallback = normalizeDisplayTitle(fallbackTitle) || DEFAULT_VIDEO_NAME;
-    if (!videoId) {
-      return { title: fallback, source: 'fallback', type: 'fallback' };
-    }
-    if (typeof configData.resolveEffectiveTitle === 'function') {
-      try {
-        const resolved = configData.resolveEffectiveTitle(videoId, fallback);
-        if (resolved && typeof resolved === 'object') {
-          const normalized = normalizeDisplayTitle(resolved.title) || fallback;
-          return {
-            title: normalized,
-            source: resolved.source || 'fallback',
-            type: resolved.type || resolved.source || 'fallback'
-          };
-        }
-      } catch (err) {
-        console.error('Shared resolver failed:', err);
-      }
-    }
-    return { title: fallback, source: 'fallback', type: 'fallback' };
-  }
-
-
-  function injectSettingsScrollbarsCSS() {
-    if (document.getElementById('ysrp-scrollbar-style')) return;
-    const containerSelector = SELECTORS.settingsContainer;
-    const css = `
-      ${containerSelector},
-      ${containerSelector} * {
-        scrollbar-width: thin;
-        scrollbar-color: ${styles.scrollbarThumb} ${styles.scrollbarTrack};
-      }
-      ${containerSelector} ::-webkit-scrollbar {
-        width: 10px;
-        height: 10px;
-      }
-      ${containerSelector} ::-webkit-scrollbar-track {
-        background: ${styles.scrollbarTrack};
-        border-radius: 8px;
-      }
-      ${containerSelector} ::-webkit-scrollbar-thumb {
-        background-color: ${styles.scrollbarThumb};
-        border-radius: 8px;
-        border: 2px solid ${styles.scrollbarTrack};
-      }
-      ${containerSelector} ::-webkit-scrollbar-thumb:hover {
-        background-color: ${styles.scrollbarThumbHover};
-      }
-      ${containerSelector} ::-webkit-scrollbar-corner {
-        background: ${styles.scrollbarCorner};
-      }
-    `;
-    const styleEl = document.createElement('style');
-    styleEl.id = 'ysrp-scrollbar-style';
-    styleEl.textContent = css;
-    document.head.appendChild(styleEl);
-  }
-
-  function createSettingsUI(options) {
-    const opts = Object.assign({ defaultTab: SETTINGS_TABS.records }, options || {});
-    const savedVideos = getSavedVideoList();
-    const videosCount = savedVideos.length;
-
-    const existingSettingsContainer = document.querySelector(SELECTORS.settingsContainer);
-    if (existingSettingsContainer) return; // Prevent duplicate settings containers
-
-    const infoElContainer = document.querySelector(SELECTORS.infoContainer);
-    if (!infoElContainer) return;
-
-    const hostRoot = getHostRoot();
-    const backdrop = ensureBackdrop(hostRoot);
-
-    const settingsContainer = document.createElement('div');
-    settingsContainer.classList.add(CLASS_NAMES.settingsContainer);
-
-    const LARGE_FORM_CONTROL_MAX_WIDTH = '48rem';
-
-    // Header
-    const settingsContainerHeader = document.createElement('div');
-    settingsContainerHeader.style.display = 'flex';
-    settingsContainerHeader.style.justifyContent = 'space-between';
-    settingsContainerHeader.style.alignItems = 'center';
-
-    const headerLeft = document.createElement('div');
-    headerLeft.style.display = 'flex';
-    headerLeft.style.alignItems = 'center';
-    headerLeft.style.gap = '0.5rem';
-
-    const settingsContainerHeaderTitle = document.createElement('h3');
-    function renderSavedVideosTitle(countValue) {
-      settingsContainerHeaderTitle.textContent = localizeText(
-        'Saved Videos - ({count})',
-        '已保存视频 - ({count})',
-        { count: countValue }
-      );
-    }
-    renderSavedVideosTitle(videosCount);
-    settingsContainerHeaderTitle.style.color = styles.color;
-    settingsContainerHeaderTitle.style.margin = '0';
-
-    const modeBadge = document.createElement('span');
-    modeBadge.textContent = Storage.getMode() === 'gm'
-      ? localizeText('GM Storage', 'GM 存储')
-      : localizeText('localStorage', '浏览器本地存储');
-    Object.assign(modeBadge.style, {
-      fontSize: '0.8rem',
-      padding: '0.15rem 0.5rem',
-      borderRadius: '0.5rem',
-      background: styles.badgeBg,
-      color: styles.badgeText
-    });
-
-    headerLeft.appendChild(settingsContainerHeaderTitle);
-    headerLeft.appendChild(modeBadge);
-
-    const headerRight = document.createElement('div');
-    Object.assign(headerRight.style, {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.35rem'
-    });
-
-    const refreshStatusIndicator = document.createElement('span');
-    Object.assign(refreshStatusIndicator.style, {
-      display: 'none',
-      borderRadius: '999px',
-      padding: '0.15rem',
-      background: styles.recordBackground,
-      border: styles.border
-    });
-    refreshStatusIndicator.title = localizeText('Refreshing…', '正在更新列表…');
-    const refreshStatusIcon = createIcon('refresh', styles.tabInactive);
-    refreshStatusIcon.style.fontSize = '1rem';
-    refreshStatusIndicator.appendChild(refreshStatusIcon);
-
-    const settingsContainerCloseButton = document.createElement('button');
-    settingsContainerCloseButton.textContent = '✖';
-    settingsContainerCloseButton.style.background = 'transparent';
-    settingsContainerCloseButton.style.border = 'none';
-    settingsContainerCloseButton.style.color = styles.color;
-    settingsContainerCloseButton.style.cursor = 'pointer';
-    settingsContainerCloseButton.style.fontSize = '1.2rem';
-    settingsContainerCloseButton.addEventListener('click', () => {
-      settingsContainer.style.display = 'none';
-      backdrop.style.display = 'none';
-      unlockBodyScroll();
-    });
-
-    headerRight.appendChild(refreshStatusIndicator);
-    headerRight.appendChild(settingsContainerCloseButton);
-
-    settingsContainerHeader.appendChild(headerLeft);
-    settingsContainerHeader.appendChild(headerRight);
-
-    function setRefreshIndicatorActive(active) {
-      if (!refreshStatusIndicator || !refreshStatusIcon) return;
-      refreshStatusIndicator.style.display = active ? 'inline-flex' : 'none';
-      refreshStatusIcon.style.color = active ? styles.tabActive : styles.tabInactive;
-      refreshStatusIcon.classList.toggle('fa-spin', active);
-    }
-
-    // Tabs
-    const tabsBar = document.createElement('div');
-    tabsBar.style.display = 'flex';
-    tabsBar.style.gap = '1rem';
-    tabsBar.style.marginTop = '0.75rem';
-    tabsBar.style.borderBottom = styles.border;
-    tabsBar.style.paddingBottom = '0.25rem';
-
-    function makeTab(id, label, iconName) {
-      const btn = document.createElement('button');
-      btn.style.background = 'transparent';
-      btn.style.border = 'none';
-      btn.style.cursor = 'pointer';
-      btn.style.display = 'flex';
-      btn.style.alignItems = 'center';
-      btn.style.gap = '0.5rem';
-      btn.style.padding = '0.25rem 0.75rem';
-      btn.style.color = styles.tabInactive;
-      btn.style.fontWeight = '700';
-      btn.style.fontSize = '1.6rem';
-      const ic = createIcon(iconName, styles.tabInactive);
-      if (ic) ic.style.fontSize = '1.6rem';
-      const span = document.createElement('span');
-      span.textContent = label;
-      btn.appendChild(ic);
-      btn.appendChild(span);
-      btn._icon = ic;
-      btn.dataset.tabId = id;
-      return btn;
-    }
-
-    const tabRecords = makeTab(SETTINGS_TABS.records, localizeText('Records', '记录'), 'database');
-    const tabPrefs = makeTab(SETTINGS_TABS.storage, localizeText('Storage', '存储'), 'gear');
-    const tabTranscript = makeTab(SETTINGS_TABS.transcript, localizeText('Transcript', '字幕'), 'captions');
-    const tabDisplay = makeTab(SETTINGS_TABS.display,
-      (typeof I18n !== 'undefined' && I18n && typeof I18n.t === 'function')
-        ? I18n.t('language.tabLabel', null, localizeText('Display', '界面'))
-        : localizeText('Display', '界面'),
-      'globe'
-    );
-    let displayContainer = null;
-
-    tabsBar.appendChild(tabRecords);
-    tabsBar.appendChild(tabPrefs);
-    tabsBar.appendChild(tabTranscript);
-    tabsBar.appendChild(tabDisplay);
-
-    function setActiveTab(tab) {
-      [tabRecords, tabPrefs, tabTranscript, tabDisplay].forEach(b => {
-        const active = (b === tab);
-        b.style.color = active ? styles.tabActive : styles.tabInactive;
-        if (b._icon) b._icon.style.color = active ? styles.tabActive : styles.tabInactive;
-      });
-      const activeTabId = tab && tab.dataset ? tab.dataset.tabId : SETTINGS_TABS.records;
-      settingsContainer.dataset.activeTab = activeTabId;
-      recordsContainer.style.display = activeTabId === SETTINGS_TABS.records ? 'flex' : 'none';
-      prefsContainer.style.display = activeTabId === SETTINGS_TABS.storage ? 'flex' : 'none';
-      transcriptContainer.style.display = activeTabId === SETTINGS_TABS.transcript ? 'flex' : 'none';
-      displayContainer.style.display = activeTabId === SETTINGS_TABS.display ? 'flex' : 'none';
-    }
-
-    // Body root
-    const settingsContainerBody = document.createElement('div');
-    settingsContainerBody.classList.add(CLASS_NAMES.settingsContainerBody);
-    Object.assign(settingsContainerBody.style, {
-      display: 'flex',
-      flexDirection: 'column',
-      flex: '1',
-      minHeight: '0',
-      overflow: 'hidden',
-      marginTop: '0.75rem'
-    });
-
-    // Records container
-    const recordsContainer = document.createElement('div');
-    Object.assign(recordsContainer.style, {
-      display: 'flex',
-      flexDirection: 'column',
-      minHeight: 0,
-      overflow: 'hidden'
-    });
-
-    const listViewport = document.createElement('div');
-    Object.assign(listViewport.style, {
-      display: 'flex',
-      minHeight: '0',
-      overflowY: 'auto',
-      marginTop: '0.5rem',
-      WebkitOverflowScrolling: 'touch'
-    });
-
-    const PROGRESS_CLASS = 'ysrp-record-progress';
-    const videosList = document.createElement('ul');
-    Object.assign(videosList.style, {
-      display: 'flex',
-      flexDirection: 'column',
-      rowGap: '1rem',
-      listStyle: 'none',
-      padding: '0',
-      margin: '0',
-      width: '100%'
-    });
-
-    function updateRecordProgressDisplay(videoId, overrideProgressSeconds) {
-      if (!videoId) return;
-      const node = videosList.querySelector(`[data-video-id="${videoId}"]`);
-      if (!node) return;
-      const progressEl = node.querySelector(`.${PROGRESS_CLASS}`);
-      if (!progressEl) return;
-      let percentageText = '0%';
-      const useOverride = typeof overrideProgressSeconds === 'number' && videoId === getVideoId();
-      if (useOverride) {
-        const totalDuration = getVideoDuration();
-        if (totalDuration > 0) {
-          const pct = ((overrideProgressSeconds / totalDuration) * 100).toFixed(1);
-          percentageText = `${pct}%`;
-        } else {
-          percentageText = `${getProgressPercentage(videoId)}%`;
-        }
-      } else {
-        percentageText = `${getProgressPercentage(videoId)}%`;
-      }
-      progressEl.textContent = percentageText;
-    }
-
-    function getProgressPercentage(videoId) {
-      const idToStore = `${KEY_PREFIX}${videoId}`;
-      const savedVideoData = Storage.getItem(idToStore);
-      if (!savedVideoData) return 0;
-      try {
-        const { videoProgress } = JSON.parse(savedVideoData);
-        const totalDuration = getVideoDuration();
-        if (totalDuration === 0) return 0;
-        const percentage = ((videoProgress / totalDuration) * 100).toFixed(1);
-        return percentage;
-      } catch { return 0; }
-    }
-
-    function handleDearrowTitleEvent(event) {
-      if (!event || !event.detail) return;
-      const { videoId, title } = event.detail;
-      if (!videoId || !title) return;
-      const normalized = normalizeDisplayTitle(title);
-      if (!normalized || isPlaceholderDeArrowTitle(normalized)) return;
-      dearrowAvailabilityCache.set(videoId, { status: 'available', title: normalized });
-      persistRecordDeArrowTitle(videoId, normalized);
-      if (!isRebuildingRecords) {
-        rebuildRecords();
-      }
-    }
-
-    function rebuildRecords() {
-      if (isRebuildingRecords) return;
-      isRebuildingRecords = true;
-      try {
-        setRefreshIndicatorActive(true);
-        while (videosList.firstChild) videosList.removeChild(videosList.firstChild);
-        const all = getSavedVideoList();
-        renderSavedVideosTitle(all.length);
-
-        const currentVideoId = getVideoId();
-        lastRenderedVideoId = currentVideoId || null;
-        const currentRecords = [];
-        const otherRecords = [];
-
-      function createRecordEntry(key, value) {
-        try {
-          const parsedData = JSON.parse(value) || {};
-          const videoName = parsedData.videoName;
-          const videoProgress = parsedData.videoProgress;
-          const storedOriginalTitle = parsedData.originalTitle;
-          const storedNoteValue = typeof parsedData.videoNote === 'string' ? parsedData.videoNote : '';
-          const progress = videoProgress || 0;
-          const videoId = key.split(KEY_PREFIX)[1];
-          let currentNoteValue = storedNoteValue;
-          let isEditingNote = false;
-          let noteTextarea = null;
-          let noteVisible = false;
-
-          const videoEl = document.createElement('li');
-          Object.assign(videoEl.style, {
-            display: 'flex',
-            flexDirection: 'column',
-            background: styles.recordBackground,
-            padding: '0.5rem',
-            borderRadius: '0.5rem',
-            color: styles.color
-          });
-          videoEl.dataset.videoId = videoId;
-
-          const videoElTop = document.createElement('div');
-          Object.assign(videoElTop.style, {
-            display: 'flex',
-            alignItems: 'center'
-          });
-
-          const progressEl = document.createElement('span');
-          const percentage = getProgressPercentage(videoId);
-          progressEl.textContent = `${percentage}%`;
-          progressEl.classList.add(PROGRESS_CLASS);
-          Object.assign(progressEl.style, {
-            marginRight: '0.5rem',
-            color: styles.progressTextColor,
-            minWidth: '40px',
-            textAlign: 'right'
-          });
-
-          const videoElText = document.createElement('span');
-          videoElText.classList.add('ysrp-record-title');
-          videoElText.style.flex = '1';
-          videoElText.style.wordBreak = 'break-word';
-
-          const normalizedSavedName = normalizeDisplayTitle(videoName);
-          let originalTitleValue = typeof storedOriginalTitle === 'string' && storedOriginalTitle.trim() ? storedOriginalTitle.trim() : undefined;
-
-          const resolvedTitleInfo = resolveRecordTitle(
-            videoId,
-            normalizedSavedName || originalTitleValue || DEFAULT_VIDEO_NAME
-          );
-          videoElText.textContent = resolvedTitleInfo.title;
-
-          const availabilityEntry = dearrowAvailabilityCache.get(videoId);
-          let storedHasDeArrow = Boolean(normalizedSavedName) && !isPlaceholderDeArrowTitle(normalizedSavedName);
-          if (storedHasDeArrow && originalTitleValue && areSameTitle(normalizedSavedName, originalTitleValue)) {
-            storedHasDeArrow = false;
-            queueDearrowRetry(videoId);
-          }
-
-          const titleSourcesMap = configData.titleSources;
-          const runtimeSourceEntry = titleSourcesMap && typeof titleSourcesMap.get === 'function'
-            ? titleSourcesMap.get(videoId)
-            : null;
-
-          let dearrowTitle = null;
-          if (runtimeSourceEntry && runtimeSourceEntry.dearrow) {
-            dearrowTitle = runtimeSourceEntry.dearrow;
-          } else if (resolvedTitleInfo.type === 'dearrow') {
-            dearrowTitle = resolvedTitleInfo.title;
-          } else if (availabilityEntry && availabilityEntry.status === 'available' && availabilityEntry.title) {
-            dearrowTitle = availabilityEntry.title;
-          } else if (storedHasDeArrow) {
-            dearrowTitle = normalizedSavedName;
-          }
-
-          if (dearrowTitle) {
-            const cachedEntry = dearrowAvailabilityCache.get(videoId);
-            if (!cachedEntry || cachedEntry.status !== 'available' || cachedEntry.title !== dearrowTitle) {
-              dearrowAvailabilityCache.set(videoId, { status: 'available', title: dearrowTitle });
-            }
-          }
-
-          if (dearrowTitle && originalTitleValue && areSameTitle(dearrowTitle, originalTitleValue)) {
-            queueDearrowRetry(videoId);
-            dearrowTitle = null;
-          }
-
-          const latestAvailability = dearrowAvailabilityCache.get(videoId);
-          let confirmedNoDeArrow = Boolean(latestAvailability && latestAvailability.status === 'missing');
-          let showingOriginalTitle = !dearrowTitle;
-          const loadingOriginalPlaceholder = localizeText('Loading original title…', '正在获取原标题…');
-          const missingOriginalPlaceholder = localizeText('Original title unavailable', '未找到原标题');
-          let dearrowToggleButton = null;
-
-          if (!confirmedNoDeArrow) {
-            dearrowToggleButton = document.createElement('button');
-            Object.assign(dearrowToggleButton.style, {
-              background: 'transparent',
-              border: 'none',
-              cursor: 'pointer',
-              marginRight: '0.5rem',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              width: '2.4rem',
-              height: '2.4rem',
-              borderRadius: '0.6rem',
-              padding: '0.25rem'
-            });
-            const dearrowIcon = createDeArrowIcon(26);
-            dearrowToggleButton.appendChild(dearrowIcon);
-          } else {
-            videoElText.textContent = originalTitleValue || loadingOriginalPlaceholder;
-          }
-
-          function updateToggleTooltip() {
-            if (!dearrowToggleButton) return;
-            if (dearrowToggleButton.dataset.state === 'pending') {
-              dearrowToggleButton.title = localizeText('Checking DeArrow title…', '正在检测 DeArrow 标题…');
-              return;
-            }
-            dearrowToggleButton.title = showingOriginalTitle
-              ? localizeText('Show DeArrow title', '恢复 DeArrow 标题')
-              : localizeText('Show original title', '显示原标题');
-          }
-
-          function setButtonPending() {
-            if (!dearrowToggleButton) return;
-            dearrowToggleButton.dataset.state = 'pending';
-            dearrowToggleButton.disabled = true;
-            dearrowToggleButton.style.filter = 'grayscale(1)';
-            dearrowToggleButton.style.opacity = '0.4';
-            updateToggleTooltip();
-          }
-
-          function setButtonReady() {
-            if (!dearrowToggleButton) return;
-            dearrowToggleButton.dataset.state = 'ready';
-            dearrowToggleButton.disabled = false;
-            updateToggleTooltip();
-          }
-
-          function removeDearrowButton() {
-            if (!dearrowToggleButton) return;
-            dearrowToggleButton.remove();
-            dearrowToggleButton = null;
-          }
-
-          function showDeArrowTitle() {
-            if (!dearrowTitle) return;
-            showingOriginalTitle = false;
-            videoElText.textContent = dearrowTitle;
-            if (dearrowToggleButton) {
-              dearrowToggleButton.style.filter = '';
-              dearrowToggleButton.style.opacity = '';
-              setButtonReady();
-            }
-          }
-
-          function showOriginalTitle(text) {
-            showingOriginalTitle = true;
-            videoElText.textContent = text || originalTitleValue || missingOriginalPlaceholder;
-            if (dearrowToggleButton && dearrowToggleButton.dataset.state === 'ready') {
-              dearrowToggleButton.style.filter = 'grayscale(1)';
-              dearrowToggleButton.style.opacity = '0.6';
-              updateToggleTooltip();
-            }
-          }
-
-          if (dearrowToggleButton) {
-            if (dearrowTitle) {
-              showDeArrowTitle();
-            } else {
-              videoElText.textContent = originalTitleValue || loadingOriginalPlaceholder;
-              setButtonPending();
-            }
-          }
-
-          const needsDearrowLookup = !dearrowTitle && !confirmedNoDeArrow && Boolean(dearrowToggleButton);
-          if (needsDearrowLookup) {
-            fetchDeArrowTitleOnce(videoId)
-              .then(title => {
-                if (!title) {
-                  confirmedNoDeArrow = true;
-                  dearrowAvailabilityCache.set(videoId, { status: 'missing' });
-                  removeDearrowButton();
-                  if (!originalTitleValue) {
-                    videoElText.textContent = missingOriginalPlaceholder;
-                  }
-                  return;
-                }
-                dearrowTitle = String(title).trim();
-                dearrowAvailabilityCache.set(videoId, { status: 'available', title: dearrowTitle });
-                persistRecordDeArrowTitle(videoId, dearrowTitle);
-                showDeArrowTitle();
-              })
-              .catch(err => {
-                console.error('Failed to load DeArrow title for records list:', err);
-                setButtonPending();
-              });
-          }
-
-          if (dearrowToggleButton) {
-            dearrowToggleButton.addEventListener('click', async () => {
-              if (dearrowToggleButton.dataset.state !== 'ready') return;
-              if (dearrowToggleButton.dataset.loading === 'true') return;
-              if (!showingOriginalTitle) {
-                if (typeof originalTitleValue === 'string' && originalTitleValue) {
-                  showOriginalTitle(originalTitleValue);
-                  return;
-                }
-                dearrowToggleButton.dataset.loading = 'true';
-                const previousText = videoElText.textContent;
-                videoElText.textContent = loadingOriginalPlaceholder;
-                try {
-                  const fetched = await getOriginalTitle(videoId);
-                  originalTitleValue = fetched || undefined;
-                  if (fetched) updateStoredOriginalTitle(videoId, fetched);
-                  showOriginalTitle(fetched);
-                } catch (err) {
-                  console.error('Failed to load original title:', err);
-                  videoElText.textContent = previousText;
-                } finally {
-                  dearrowToggleButton.dataset.loading = 'false';
-                  updateToggleTooltip();
-                }
-              } else {
-                showDeArrowTitle();
-              }
-            });
-
-            updateToggleTooltip();
-          }
-
-          const urlButton = document.createElement('button');
-          urlButton.style.background = 'transparent';
-          urlButton.style.border = 'none';
-          urlButton.style.cursor = 'pointer';
-          urlButton.style.marginRight = '0.5rem';
-          urlButton.style.display = 'flex';
-          urlButton.style.alignItems = 'center';
-          urlButton.style.justifyContent = 'center';
-          urlButton.style.width = '2rem';
-          urlButton.style.height = '2rem';
-          urlButton.style.borderRadius = '0.5rem';
-          urlButton.title = localizeText('Show / hide URL', '显示/隐藏 URL');
-          const linkIcon = createIcon('link', styles.linkButtonColor);
-          urlButton.appendChild(linkIcon);
-
-          const noteButton = document.createElement('button');
-          noteButton.style.background = 'transparent';
-          noteButton.style.border = 'none';
-          noteButton.style.cursor = 'pointer';
-          noteButton.style.marginRight = '0.5rem';
-          noteButton.style.display = 'flex';
-          noteButton.style.alignItems = 'center';
-          noteButton.style.justifyContent = 'center';
-          noteButton.style.width = '2rem';
-          noteButton.style.height = '2rem';
-          noteButton.style.borderRadius = '0.5rem';
-          noteButton.title = localizeText('Show notes', '显示笔记');
-          const noteIcon = createIcon('note', styles.editButtonColor);
-          noteButton.appendChild(noteIcon);
-
-          const transcriptButton = document.createElement('button');
-          transcriptButton.style.background = 'transparent';
-          transcriptButton.style.border = 'none';
-          transcriptButton.style.cursor = 'pointer';
-          transcriptButton.style.marginRight = '0.5rem';
-          transcriptButton.style.display = 'flex';
-          transcriptButton.style.alignItems = 'center';
-          transcriptButton.style.justifyContent = 'center';
-          transcriptButton.style.width = '2rem';
-          transcriptButton.style.height = '2rem';
-          transcriptButton.style.borderRadius = '0.5rem';
-          transcriptButton.title = localizeText('Show transcript', '获取字幕');
-          const transcriptIcon = createIcon('captions', styles.tabActive);
-          transcriptButton.appendChild(transcriptIcon);
-
-          if (!originalTitleValue) {
-            getOriginalTitle(videoId)
-              .then(title => {
-                originalTitleValue = title || undefined;
-                if (title) updateStoredOriginalTitle(videoId, title);
-                if (showingOriginalTitle) {
-                  videoElText.textContent = originalTitleValue || missingOriginalPlaceholder;
-                }
-              })
-              .catch(err => {
-                console.error('Failed to load original title:', err);
-                if (showingOriginalTitle && !originalTitleValue) {
-                  videoElText.textContent = missingOriginalPlaceholder;
-                }
-              });
-          }
-
-          const deleteButton = document.createElement('button');
-          deleteButton.style.background = styles.buttonBackground;
-          deleteButton.style.border = styles.buttonBorder;
-          deleteButton.style.borderRadius = '0.5rem';
-          deleteButton.style.cursor = 'pointer';
-          deleteButton.style.display = 'flex';
-          deleteButton.style.alignItems = 'center';
-          deleteButton.style.justifyContent = 'center';
-          deleteButton.style.width = '2rem';
-          deleteButton.style.height = '2rem';
-          deleteButton.title = localizeText('Delete record', '删除保存记录');
-          const trashIcon = createIcon('trash', styles.deleteButtonColor);
-          deleteButton.appendChild(trashIcon);
-
-          videoElTop.appendChild(progressEl);
-          videoElTop.appendChild(videoElText);
-          if (dearrowToggleButton) {
-            videoElTop.appendChild(dearrowToggleButton);
-          }
-          videoElTop.appendChild(transcriptButton);
-          videoElTop.appendChild(noteButton);
-          videoElTop.appendChild(urlButton);
-          videoElTop.appendChild(deleteButton);
-          videoEl.appendChild(videoElTop);
-
-          const urlDisplay = document.createElement('div');
-          const videoURL = `https://www.youtube.com/watch?v=${videoId}`;
-          urlDisplay.textContent = localizeText('URL: {url}', '链接：{url}', { url: videoURL });
-          Object.assign(urlDisplay.style, {
-            marginTop: '0.5rem',
-            padding: '0.5rem',
-            background: styles.urlBackground,
-            color: styles.urlTextColor,
-            borderRadius: '0.5rem',
-            display: 'none',
-            wordBreak: 'break-word',
-            position: 'relative',
-            alignItems: 'center',
-            gap: '0.25rem'
-          });
-
-          const copySuccessTip = document.createElement('span');
-          copySuccessTip.textContent = localizeText('Copied', '已复制');
-          Object.assign(copySuccessTip.style, {
-            position: 'absolute',
-            top: '50%',
-            right: '1rem',
-            transform: 'translateY(-50%)',
-            background: styles.copySuccessBackground,
-            color: styles.copySuccessTextColor,
-            padding: '0.2rem 0.5rem',
-            borderRadius: '0.3rem',
-            fontSize: '0.8rem',
-            opacity: '0',
-            transition: 'opacity 0.3s ease',
-            pointerEvents: 'none'
-          });
-          urlDisplay.appendChild(copySuccessTip);
-
-          const copyButton = document.createElement('button');
-          copyButton.style.background = 'transparent';
-          copyButton.style.border = 'none';
-          copyButton.style.cursor = 'pointer';
-          copyButton.style.marginLeft = '0.5rem';
-          copyButton.style.display = 'flex';
-          copyButton.style.alignItems = 'center';
-          copyButton.style.justifyContent = 'center';
-          copyButton.style.width = '1.5rem';
-          copyButton.style.height = '1.5rem';
-          copyButton.style.borderRadius = '0.3rem';
-          copyButton.title = localizeText('Copy URL', '复制 URL');
-          const copyIcon = createIcon('copy', styles.copyButtonColor);
-          copyButton.appendChild(copyIcon);
-
-          const openButton = document.createElement('button');
-          openButton.style.background = 'transparent';
-          openButton.style.border = 'none';
-          openButton.style.cursor = 'pointer';
-          openButton.style.marginLeft = '0.3rem';
-          openButton.style.display = 'flex';
-          openButton.style.alignItems = 'center';
-          openButton.style.justifyContent = 'center';
-          openButton.style.width = '1.5rem';
-          openButton.style.height = '1.5rem';
-          openButton.style.borderRadius = '0.3rem';
-          openButton.title = localizeText('Open in new tab', '在新标签页中打开 URL');
-          const openIcon = createIcon('open', styles.openButtonColor);
-          openButton.appendChild(openIcon);
-
-          urlDisplay.appendChild(copyButton);
-          urlDisplay.appendChild(openButton);
-          videoEl.appendChild(urlDisplay);
-
-          const transcriptContainer = document.createElement('div');
-          transcriptContainer.classList.add('ysrp-transcript-container');
-          Object.assign(transcriptContainer.style, {
-            marginTop: '0.5rem',
-            padding: '0.5rem',
-            background: styles.urlBackground,
-            color: styles.color,
-            borderRadius: '0.5rem',
-            display: 'none',
-            flexDirection: 'column',
-            gap: '0.35rem'
-          });
-
-          const transcriptHeader = document.createElement('div');
-          Object.assign(transcriptHeader.style, {
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '0.5rem',
-            flexWrap: 'wrap'
-          });
-
-          const transcriptLabelGroup = document.createElement('div');
-          Object.assign(transcriptLabelGroup.style, {
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.4rem',
-            flexWrap: 'wrap',
-            minWidth: 0
-          });
-          const transcriptLabel = document.createElement('strong');
-          transcriptLabel.textContent = localizeText('Transcript', '字幕');
-          transcriptLabel.style.fontSize = '1rem';
-          transcriptLabel.style.fontWeight = '600';
-          transcriptLabel.style.color = styles.subtleText;
-          transcriptLabelGroup.appendChild(transcriptLabel);
-
-          const transcriptStatusText = document.createElement('span');
-          Object.assign(transcriptStatusText.style, {
-            fontSize: '0.85rem',
-            color: styles.tabActive || styles.subtleText,
-            opacity: '0.85',
-            display: 'none',
-            whiteSpace: 'nowrap'
-          });
-          transcriptLabelGroup.appendChild(transcriptStatusText);
-
-          const transcriptHeaderRight = document.createElement('div');
-          Object.assign(transcriptHeaderRight.style, {
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.35rem'
-          });
-
-          function makeTranscriptActionButton(titleText, iconName, iconColor) {
-            const btn = document.createElement('button');
-            Object.assign(btn.style, {
-              background: 'transparent',
-              border: styles.buttonBorder,
-              borderRadius: '0.4rem',
-              cursor: 'pointer',
-              padding: '0.25rem 0.4rem',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center'
-            });
-            btn.title = titleText;
-            btn.appendChild(createIcon(iconName, iconColor));
-            return btn;
-          }
-
-          const transcriptRefreshButton = makeTranscriptActionButton(
-            localizeText('Refresh transcript', '刷新字幕'),
-            'refresh',
-            styles.tabInactive
-          );
-          const transcriptCopyButton = makeTranscriptActionButton(
-            localizeText('Copy transcript', '复制字幕'),
-            'copy',
-            styles.copyButtonColor
-          );
-          transcriptCopyButton.disabled = true;
-          transcriptHeaderRight.appendChild(transcriptRefreshButton);
-          transcriptHeaderRight.appendChild(transcriptCopyButton);
-          transcriptHeader.appendChild(transcriptLabelGroup);
-          transcriptHeader.appendChild(transcriptHeaderRight);
-
-    const transcriptOutput = document.createElement('textarea');
-    Object.assign(transcriptOutput.style, {
-      width: '100%',
-      minHeight: '6rem',
-      border: `1px solid ${styles.inputBorder}`,
-      background: styles.inputBg,
-      borderRadius: '0.3rem',
-      padding: '0.4rem',
-      fontFamily: 'monospace',
-      fontSize: '1.05rem',
-      lineHeight: '1.4',
-      color: styles.color,
-      resize: 'vertical',
-      boxSizing: 'border-box'
-    });
-    transcriptOutput.readOnly = true;
-    transcriptOutput.placeholder = localizeText('Transcript will appear here…', '字幕内容加载后会显示在这里…');
-    const transcriptPlaceholderDefault = transcriptOutput.placeholder;
-    applyFocusRing(transcriptOutput);
-
-          transcriptContainer.appendChild(transcriptHeader);
-          transcriptContainer.appendChild(transcriptOutput);
-          videoEl.appendChild(transcriptContainer);
-
-          let transcriptVisible = false;
-          let transcriptLoading = false;
-          let transcriptValue = '';
-          const shouldRestoreTranscript = transcriptVisibilityState.has(videoId);
-
-          const cachedTranscript = typeof getCachedTranscript === 'function' ? getCachedTranscript(videoId) : '';
-          if (cachedTranscript) {
-            transcriptValue = cachedTranscript;
-            transcriptOutput.value = transcriptValue;
-            transcriptCopyButton.disabled = false;
-            transcriptContainer.dataset.loaded = 'true';
-            setTranscriptStatus(localizeText('Transcript loaded from cache.', '字幕来自缓存。'));
-          }
-
-          function normalizeTranscriptStatusMessage(rawText) {
-            if (!rawText) return '';
-            return rawText
-              .replace(/^\s*(?:字幕|transcript)(?:[:：]\s*)?/i, '')
-              .trim();
-          }
-
-          function setTranscriptStatus(text) {
-            const rawMessage = typeof text === 'string' ? text.trim() : '';
-            const message = normalizeTranscriptStatusMessage(rawMessage);
-            const placeholderText = message || transcriptPlaceholderDefault;
-            transcriptOutput.title = placeholderText;
-            if (!transcriptValue) {
-              transcriptOutput.placeholder = placeholderText;
-            }
-            if (transcriptStatusText) {
-              if (message) {
-                transcriptStatusText.textContent = message;
-                transcriptStatusText.style.display = 'inline-flex';
-              } else {
-                transcriptStatusText.textContent = '';
-                transcriptStatusText.style.display = 'none';
-              }
-            }
-          }
-
-          function syncTranscriptOutput(value) {
-            transcriptValue = value || '';
-            transcriptOutput.value = transcriptValue;
-            transcriptCopyButton.disabled = !transcriptValue;
-            transcriptOutput.style.opacity = transcriptValue ? '1' : '0.7';
-            if (transcriptValue) {
-              transcriptOutput.placeholder = transcriptPlaceholderDefault;
-            }
-          }
-
-          function setTranscriptButtonsLoading(loading) {
-            transcriptLoading = loading;
-            const targetOpacity = loading ? '0.5' : '';
-            transcriptButton.disabled = loading;
-            transcriptRefreshButton.disabled = loading;
-            transcriptButton.style.opacity = targetOpacity || '';
-            transcriptRefreshButton.style.opacity = targetOpacity || '';
-          }
-
-          function setTranscriptVisibility(visible, options) {
-            const opts = Object.assign({ silent: false }, options || {});
-            const nextVisible = Boolean(visible);
-            transcriptVisible = nextVisible;
-            transcriptContainer.style.display = nextVisible ? 'flex' : 'none';
-            transcriptButton.title = nextVisible
-              ? localizeText('Hide transcript', '隐藏字幕')
-              : localizeText('Show transcript', '获取字幕');
-            if (opts.silent || !videoId) return;
-            if (nextVisible) {
-              transcriptVisibilityState.set(videoId, true);
-            } else {
-              transcriptVisibilityState.delete(videoId);
-            }
-          }
-
-          function triggerTranscriptFetch(options) {
-            if (transcriptLoading) return;
-            if (typeof fetchTranscriptForVideo !== 'function') {
-              setTranscriptStatus(
-                localizeText('Transcript module is not ready.', '字幕模块未初始化。'),
-                styles.deleteButtonColor
-              );
-              return;
-            }
-            const force = options && options.force;
-            setTranscriptButtonsLoading(true);
-            setTranscriptStatus(localizeText('Refreshing…', '正在重新获取…'), styles.subtleText);
-            fetchTranscriptForVideo(videoId, {
-              force: Boolean(force),
-              videoTitle: resolvedTitleInfo && resolvedTitleInfo.title,
-              videoUrl: videoURL
-            })
-              .then(text => {
-                syncTranscriptOutput(text);
-                transcriptContainer.dataset.loaded = 'true';
-                setTranscriptStatus(
-                  localizeText('Transcript updated ({time})', '字幕已更新（{time}）', {
-                    time: new Date().toLocaleTimeString()
-                  }),
-                  styles.tabActive
-                );
-              })
-              .catch(err => {
-                const message = err && err.message ? err.message : String(err);
-                setTranscriptStatus(
-                  localizeText('Transcript failed: {message}', '字幕获取失败：{message}', { message }),
-                  styles.deleteButtonColor
-                );
-              })
-              .finally(() => {
-                setTranscriptButtonsLoading(false);
-              });
-          }
-
-          setTranscriptVisibility(shouldRestoreTranscript, { silent: true });
-          if (shouldRestoreTranscript && !transcriptContainer.dataset.loaded) {
-            triggerTranscriptFetch();
-          }
-
-          transcriptButton.addEventListener('click', () => {
-            const nextVisible = !transcriptVisible;
-            setTranscriptVisibility(nextVisible);
-            if (nextVisible) {
-              if (!transcriptContainer.dataset.loaded) {
-                triggerTranscriptFetch();
-              }
-            }
-          });
-
-          transcriptRefreshButton.addEventListener('click', () => {
-            setTranscriptVisibility(true);
-            triggerTranscriptFetch({ force: true });
-          });
-
-          transcriptCopyButton.addEventListener('click', async () => {
-            const text = transcriptOutput.value.trim();
-            if (!text) {
-              setTranscriptStatus(
-                localizeText('No transcript content to copy.', '暂无字幕内容可复制。'),
-                styles.subtleText
-              );
-              return;
-            }
-            try {
-              await navigator.clipboard.writeText(text);
-              transcriptCopyButton.style.opacity = '0.6';
-              setTimeout(() => { transcriptCopyButton.style.opacity = '1'; }, 250);
-              setTranscriptStatus(localizeText('Transcript copied.', '字幕内容已复制。'), styles.tabActive);
-            } catch (err) {
-              const message = err && err.message ? err.message : String(err);
-              setTranscriptStatus(
-                localizeText('Copy failed: {message}', '复制失败：{message}', { message }),
-                styles.deleteButtonColor
-              );
-            }
-          });
-
-          const noteContainer = document.createElement('div');
-          noteContainer.classList.add('ysrp-note-container');
-          Object.assign(noteContainer.style, {
-            marginTop: '0.5rem',
-            padding: '0.5rem',
-            background: styles.urlBackground,
-            color: styles.color,
-            borderRadius: '0.5rem',
-            display: 'none',
-            flexDirection: 'column',
-            gap: '0.35rem'
-          });
-
-          const noteHeader = document.createElement('div');
-          Object.assign(noteHeader.style, {
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '0.5rem'
-          });
-
-          const noteLabel = document.createElement('strong');
-          noteLabel.textContent = localizeText('Notes', '笔记');
-          Object.assign(noteLabel.style, {
-            fontSize: '0.85rem',
-            color: styles.subtleText
-          });
-
-          const noteEditButton = document.createElement('button');
-          Object.assign(noteEditButton.style, {
-            background: 'transparent',
-            border: 'none',
-            color: styles.editButtonColor,
-            cursor: 'pointer',
-            fontSize: '0.9rem',
-            padding: '0.15rem',
-            minWidth: 'auto',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center'
-          });
-          noteHeader.appendChild(noteLabel);
-          noteHeader.appendChild(noteEditButton);
-
-          const noteBody = document.createElement('div');
-          noteBody.classList.add('ysrp-note-body');
-          Object.assign(noteBody.style, {
-            display: 'none',
-            flexDirection: 'column',
-            gap: '0.35rem'
-          });
-
-          const noteContent = document.createElement('div');
-          noteContent.classList.add('ysrp-note-text');
-          Object.assign(noteContent.style, {
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-            lineHeight: '1.4',
-            fontSize: '0.95rem'
-          });
-
-          function syncNotePreview(value) {
-            const hasNote = Boolean(value);
-            noteContent.textContent = hasNote ? value : getNoteEmptyPlaceholder();
-            noteContent.style.color = hasNote ? styles.color : styles.subtleText;
-            noteContent.style.fontStyle = hasNote ? 'normal' : 'italic';
-            noteContent.style.opacity = hasNote ? '1' : '0.9';
-          }
-
-          syncNotePreview(currentNoteValue);
-          noteBody.appendChild(noteContent);
-          noteContainer.appendChild(noteHeader);
-          noteContainer.appendChild(noteBody);
-          videoEl.appendChild(noteContainer);
-
-          function updateNoteEditButtonState() {
-            noteEditButton.innerHTML = '';
-            const iconName = isEditingNote ? 'save' : 'edit';
-            const iconColor = isEditingNote ? styles.openButtonColor : styles.linkButtonColor;
-            noteEditButton.appendChild(createIcon(iconName, iconColor));
-            noteEditButton.title = isEditingNote
-              ? localizeText('Save note', '保存笔记')
-              : localizeText('Edit note', '编辑笔记');
-          }
-
-          function hasNoteContent() {
-            return Boolean((currentNoteValue || '').trim());
-          }
-
-          function refreshNoteButtonState() {
-            const notePresent = hasNoteContent();
-            noteButton.disabled = false;
-            noteButton.style.opacity = '1';
-            noteButton.title = isEditingNote
-              ? localizeText('Save & collapse note', '保存并折叠笔记')
-              : notePresent
-                ? (noteVisible
-                  ? localizeText('Hide notes', '隐藏笔记')
-                  : localizeText('Show notes', '显示笔记'))
-                : localizeText('Add note', '添加笔记');
-          }
-
-          function setNoteVisibility(visible) {
-            if (!visible && isEditingNote) return;
-            noteVisible = Boolean(visible);
-            noteContainer.style.display = noteVisible ? 'flex' : 'none';
-            noteBody.style.display = noteVisible ? 'flex' : 'none';
-            refreshNoteButtonState();
-          }
-
-          function ensureNoteVisible() {
-            if (!noteVisible) {
-              setNoteVisibility(true);
-            }
-          }
-
-          updateNoteEditButtonState();
-          refreshNoteButtonState();
-          setNoteVisibility(false);
-
-          urlButton.addEventListener('click', () => {
-            if (urlDisplay.style.display === 'none') {
-              urlDisplay.style.display = 'flex';
-              urlDisplay.style.alignItems = 'center';
-            } else {
-              urlDisplay.style.display = 'none';
-            }
-          });
-
-          copyButton.addEventListener('click', async () => {
-            try {
-              await navigator.clipboard.writeText(videoURL);
-              copyIcon.style.color = styles.saveButtonColor;
-              copyIcon.classList.remove(...FontAwesomeIcons['copy']);
-              copyIcon.classList.add(...FontAwesomeIcons['check']);
-              setTimeout(() => {
-                copyIcon.classList.remove(...FontAwesomeIcons['check']);
-                copyIcon.classList.add(...FontAwesomeIcons['copy']);
-                copyIcon.style.color = styles.copyButtonColor;
-              }, 1000);
-              copySuccessTip.style.opacity = '1';
-              setTimeout(() => { copySuccessTip.style.opacity = '0'; }, 2000);
-            } catch (err) {
-              console.error('Failed to copy text: ', err);
-            }
-          });
-
-          openButton.addEventListener('click', () => {
-            window.open(videoURL, '_blank');
-          });
-
-          deleteButton.addEventListener('click', () => {
-            Storage.removeItem(key);
-            if (videoId) {
-              transcriptVisibilityState.delete(videoId);
-            }
-            videosList.removeChild(videoEl);
-            renderSavedVideosTitle(videosList.children.length);
-          });
-
-          // Video notes
-
-          function enterNoteEditing() {
-            if (isEditingNote) return;
-            isEditingNote = true;
-            setNoteVisibility(true);
-            noteTextarea = document.createElement('textarea');
-            noteTextarea.value = currentNoteValue;
-            Object.assign(noteTextarea.style, {
-              width: '100%',
-              minHeight: '3rem',
-              border: `1px solid ${styles.inputBorder}`,
-              background: styles.inputBg,
-              borderRadius: '0.3rem',
-              padding: '0.35rem',
-              fontFamily: 'inherit',
-              fontSize: '0.95rem',
-              lineHeight: '1.4',
-              color: styles.color,
-              resize: 'vertical',
-              boxSizing: 'border-box',
-              outline: 'none'
-            });
-            applyFocusRing(noteTextarea);
-            noteTextarea.addEventListener('input', () => {
-              noteTextarea.style.height = 'auto';
-              noteTextarea.style.height = `${noteTextarea.scrollHeight}px`;
-            });
-            noteTextarea.dispatchEvent(new Event('input'));
-            noteBody.replaceChild(noteTextarea, noteContent);
-            updateNoteEditButtonState();
-            refreshNoteButtonState();
-            requestAnimationFrame(() => {
-              try {
-                noteTextarea.focus();
-                noteTextarea.setSelectionRange(noteTextarea.value.length, noteTextarea.value.length);
-              } catch {}
-            });
-          }
-
-          function persistNote(value) {
-            try {
-              const raw = Storage.getItem(key);
-              const savedData = raw ? (JSON.parse(raw) || {}) : {};
-              if (value) {
-                savedData.videoNote = value;
-              } else {
-                delete savedData.videoNote;
-              }
-              Storage.setItem(key, JSON.stringify(savedData));
-            } catch (err) {
-              console.error('Failed to update video note in storage:', err);
-            }
-          }
-
-          function commitNoteEditing() {
-            if (!isEditingNote) return;
-            const textarea = noteTextarea || noteBody.querySelector('textarea');
-            const nextNote = textarea ? textarea.value.trim() : '';
-            currentNoteValue = nextNote;
-            syncNotePreview(currentNoteValue);
-            if (textarea) {
-              noteBody.replaceChild(noteContent, textarea);
-            }
-            isEditingNote = false;
-            noteTextarea = null;
-            persistNote(currentNoteValue);
-            updateNoteEditButtonState();
-            refreshNoteButtonState();
-          }
-
-          noteButton.addEventListener('click', () => {
-            if (isEditingNote) {
-              commitNoteEditing();
-              setNoteVisibility(false);
-              return;
-            }
-            if (!hasNoteContent()) {
-              ensureNoteVisible();
-              enterNoteEditing();
-              return;
-            }
-            setNoteVisibility(!noteVisible);
-          });
-
-          noteEditButton.addEventListener('click', () => {
-            if (!noteVisible) ensureNoteVisible();
-            if (!isEditingNote) {
-              enterNoteEditing();
-            } else {
-              commitNoteEditing();
-            }
-          });
-
-          return { videoId, node: videoEl };
-        } catch (e) {
-          console.error('Failed to parse saved video data:', e);
-          return null;
-        }
-      }
-
-      for (const [key, value] of all) {
-        const entry = createRecordEntry(key, value);
-        if (!entry) continue;
-        const bucket = currentVideoId && entry.videoId === currentVideoId ? currentRecords : otherRecords;
-        bucket.push(entry.node);
-      }
-
-      currentRecords.forEach(node => videosList.appendChild(node));
-      otherRecords.forEach(node => videosList.appendChild(node));
-
-      listViewport.appendChild(videosList);
-      recordsContainer.appendChild(listViewport);
-
-      if (currentVideoStatusListener) {
-        document.removeEventListener('ysrp-current-video-status', currentVideoStatusListener);
-      }
-      currentVideoStatusListener = event => {
-        const nextVideoId = event && event.detail ? event.detail.videoId : undefined;
-        if (typeof nextVideoId !== 'undefined' && nextVideoId !== lastRenderedVideoId) {
-          rebuildRecords();
-        }
-      };
-      document.addEventListener('ysrp-current-video-status', currentVideoStatusListener);
-      if (recordUpdatedListener) {
-        document.removeEventListener(RECORD_UPDATED_EVENT, recordUpdatedListener);
-      }
-      recordUpdatedListener = event => {
-        const updatedVideoId = event && event.detail ? event.detail.videoId : undefined;
-        if (!updatedVideoId) return;
-        const existingNode = videosList.querySelector(`[data-video-id="${updatedVideoId}"]`);
-        if (!existingNode) {
-          rebuildRecords();
-          return;
-        }
-        updateRecordProgressDisplay(updatedVideoId, event.detail ? event.detail.videoProgress : undefined);
-      };
-      document.addEventListener(RECORD_UPDATED_EVENT, recordUpdatedListener);
-      if (dearrowTitleReadyListener) {
-        document.removeEventListener('ysrp-dearrow-title-ready', dearrowTitleReadyListener);
-      }
-      dearrowTitleReadyListener = handleDearrowTitleEvent;
-      document.addEventListener('ysrp-dearrow-title-ready', dearrowTitleReadyListener);
-      } finally {
-        setRefreshIndicatorActive(false);
-        isRebuildingRecords = false;
-      }
-    }
-
-    // Prefs container (storage + import/export)
-    const prefsContainer = document.createElement('div');
-    Object.assign(prefsContainer.style, {
-      display: 'none',
-      flexDirection: 'column',
-      gap: '1rem',
-      minHeight: 0,
-      overflow: 'auto',
-      paddingRight: '0.25rem',
-      WebkitOverflowScrolling: 'touch'
-    });
-
-    // Transcript tab container
-    const transcriptContainer = document.createElement('div');
-    Object.assign(transcriptContainer.style, {
-      display: 'none',
-      flexDirection: 'column',
-      gap: '1rem',
-      minHeight: 0,
-      overflow: 'auto',
-      paddingRight: '0.25rem',
-      WebkitOverflowScrolling: 'touch'
-    });
-
-    // Language/display tab container
-    displayContainer = document.createElement('div');
-    Object.assign(displayContainer.style, {
-      display: 'none',
-      flexDirection: 'column',
-      gap: '1rem',
-      minHeight: 0,
-      overflow: 'auto',
-      paddingRight: '0.25rem',
-      WebkitOverflowScrolling: 'touch'
-    });
-
-    const isDarkTheme = typeof currentTheme === 'string' && currentTheme.toLowerCase() === 'dark';
-    const storageAccentColor = isDarkTheme ? '#ffb347' : '#ff8c39';
-    const storageAccentBg = isDarkTheme ? 'rgba(255, 179, 71, 0.2)' : 'rgba(255, 140, 57, 0.15)';
-    const storageAccentBorder = isDarkTheme ? 'rgba(255, 179, 71, 0.65)' : 'rgba(255, 140, 57, 0.55)';
-    const storageOptionShadowActive = `0 0 0 1px ${isDarkTheme ? 'rgba(255, 179, 71, 0.45)' : 'rgba(255, 140, 57, 0.35)'}`;
-    const displayAccentColor = isDarkTheme ? '#ffc2ec' : '#ff4db8';
-    const displayAccentBg = isDarkTheme ? 'rgba(255, 194, 236, 0.28)' : 'rgba(255, 77, 184, 0.16)';
-    const displayAccentBorder = isDarkTheme ? 'rgba(255, 194, 236, 0.7)' : 'rgba(255, 77, 184, 0.55)';
-    const displayAccentShadow = `0 0 0 1px ${isDarkTheme ? 'rgba(255, 194, 236, 0.45)' : 'rgba(255, 77, 184, 0.35)'}`;
-    const displayBadgeBg = isDarkTheme ? 'rgba(255, 194, 236, 0.42)' : 'rgba(255, 77, 184, 0.22)';
-    const displayBadgeText = isDarkTheme ? '#2f0f1f' : '#6d1a46';
-    const displaySoftBg = isDarkTheme ? 'rgba(255, 194, 236, 0.16)' : 'rgba(255, 77, 184, 0.1)';
-    const transcriptAccentColor = '#ff2f45';
-    const settingsCardBaseStyles = {
-      background: styles.recordBackground,
-      borderRadius: '0.9rem',
-      padding: '1.1rem 1.35rem 1.05rem',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '0.85rem',
-      border: `1px solid ${styles.inputBorder}`,
-      boxShadow: 'none',
-      fontSize: '1.3125rem',
-      lineHeight: '1.6'
-    };
-    const settingsActionHoverBg = isDarkTheme ? 'rgba(255, 255, 255, 0.08)' : 'rgba(11, 87, 208, 0.12)';
-    const settingsCardSubtleBg = isDarkTheme ? 'rgba(255, 255, 255, 0.04)' : 'rgba(11, 87, 208, 0.04)';
-
-    function decorateSettingsActionButton(button, accentColor, options) {
-      if (!button || button.dataset.ysrpDecorated === 'true') return;
-      const accent = accentColor || styles.tabActive;
-      const hoverBg = (options && options.hoverBg) || settingsActionHoverBg;
-      Object.assign(button.style, {
-        background: styles.buttonBackground,
-        border: `1px solid ${accent}`,
-        borderRadius: '0.65rem',
-        cursor: 'pointer',
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: '0.5rem',
-        padding: '0.45rem 0.95rem',
-        color: accent,
-        fontWeight: '600',
-        fontSize: '1.3125rem',
-        minHeight: '2.5rem',
-        transition: 'background 0.2s ease, color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease'
-      });
-      button.dataset.ysrpDecorated = 'true';
-      const onEnter = () => {
-        button.style.background = hoverBg;
-      };
-      const onLeave = () => {
-        button.style.background = styles.buttonBackground;
-      };
-      button.addEventListener('pointerenter', onEnter);
-      button.addEventListener('pointerleave', onLeave);
-      button.addEventListener('focus', () => {
-        button.style.boxShadow = `0 0 0 3px ${hoverBg}`;
-      });
-      button.addEventListener('blur', () => {
-        button.style.boxShadow = 'none';
-      });
-    }
-
-    function applyFocusRing(inputEl, options) {
-      if (!inputEl || inputEl.dataset.ysrpFocusDecorated === 'true') return;
-      const focusColor = (options && options.color) || styles.tabActive || '#0b57d0';
-      inputEl.style.outline = 'none';
-      inputEl.style.boxShadow = '0 0 0 2px transparent';
-      const handleFocus = () => { inputEl.style.boxShadow = `0 0 0 2px ${focusColor}`; };
-      const handleBlur = () => { inputEl.style.boxShadow = '0 0 0 2px transparent'; };
-      inputEl.addEventListener('focus', handleFocus);
-      inputEl.addEventListener('blur', handleBlur);
-      inputEl.dataset.ysrpFocusDecorated = 'true';
-    }
-
-    function updateActionStatus(statusEl, message, color) {
-      if (!statusEl) return;
-      const hasMessage = Boolean(message && String(message).trim());
-      statusEl.textContent = hasMessage ? String(message).trim() : '';
-      statusEl.style.display = hasMessage ? 'block' : 'none';
-      if (hasMessage && color) {
-        statusEl.style.color = color;
-      } else if (!hasMessage) {
-        statusEl.style.color = styles.subtleText;
-      }
-    }
-
-    // Storage selection
-    const storageCard = document.createElement('div');
-    Object.assign(storageCard.style, settingsCardBaseStyles, {
-      fontSize: '1.3125rem',
-      lineHeight: '1.5'
-    });
-
-    const storageTitle = document.createElement('div');
-    Object.assign(storageTitle.style, {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.6rem'
-    });
-    const storageIcon = createIcon('database', storageAccentColor);
-    if (storageIcon) {
-      storageIcon.style.fontSize = '1.5rem';
-      storageIcon.style.color = storageAccentColor;
-    }
-    const storageTitleText = document.createElement('strong');
-    storageTitleText.textContent = localizeText('Storage Backend', '存储后端');
-    storageTitleText.style.fontSize = '1.5625rem';
-    storageTitleText.style.fontWeight = '700';
-    storageTitle.appendChild(storageIcon);
-    storageTitle.appendChild(storageTitleText);
-
-    const storageNote = document.createElement('div');
-    storageNote.textContent = localizeText('Choose where to store your progress data.', '选择保存进度的存储方式。');
-    storageNote.style.color = styles.subtleText;
-    storageNote.style.fontSize = '1.3125rem';
-    storageNote.style.marginTop = '-0.65rem';
-
-    const storageOptions = document.createElement('div');
-    Object.assign(storageOptions.style, {
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '0.65rem',
-      alignItems: 'stretch',
-      width: '100%',
-      margin: '0'
-    });
-
-    const storageOptionInstances = [];
-
-    function makeRadio(id, label, detail, badgeText) {
-      const wrap = document.createElement('label');
-      Object.assign(wrap.style, {
-        display: 'flex',
-        alignItems: 'center',
-        gap: '0.75rem',
-        borderRadius: '0.85rem',
-        border: `1px solid ${styles.inputBorder}`,
-        padding: '0.7rem 0.85rem',
-        width: '100%',
-        boxSizing: 'border-box',
-        cursor: 'pointer',
-        background: styles.buttonBackground,
-        transition: 'border-color 0.2s ease, box-shadow 0.2s ease, background 0.2s ease'
-      });
-      const input = document.createElement('input');
-      input.type = 'radio';
-      input.name = 'ysrp-storage-mode';
-      input.value = id;
-      input.style.display = 'none';
-
-      const badge = document.createElement('span');
-      badge.textContent = badgeText || id.toUpperCase();
-      Object.assign(badge.style, {
-        fontSize: '0.9rem',
-        fontWeight: '600',
-        padding: '0.2rem 0.55rem',
-        borderRadius: '0.6rem',
-        background: storageAccentBg,
-        color: storageAccentColor,
-        flexShrink: '0'
-      });
-
-      const textGroup = document.createElement('div');
-      Object.assign(textGroup.style, {
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '0.2rem',
-        minWidth: 0
-      });
-
-      const labelSpan = document.createElement('span');
-      labelSpan.textContent = label;
-      labelSpan.style.fontWeight = '600';
-      labelSpan.style.fontSize = '1.25rem';
-      labelSpan.style.color = styles.color;
-      textGroup.appendChild(labelSpan);
-
-      let detailSpan = null;
-      if (detail) {
-        detailSpan = document.createElement('span');
-        detailSpan.textContent = detail;
-        detailSpan.style.fontSize = '1.15rem';
-        detailSpan.style.color = styles.subtleText;
-        detailSpan.style.lineHeight = '1.35';
-        detailSpan.style.opacity = '0.95';
-        textGroup.appendChild(detailSpan);
-      }
-
-      wrap.appendChild(input);
-      wrap.appendChild(badge);
-      wrap.appendChild(textGroup);
-
-      storageOptionInstances.push({ input, wrap, badge, labelSpan, detailSpan });
-      return { wrap, input };
-    }
-
-    function refreshStorageChoiceStyles() {
-      storageOptionInstances.forEach(({ input, wrap, badge, labelSpan, detailSpan }) => {
-        const selected = Boolean(input.checked);
-        wrap.style.borderColor = selected ? storageAccentBorder : styles.inputBorder;
-        wrap.style.background = selected ? storageAccentBg : styles.buttonBackground;
-        wrap.style.boxShadow = selected ? storageOptionShadowActive : 'none';
-        badge.style.background = selected ? storageAccentColor : storageAccentBg;
-        badge.style.color = selected ? styles.background : storageAccentColor;
-        labelSpan.style.color = selected ? storageAccentColor : styles.color;
-        if (detailSpan) {
-          detailSpan.style.color = selected ? storageAccentColor : styles.subtleText;
-        }
-      });
-    }
-
-    const radioLocal = makeRadio(
-      'local',
-      localizeText('localStorage (default)', 'localStorage（默认）'),
-      localizeText('Fast storage scoped to this browser profile.', '快速、本地浏览器可用的存储。'),
-      localizeText('LOCAL', '本地')
-    );
-    const radioGM = makeRadio(
-      'gm',
-      localizeText('GM storage', 'GM 存储'),
-      localizeText('Tampermonkey-backed storage that can sync across profiles.', '由 Tampermonkey 提供、可在配置间同步的存储。'),
-      'GM'
-    );
-    const currentMode = Storage.getMode();
-    radioLocal.input.checked = currentMode === 'local';
-    radioGM.input.checked = currentMode === 'gm';
-    storageOptions.appendChild(radioLocal.wrap);
-    storageOptions.appendChild(radioGM.wrap);
-    refreshStorageChoiceStyles();
-    [radioLocal.input, radioGM.input].forEach(input => {
-      input.addEventListener('change', refreshStorageChoiceStyles);
-    });
-
-    const storageActions = document.createElement('div');
-    Object.assign(storageActions.style, {
-      display: 'flex',
-      alignItems: 'center',
-      flexWrap: 'wrap',
-      gap: '0.75rem'
-    });
-
-    const applyBtn = document.createElement('button');
-    Object.assign(applyBtn.style, {
-      background: styles.buttonBackground,
-      border: `1.333px solid ${storageAccentColor}`,
-      borderRadius: '0.7rem',
-      cursor: 'pointer',
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      gap: '0.4rem',
-      padding: '0.5rem 1.1rem',
-      color: storageAccentColor,
-      fontWeight: '700',
-      fontSize: '1.25rem',
-      minHeight: '2.75rem',
-      transition: 'background 0.2s ease, color 0.2s ease, opacity 0.2s ease'
-    });
-    applyBtn.title = localizeText('Switch storage backend and migrate data.', '切换存储方式并迁移数据。');
-    const arrowsIcon = createIcon('arrows', storageAccentColor);
-    const applySpan = document.createElement('span');
-    applySpan.textContent = localizeText('Apply & Migrate', '应用并迁移');
-    applyBtn.appendChild(arrowsIcon);
-    applyBtn.appendChild(applySpan);
-    applyBtn.addEventListener('pointerenter', () => {
-      applyBtn.style.background = storageAccentBg;
-    });
-    applyBtn.addEventListener('pointerleave', () => {
-      applyBtn.style.background = styles.buttonBackground;
-    });
-
-    const applyInfo = document.createElement('div');
-    applyInfo.style.color = styles.subtleText;
-    applyInfo.style.fontSize = '1.25rem';
-    applyInfo.style.lineHeight = '1.4';
-    applyInfo.style.flex = '1 1 220px';
-    applyInfo.textContent = localizeText('Migrates all saved records to the selected backend (moves data).', '将所有记录迁移至所选存储后端（移动数据）。');
-
-    storageActions.appendChild(applyBtn);
-    storageActions.appendChild(applyInfo);
-
-    storageCard.appendChild(storageTitle);
-    storageCard.appendChild(storageNote);
-    storageCard.appendChild(storageOptions);
-    storageCard.appendChild(storageActions);
-
-    // Export card
-    const exportCard = document.createElement('div');
-    Object.assign(exportCard.style, settingsCardBaseStyles, {
-      gap: '0.9rem'
-    });
-    const exportTitle = document.createElement('div');
-    Object.assign(exportTitle.style, {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.6rem'
-    });
-    const exportIcon = createIcon('download', styles.openButtonColor);
-    if (exportIcon) exportIcon.style.fontSize = '1.5rem';
-    const exportTitleSpan = document.createElement('strong');
-    exportTitleSpan.textContent = localizeText('Export Data', '导出数据');
-    exportTitleSpan.style.fontSize = '1.625rem';
-    exportTitleSpan.style.fontWeight = '700';
-    exportTitle.appendChild(exportIcon);
-    exportTitle.appendChild(exportTitleSpan);
-
-    const exportSubtitle = document.createElement('div');
-    exportSubtitle.textContent = localizeText('Back up your saved progress as JSON.', '将保存的进度备份为 JSON。');
-    exportSubtitle.style.color = styles.subtleText;
-    exportSubtitle.style.fontSize = '1.3125rem';
-    exportSubtitle.style.marginTop = '-0.65rem';
-
-    const exportActions = document.createElement('div');
-    Object.assign(exportActions.style, {
-      display: 'flex',
-      flexWrap: 'wrap',
-      gap: '0.75rem',
-      alignItems: 'stretch'
-    });
-
-    const btnCopyExport = document.createElement('button');
-    btnCopyExport.title = localizeText('Copy export JSON to clipboard', '复制导出的 JSON 到剪贴板');
-    btnCopyExport.appendChild(createIcon('copy', 'currentColor'));
-    btnCopyExport.appendChild(document.createTextNode(localizeText('Copy JSON', '复制 JSON')));
-    decorateSettingsActionButton(btnCopyExport, styles.openButtonColor);
-    btnCopyExport.style.flex = '1 1 12rem';
-
-    const btnDownloadExport = document.createElement('button');
-    btnDownloadExport.title = localizeText('Download export JSON as file', '下载导出的 JSON 文件');
-    btnDownloadExport.appendChild(createIcon('download', 'currentColor'));
-    btnDownloadExport.appendChild(document.createTextNode(localizeText('Download JSON', '下载 JSON')));
-    decorateSettingsActionButton(btnDownloadExport, styles.openButtonColor);
-    btnDownloadExport.style.flex = '1 1 12rem';
-
-    const exportHint = document.createElement('div');
-    exportHint.style.color = styles.subtleText;
-    exportHint.style.fontSize = '1.25rem';
-    exportHint.textContent = localizeText('Exports all saved records from the currently selected backend.', '导出当前存储后端中的所有记录。');
-
-    const exportStatus = document.createElement('div');
-    Object.assign(exportStatus.style, {
-      color: styles.subtleText,
-      fontSize: '1.1875rem',
-      display: 'none'
-    });
-
-    exportActions.appendChild(btnCopyExport);
-    exportActions.appendChild(btnDownloadExport);
-    exportCard.appendChild(exportTitle);
-    exportCard.appendChild(exportTitle);
-    exportCard.appendChild(exportSubtitle);
-    exportCard.appendChild(exportActions);
-    exportCard.appendChild(exportHint);
-    exportCard.appendChild(exportStatus);
-
-    // Import card
-    const importCard = document.createElement('div');
-    Object.assign(importCard.style, settingsCardBaseStyles, {
-      gap: '0.9rem'
-    });
-
-    const importTitle = document.createElement('div');
-    Object.assign(importTitle.style, {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.6rem'
-    });
-    const importIcon = createIcon('upload', styles.tabActive);
-    if (importIcon) importIcon.style.fontSize = '1.5rem';
-    const importTitleSpan = document.createElement('strong');
-    importTitleSpan.textContent = localizeText('Import Data', '导入数据');
-    importTitleSpan.style.fontSize = '1.625rem';
-    importTitleSpan.style.fontWeight = '700';
-    importTitle.appendChild(importIcon);
-    importTitle.appendChild(importTitleSpan);
-
-    const importSubtitle = document.createElement('div');
-    importSubtitle.textContent = localizeText('Restore a previous export to merge or replace your saved records.', '导入之前的导出文件，用于合并或替换记录。');
-    importSubtitle.style.color = styles.subtleText;
-    importSubtitle.style.fontSize = '1.3125rem';
-    importSubtitle.style.marginTop = '-0.65rem';
-
-    const importTextarea = document.createElement('textarea');
-    importTextarea.rows = 2;
-    Object.assign(importTextarea.style, {
-      width: '100%',
-      maxWidth: LARGE_FORM_CONTROL_MAX_WIDTH,
-      minHeight: '4rem',
-      height: '4rem',
-      background: styles.inputBg,
-      color: styles.color,
-      border: `1px solid ${styles.inputBorder}`,
-      borderRadius: '0.7rem',
-      padding: '0.75rem 1rem',
-      boxSizing: 'border-box',
-      fontFamily: 'inherit',
-      fontSize: '1.3125rem',
-      lineHeight: '1.6',
-      boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.08)',
-      resize: 'vertical'
-    });
-    importTextarea.placeholder = localizeText('Paste exported JSON here...', '在此粘贴导出的 JSON...');
-    applyFocusRing(importTextarea);
-
-    const importActions = document.createElement('div');
-    Object.assign(importActions.style, {
-      display: 'flex',
-      gap: '0.75rem',
-      flexWrap: 'wrap',
-      alignItems: 'stretch',
-      width: '100%',
-      marginTop: '0.35rem'
-    });
-
-    const btnImportText = document.createElement('button');
-    btnImportText.title = localizeText('Import from pasted JSON', '从粘贴的 JSON 导入');
-    btnImportText.appendChild(createIcon('upload', 'currentColor'));
-    btnImportText.appendChild(document.createTextNode(localizeText('Import from Text', '从文本导入')));
-    decorateSettingsActionButton(btnImportText, styles.tabActive);
-    btnImportText.style.flex = '1 1 12rem';
-
-    const fileInputWrapper = document.createElement('label');
-    Object.assign(fileInputWrapper.style, {
-      border: `1px dashed ${styles.inputBorder}`,
-      borderRadius: '0.7rem',
-      cursor: 'pointer',
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.65rem',
-      padding: '0.6rem 1rem',
-      color: styles.color,
-      flex: '1 1 14rem',
-      minHeight: '3.25rem',
-      boxSizing: 'border-box',
-      background: settingsCardSubtleBg,
-      transition: 'border-color 0.2s ease, color 0.2s ease, background 0.2s ease'
-    });
-    fileInputWrapper.tabIndex = 0;
-    fileInputWrapper.title = localizeText('Select an export JSON file', '选择要导入的 JSON 文件');
-
-    const fileInputIcon = createIcon('upload', styles.tabActive);
-    if (fileInputIcon) fileInputIcon.style.fontSize = '1.5rem';
-    const fileInputLabelText = document.createElement('span');
-    fileInputLabelText.textContent = localizeText('Choose File', '选择文件');
-    fileInputLabelText.style.fontSize = '1.3125rem';
-    fileInputLabelText.style.fontWeight = '700';
-
-    const fileInputDefaultLabel = localizeText('No file chosen', '未选择文件');
-    const fileNameDisplay = document.createElement('span');
-    fileNameDisplay.textContent = fileInputDefaultLabel;
-    Object.assign(fileNameDisplay.style, {
-      flex: '1',
-      color: styles.subtleText,
-      fontSize: '1.3125rem',
-      overflow: 'hidden',
-      textOverflow: 'ellipsis',
-      whiteSpace: 'nowrap'
-    });
-
-    const fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.accept = 'application/json';
-    const needsIOSFilePickerWorkaround = runtimeBrowserInfo.isIOS;
-    if (needsIOSFilePickerWorkaround) {
-      Object.assign(fileInputWrapper.style, {
-        position: 'relative',
-        overflow: 'hidden',
-        touchAction: 'manipulation'
-      });
-      Object.assign(fileInput.style, {
-        position: 'absolute',
-        inset: '0',
-        width: '100%',
-        height: '100%',
-        opacity: '0.01',
-        cursor: 'pointer',
-        margin: '0',
-        border: '0',
-        padding: '0'
-      });
-      fileInput.tabIndex = -1;
-    } else {
-      Object.assign(fileInput.style, {
-        display: 'none'
-      });
-    }
-
-    const toggleFileHover = hovered => {
-      fileInputWrapper.style.borderColor = hovered ? styles.tabActive : styles.inputBorder;
-      fileInputWrapper.style.color = hovered ? styles.tabActive : styles.color;
-      fileInputWrapper.style.background = hovered ? settingsActionHoverBg : settingsCardSubtleBg;
-    };
-    const pointerHoverTargets = needsIOSFilePickerWorkaround
-      ? [fileInputWrapper, fileInput]
-      : [fileInputWrapper];
-    pointerHoverTargets.forEach(target => {
-      target.addEventListener('pointerenter', () => toggleFileHover(true));
-      target.addEventListener('pointerleave', () => toggleFileHover(false));
-    });
-    fileInputWrapper.addEventListener('focusin', () => toggleFileHover(true));
-    fileInputWrapper.addEventListener('focusout', () => toggleFileHover(false));
-
-    fileInputWrapper.appendChild(fileInputIcon);
-    fileInputWrapper.appendChild(fileInputLabelText);
-    fileInputWrapper.appendChild(fileNameDisplay);
-    fileInputWrapper.appendChild(fileInput);
-    const openFilePicker = () => {
-      if (typeof fileInput.showPicker === 'function') {
-        try {
-          fileInput.showPicker();
-          return;
-        } catch (err) {
-          console.warn('fileInput.showPicker() failed; falling back to click.', err);
-        }
-      }
-      fileInput.click();
-    };
-    if (!needsIOSFilePickerWorkaround) {
-      fileInputWrapper.addEventListener('click', event => {
-        event.preventDefault();
-        openFilePicker();
-      });
-    }
-    fileInputWrapper.addEventListener('keydown', event => {
-      if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
-        event.preventDefault();
-        openFilePicker();
-      }
-    });
-
-    const overwriteRow = document.createElement('div');
-    Object.assign(overwriteRow.style, {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.65rem',
-      fontSize: '1.3125rem',
-      marginTop: '0.4rem',
-      background: settingsCardSubtleBg,
-      padding: '0.5rem 0.75rem',
-      borderRadius: '0.65rem',
-      flexWrap: 'wrap'
-    });
-    const overwriteLabelGroup = document.createElement('label');
-    Object.assign(overwriteLabelGroup.style, {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.5rem',
-      flex: '0 0 auto',
-      cursor: 'pointer',
-      position: 'relative'
-    });
-    const chk = document.createElement('input');
-    chk.type = 'checkbox';
-    Object.assign(chk.style, {
-      position: 'absolute',
-      left: '0',
-      top: '0',
-      width: '1.25rem',
-      height: '1.25rem',
-      margin: '0',
-      opacity: '0',
-      pointerEvents: 'none'
-    });
-    const checkboxVisual = document.createElement('span');
-    Object.assign(checkboxVisual.style, {
-      width: '1.25rem',
-      height: '1.25rem',
-      borderRadius: '0.35rem',
-      border: `2px solid ${styles.inputBorder}`,
-      background: styles.inputBg,
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      transition: 'background 0.18s ease, border-color 0.18s ease, color 0.18s ease',
-      boxShadow: isDarkTheme ? 'inset 0 0 0 1px rgba(255,255,255,0.05)' : 'none'
-    });
-    const checkboxTick = createIcon('check', styles.background);
-    if (checkboxTick) {
-      checkboxTick.style.fontSize = '1.0625rem';
-      checkboxTick.style.opacity = '0';
-    }
-    checkboxVisual.appendChild(checkboxTick);
-    const chkSpan = document.createElement('span');
-    chkSpan.textContent = localizeText('Overwrite', '覆盖');
-    chkSpan.style.fontSize = '1.5rem';
-    chkSpan.style.fontWeight = '600';
-    overwriteLabelGroup.appendChild(chk);
-    overwriteLabelGroup.appendChild(checkboxVisual);
-    overwriteLabelGroup.appendChild(chkSpan);
-    const refreshCheckboxVisual = () => {
-      const checked = chk.checked;
-      checkboxVisual.style.background = checked ? styles.tabActive : styles.inputBg;
-      checkboxVisual.style.borderColor = checked ? styles.tabActive : styles.inputBorder;
-      if (checkboxTick) {
-        checkboxTick.style.opacity = checked ? '1' : '0';
-        checkboxTick.style.color = checked ? styles.background : styles.subtleText;
-      }
-    };
-    chk.addEventListener('change', refreshCheckboxVisual);
-    refreshCheckboxVisual();
-
-    const overwriteHint = document.createElement('span');
-    overwriteHint.textContent = localizeText('Imports records into the currently selected backend.', '将记录导入到当前选择的存储后端。');
-    Object.assign(overwriteHint.style, {
-      color: styles.subtleText,
-      fontSize: '1.3125rem',
-      flex: '1 1 auto',
-      minWidth: '0',
-      lineHeight: '1.4',
-      textAlign: 'left',
-      whiteSpace: 'normal'
-    });
-    overwriteRow.appendChild(overwriteLabelGroup);
-    overwriteRow.appendChild(overwriteHint);
-
-    const importStatus = document.createElement('div');
-    Object.assign(importStatus.style, {
-      color: styles.subtleText,
-      fontSize: '1.1875rem',
-      display: 'none'
-    });
-
-    importActions.appendChild(btnImportText);
-    importActions.appendChild(fileInputWrapper);
-
-    importCard.appendChild(importTitle);
-    importCard.appendChild(importSubtitle);
-    importCard.appendChild(overwriteRow);
-    importCard.appendChild(importTextarea);
-    importCard.appendChild(importActions);
-    importCard.appendChild(importStatus);
-
-    // Transcript card
-    const transcriptCard = document.createElement('div');
-    Object.assign(transcriptCard.style, settingsCardBaseStyles, {
-      gap: '0.75rem'
-    });
-
-    const transcriptTitle = document.createElement('div');
-    Object.assign(transcriptTitle.style, {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.6rem'
-    });
-    const transcriptIcon = createIcon('captions', transcriptAccentColor);
-    if (transcriptIcon) transcriptIcon.style.fontSize = '1.5rem';
-    const transcriptTitleSpan = document.createElement('strong');
-    transcriptTitleSpan.textContent = localizeText('Subtitles · Transcript', '字幕与接口设置');
-    transcriptTitleSpan.style.fontSize = '1.5625rem';
-    transcriptTitleSpan.style.fontWeight = '700';
-    transcriptTitleSpan.style.color = styles.color;
-    transcriptTitle.appendChild(transcriptIcon);
-    transcriptTitle.appendChild(transcriptTitleSpan);
-
-    const transcriptDesc = document.createElement('div');
-    transcriptDesc.textContent = localizeText(
-      'Configure the OpenAI-compatible endpoint used for subtitles. Actual fetching now lives inside the Records tab.',
-      '配置字幕接口（兼容 OpenAI）。字幕获取功能位于“记录”标签。'
-    );
-    transcriptDesc.style.color = styles.subtleText;
-    transcriptDesc.style.fontSize = '1.3125rem';
-    transcriptDesc.style.marginTop = '-0.65rem';
-
-    const transcriptFields = document.createElement('div');
-    Object.assign(transcriptFields.style, {
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '0.75rem',
-      width: '100%'
-    });
-
-    const transcriptSettings = getTranscriptSettings();
-    const timeoutMinMinutes = typeof TRANSCRIPT_TIMEOUT_MIN_MINUTES === 'number' ? TRANSCRIPT_TIMEOUT_MIN_MINUTES : 1;
-    const timeoutMaxMinutes = typeof TRANSCRIPT_TIMEOUT_MAX_MINUTES === 'number' ? TRANSCRIPT_TIMEOUT_MAX_MINUTES : 60;
-    const timeoutDefaultMinutes = typeof TRANSCRIPT_TIMEOUT_DEFAULT_MINUTES === 'number'
-      ? TRANSCRIPT_TIMEOUT_DEFAULT_MINUTES
-      : 10;
-
-    function makeTranscriptInput(labelText, inputEl) {
-      const wrapper = document.createElement('label');
-      wrapper.style.display = 'flex';
-      wrapper.style.flexDirection = 'column';
-      wrapper.style.gap = '0.45rem';
-      wrapper.style.width = '100%';
-      wrapper.style.maxWidth = LARGE_FORM_CONTROL_MAX_WIDTH;
-      const span = document.createElement('span');
-      span.textContent = labelText;
-      span.style.fontSize = '1.15rem';
-      span.style.fontWeight = '600';
-      span.style.color = styles.subtleText;
-      wrapper.appendChild(span);
-      wrapper.appendChild(inputEl);
-      return wrapper;
-    }
-
-    function decorateTextInput(input) {
-      Object.assign(input.style, {
-        background: styles.inputBg,
-        color: styles.color,
-        border: `1px solid ${styles.inputBorder}`,
-        borderRadius: '0.6rem',
-        padding: '0.65rem 0.9rem',
-        minHeight: '3rem',
-        width: '100%',
-        maxWidth: LARGE_FORM_CONTROL_MAX_WIDTH,
-        boxSizing: 'border-box',
-        fontFamily: 'inherit',
-        fontSize: '1.2rem',
-        lineHeight: '1.5'
-      });
-      input.autocomplete = 'off';
-      input.spellcheck = false;
-      applyFocusRing(input);
-      return input;
-    }
-
-    const endpointInput = decorateTextInput(document.createElement('input'));
-    endpointInput.type = 'text';
-    endpointInput.placeholder = 'https://example.com/v1/chat/completions';
-    endpointInput.value = transcriptSettings.endpoint || '';
-
-    const modelInput = decorateTextInput(document.createElement('input'));
-    modelInput.type = 'text';
-    modelInput.placeholder = 'transcript';
-    modelInput.value = transcriptSettings.model || '';
-
-    const apiKeyInput = decorateTextInput(document.createElement('input'));
-    apiKeyInput.type = 'password';
-    apiKeyInput.placeholder = 'sk-***';
-    apiKeyInput.value = transcriptSettings.apiKey || '';
-    apiKeyInput.autocomplete = 'new-password';
-    const apiKeyToggle = document.createElement('button');
-    apiKeyToggle.type = 'button';
-    apiKeyToggle.textContent = localizeText('Show', '显示');
-    decorateSettingsActionButton(apiKeyToggle, transcriptAccentColor);
-    apiKeyToggle.style.minHeight = '3rem';
-    apiKeyToggle.style.padding = '0 1.1rem';
-    apiKeyToggle.addEventListener('click', (event) => {
+  function shieldFromPlayer(button, onActivate) {
+    const swallow = (event) => {
       event.preventDefault();
-      const isHidden = apiKeyInput.type === 'password';
-      apiKeyInput.type = isHidden ? 'text' : 'password';
-      apiKeyToggle.textContent = isHidden
-        ? localizeText('Hide', '隐藏')
-        : localizeText('Show', '显示');
-    });
-    const apiKeyInputRow = document.createElement('div');
-    Object.assign(apiKeyInputRow.style, {
-      display: 'flex',
-      alignItems: 'stretch',
-      gap: '0.5rem',
-      width: '100%'
-    });
-    apiKeyInput.style.flex = '1';
-    apiKeyInputRow.appendChild(apiKeyInput);
-    apiKeyInputRow.appendChild(apiKeyToggle);
-    const apiKeyField = makeTranscriptInput(localizeText('API Key', 'API 密钥'), apiKeyInputRow);
-
-    const timeoutInput = decorateTextInput(document.createElement('input'));
-    timeoutInput.type = 'number';
-    timeoutInput.min = String(timeoutMinMinutes);
-    timeoutInput.max = String(timeoutMaxMinutes);
-    timeoutInput.step = '1';
-    timeoutInput.placeholder = `${timeoutDefaultMinutes}`;
-    const timeoutDefaultMs = typeof TRANSCRIPT_DEFAULT_TIMEOUT_MS === 'number'
-      ? TRANSCRIPT_DEFAULT_TIMEOUT_MS
-      : timeoutDefaultMinutes * 60 * 1000;
-    const currentTimeoutMinutes = typeof transcriptMsToMinutes === 'function'
-      ? transcriptMsToMinutes((transcriptSettings.timeoutMs || timeoutDefaultMs))
-      : Math.round((transcriptSettings.timeoutMs || timeoutDefaultMs) / 60000);
-    timeoutInput.value = String(
-      Math.min(
-        timeoutMaxMinutes,
-        Math.max(timeoutMinMinutes, currentTimeoutMinutes)
-      )
-    );
-
-    transcriptFields.appendChild(makeTranscriptInput(localizeText('API Endpoint', 'API 接口路径'), endpointInput));
-    transcriptFields.appendChild(makeTranscriptInput(localizeText('Model', '模型名称'), modelInput));
-    transcriptFields.appendChild(apiKeyField);
-    transcriptFields.appendChild(makeTranscriptInput(localizeText('Timeout (minutes)', '超时时长（分钟）'), timeoutInput));
-
-    const transcriptVideoInfo = document.createElement('div');
-    Object.assign(transcriptVideoInfo.style, {
-      background: settingsCardSubtleBg,
-      borderRadius: '0.7rem',
-      padding: '0.7rem 0.95rem',
-      color: styles.subtleText,
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '0.45rem'
-    });
-
-    function makeInfoRow(labelText) {
-      const row = document.createElement('div');
-      Object.assign(row.style, {
-        display: 'flex',
-        alignItems: 'center',
-        gap: '0.5rem',
-        flexWrap: 'wrap'
-      });
-      const label = document.createElement('span');
-      label.textContent = labelText;
-      Object.assign(label.style, {
-        fontWeight: '600',
-        fontSize: '1.15rem',
-        color: styles.subtleText,
-        whiteSpace: 'nowrap'
-      });
-      const value = document.createElement('span');
-      Object.assign(value.style, {
-        fontSize: '1.25rem',
-        color: styles.color,
-        lineHeight: '1.45'
-      });
-      row.appendChild(label);
-      row.appendChild(value);
-      return { row, value };
-    }
-
-    const videoTitleRow = makeInfoRow(localizeText('Active video', '当前视频'));
-    const videoIdRow = makeInfoRow(localizeText('Video ID', '视频 ID'));
-    Object.assign(videoIdRow.value.style, {
-      fontFamily: 'monospace',
-      fontSize: '1.15rem',
-      background: isDarkTheme ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.05)',
-      padding: '0.15rem 0.4rem',
-      borderRadius: '0.35rem'
-    });
-    transcriptVideoInfo.appendChild(videoTitleRow.row);
-    transcriptVideoInfo.appendChild(videoIdRow.row);
-
-    function setTranscriptVideoInfo(detail) {
-      if (!detail) {
-        videoTitleRow.value.textContent = localizeText('No active video detected', '未检测到可用的影片');
-        videoIdRow.row.style.display = 'none';
-        return;
-      }
-      const vid = detail.videoId || getVideoId();
-      const title = detail.title || detail.value || getVideoName() || DEFAULT_VIDEO_NAME;
-      videoTitleRow.value.textContent = title;
-      if (vid) {
-        videoIdRow.value.textContent = vid;
-        videoIdRow.row.style.display = 'flex';
-      } else {
-        videoIdRow.row.style.display = 'none';
-      }
-    }
-    setTranscriptVideoInfo(configData.cachedVideoTitle);
-    const transcriptVideoEventName = (typeof CURRENT_VIDEO_STATUS_EVENT === 'string' && CURRENT_VIDEO_STATUS_EVENT) || 'ysrp-current-video-status';
-    document.addEventListener(transcriptVideoEventName, evt => setTranscriptVideoInfo(evt.detail));
-
-    let transcriptSaveTimer = null;
-    function persistTranscriptInputs() {
-      if (transcriptSaveTimer) clearTimeout(transcriptSaveTimer);
-      transcriptSaveTimer = setTimeout(() => {
-        const parsedTimeoutMinutes = parseFloat(timeoutInput.value);
-        const timeoutMsValue = Number.isFinite(parsedTimeoutMinutes) && parsedTimeoutMinutes > 0
-          ? (typeof clampTranscriptTimeoutMs === 'function'
-              ? clampTranscriptTimeoutMs(parsedTimeoutMinutes * 60 * 1000)
-              : Math.round(parsedTimeoutMinutes * 60 * 1000))
-          : undefined;
-        updateTranscriptSettings({
-          endpoint: endpointInput.value,
-          model: modelInput.value,
-          apiKey: apiKeyInput.value,
-          timeoutMs: timeoutMsValue
-        });
-      }, 250);
-    }
-
-    [endpointInput, modelInput, apiKeyInput, timeoutInput].forEach(input => {
-      input.addEventListener('input', persistTranscriptInputs);
-      input.addEventListener('change', persistTranscriptInputs);
-    });
-
-    transcriptCard.appendChild(transcriptTitle);
-    transcriptCard.appendChild(transcriptDesc);
-    transcriptCard.appendChild(transcriptFields);
-
-    const transcriptInfoCard = document.createElement('div');
-    Object.assign(transcriptInfoCard.style, settingsCardBaseStyles, {
-      gap: '0.65rem'
-    });
-    const transcriptInfoTitle = document.createElement('div');
-    Object.assign(transcriptInfoTitle.style, {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.6rem'
-    });
-    const transcriptInfoIcon = createIcon('note', styles.color);
-    if (transcriptInfoIcon) transcriptInfoIcon.style.fontSize = '1.4rem';
-    const transcriptInfoTitleSpan = document.createElement('strong');
-    transcriptInfoTitleSpan.textContent = localizeText('Status & Tips', '状态与提示');
-    transcriptInfoTitleSpan.style.fontSize = '1.4rem';
-    transcriptInfoTitleSpan.style.fontWeight = '700';
-    transcriptInfoTitle.appendChild(transcriptInfoIcon);
-    transcriptInfoTitle.appendChild(transcriptInfoTitleSpan);
-    const transcriptInfoHint = document.createElement('div');
-    transcriptInfoHint.textContent = localizeText(
-      'These settings apply instantly. Use the Records tab to fetch transcripts for specific videos.',
-      '设置立即生效，具体字幕获取请在“记录”标签中触发。'
-    );
-    transcriptInfoHint.style.color = styles.subtleText;
-    transcriptInfoHint.style.fontSize = '1.1875rem';
-    transcriptInfoHint.style.lineHeight = '1.5';
-    transcriptInfoCard.appendChild(transcriptInfoTitle);
-    transcriptInfoCard.appendChild(transcriptInfoHint);
-    transcriptInfoCard.appendChild(transcriptVideoInfo);
-
-    const languageCard = document.createElement('div');
-    Object.assign(languageCard.style, settingsCardBaseStyles, {
-      gap: '0.75rem'
-    });
-
-    const languageTitleRow = document.createElement('div');
-    Object.assign(languageTitleRow.style, {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '0.6rem'
-    });
-    const languageIcon = createIcon('globe', displayAccentColor);
-    if (languageIcon) languageIcon.style.fontSize = '1.5rem';
-    const languageTitleText = document.createElement('strong');
-    languageTitleText.textContent = localizeText('Interface Language', '界面语言');
-    languageTitleText.style.fontSize = '1.5625rem';
-    languageTitleText.style.fontWeight = '700';
-    languageTitleRow.appendChild(languageIcon);
-    languageTitleRow.appendChild(languageTitleText);
-
-    const languageDesc = document.createElement('div');
-    languageDesc.textContent = localizeText(
-      'Choose how the script UI should appear.',
-      '为脚本界面选择显示语言。'
-    );
-    languageDesc.style.color = styles.subtleText;
-    languageDesc.style.fontSize = '1.3125rem';
-    languageDesc.style.marginTop = '-0.65rem';
-
-    const languageOptionsWrapper = document.createElement('div');
-    Object.assign(languageOptionsWrapper.style, {
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '0.65rem',
-      width: '100%'
-    });
-
-    const languageStatus = document.createElement('div');
-    Object.assign(languageStatus.style, {
-      fontSize: '1.25rem',
-      color: styles.subtleText,
-      display: 'none'
-    });
-
-    const languageOptions = (typeof I18n !== 'undefined' && I18n && typeof I18n.getOptions === 'function')
-      ? I18n.getOptions()
-      : ['auto', 'zh', 'en'];
-    let languageState = getLanguageStateSnapshot();
-    const optionInputs = new Map();
-    const languageOptionWidgets = new Map();
-
-    function setLanguageStatus(message, color) {
-      if (!message) {
-        languageStatus.style.display = 'none';
-        languageStatus.textContent = '';
-        languageStatus.style.color = styles.subtleText;
-        return;
-      }
-      languageStatus.textContent = message;
-      languageStatus.style.display = 'block';
-      languageStatus.style.color = color || styles.tabActive;
-    }
-
-    function refreshLanguageOptionStyles(selectedValue) {
-      languageOptionWidgets.forEach(({ row, badge, labelLine, hintLine }, optionValue) => {
-        const selected = optionValue === selectedValue;
-        row.style.borderColor = selected ? displayAccentBorder : styles.inputBorder;
-        row.style.background = selected ? displayAccentBg : styles.buttonBackground;
-        row.style.boxShadow = selected ? displayAccentShadow : 'none';
-        badge.style.background = selected ? displayAccentColor : displayBadgeBg;
-        badge.style.color = selected ? styles.background : displayBadgeText;
-        labelLine.style.color = selected ? displayAccentColor : styles.color;
-        hintLine.style.color = selected ? displayAccentColor : styles.subtleText;
-      });
-    }
-
-    function syncOptionSelection(value) {
-      optionInputs.forEach((input, key) => {
-        input.checked = key === value;
-      });
-      refreshLanguageOptionStyles(value);
-    }
-
-    const languageMetaBox = document.createElement('div');
-    Object.assign(languageMetaBox.style, {
-      background: settingsCardSubtleBg,
-      borderRadius: '0.7rem',
-      padding: '0.7rem 0.95rem',
-      display: 'flex',
-      flexDirection: 'column',
-      gap: '0.45rem'
-    });
-    const activeRow = makeInfoRow(localizeText('Active language', '当前语言'));
-    const browserRow = makeInfoRow(localizeText('Browser language', '浏览器语言'));
-    languageMetaBox.appendChild(activeRow.row);
-    languageMetaBox.appendChild(browserRow.row);
-
-    function updateLanguageMeta(state) {
-      activeRow.value.textContent = getLanguageDisplayName(state.resolved);
-      browserRow.value.textContent = getLanguageDisplayName(state.browser);
-    }
-
-    function handleLanguageOptionChange(value) {
-      if (!value || !I18n || typeof I18n.setPreference !== 'function') return;
-      if (value === (configData.language && configData.language.preference)) {
-        setLanguageStatus(localizeText('Already using this language.', '当前已使用该语言。'), styles.subtleText);
-        return;
-      }
-      I18n.setPreference(value);
-      languageState = getLanguageStateSnapshot();
-      updateLanguageMeta(languageState);
-      syncOptionSelection(languageState.preference);
-      setLanguageStatus(localizeText('Language preference updated.', '语言偏好已更新。'), styles.tabActive);
-    }
-
-    languageOptions.forEach(optionValue => {
-      const optionRow = document.createElement('label');
-      Object.assign(optionRow.style, {
-        display: 'flex',
-        alignItems: 'center',
-        gap: '0.75rem',
-        padding: '0.7rem 0.85rem',
-        borderRadius: '0.85rem',
-        border: `1px solid ${styles.inputBorder}`,
-        cursor: 'pointer',
-        background: styles.buttonBackground
-      });
-
-      const input = document.createElement('input');
-      input.type = 'radio';
-      input.name = 'ysrp-language-preference';
-      input.value = optionValue;
-      input.style.display = 'none';
-      input.checked = optionValue === languageState.preference;
-      optionInputs.set(optionValue, input);
-
-      const badge = document.createElement('span');
-      badge.textContent = getLanguageBadgeLabel(optionValue);
-      Object.assign(badge.style, {
-        fontSize: '0.85rem',
-        fontWeight: '600',
-        padding: '0.2rem 0.5rem',
-        borderRadius: '0.6rem',
-        background: displayBadgeBg,
-        color: displayBadgeText,
-        flexShrink: '0'
-      });
-
-      const textGroup = document.createElement('div');
-      Object.assign(textGroup.style, {
-        display: 'flex',
-        flexDirection: 'column',
-        gap: '0.2rem',
-        minWidth: 0
-      });
-      const labelLine = document.createElement('span');
-      labelLine.textContent = getLanguageOptionLabel(optionValue);
-      Object.assign(labelLine.style, {
-        fontWeight: '600',
-        fontSize: '1.25rem',
-        color: styles.color
-      });
-      const hintLine = document.createElement('span');
-      hintLine.textContent = getLanguageOptionHint(optionValue);
-      Object.assign(hintLine.style, {
-        fontSize: '1.15rem',
-        color: styles.subtleText
-      });
-      textGroup.appendChild(labelLine);
-      textGroup.appendChild(hintLine);
-
-      optionRow.appendChild(input);
-      optionRow.appendChild(badge);
-      optionRow.appendChild(textGroup);
-
-      languageOptionWidgets.set(optionValue, {
-        row: optionRow,
-        badge,
-        labelLine,
-        hintLine
-      });
-
-      input.addEventListener('change', () => handleLanguageOptionChange(optionValue));
-      optionRow.addEventListener('click', event => {
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+    };
+    button.addEventListener("pointerdown", (event) => {
+      swallow(event);
+      onActivate();
+    }, { capture: true });
+    button.addEventListener("mousedown", swallow, { capture: true });
+    button.addEventListener("click", swallow, { capture: true });
+    button.addEventListener("touchstart", swallow, { capture: true, passive: false });
+  }
+  function setMessage(el, text, kind) {
+    el.textContent = text || "";
+    el.className = `ysrp-msg${kind ? ` is-${kind}` : ""}`;
+    el.style.display = text ? "" : "none";
+  }
+  function card(iconName, _accentVar, titleText, subtitle, ...children) {
+    return h("div", { class: "ysrp-card" }, h("div", { class: "ysrp-card-title" }, h("span", { class: "ysrp-card-icon" }, icon(iconName)), h("span", { text: titleText })), subtitle ? h("div", { class: "ysrp-card-sub", text: subtitle }) : null, ...children);
+  }
+  function field(label, control) {
+    return h("label", { class: "ysrp-field" }, h("span", { text: label }), control);
+  }
+  function ChoiceGroup(name, accentVar, options, selected, onPick) {
+    const items = new Map;
+    const node = h("div", { style: { display: "flex", flexDirection: "column", gap: "8px" } });
+    for (const option of options) {
+      const input = h("input", { type: "radio", name, value: option.value });
+      const row = h("label", { class: `ysrp-choice${option.disabled ? " is-disabled" : ""}`, dataset: { value: option.value } }, input, h("span", { class: "ysrp-choice-badge", text: option.badge }), h("span", { class: "ysrp-choice-text" }, h("span", { class: "ysrp-choice-label", text: option.label }), option.hint ? h("span", { class: "ysrp-choice-hint", text: option.hint }) : null));
+      row.style.setProperty("--ysrp-choice-accent", `var(${accentVar})`);
+      row.addEventListener("click", (event) => {
         event.preventDefault();
-        if (!input.checked) {
-          input.checked = true;
-          handleLanguageOptionChange(optionValue);
-        }
+        if (option.disabled)
+          return;
+        select(option.value);
+        onPick?.(option.value);
       });
-
-      languageOptionsWrapper.appendChild(optionRow);
-    });
-
-    updateLanguageMeta(languageState);
-    syncOptionSelection(languageState.preference);
-
-    languageCard.appendChild(languageTitleRow);
-    languageCard.appendChild(languageDesc);
-    languageCard.appendChild(languageOptionsWrapper);
-    languageCard.appendChild(languageMetaBox);
-    languageCard.appendChild(languageStatus);
-
-    prefsContainer.appendChild(storageCard);
-    prefsContainer.appendChild(exportCard);
-    prefsContainer.appendChild(importCard);
-    transcriptContainer.appendChild(transcriptCard);
-    transcriptContainer.appendChild(transcriptInfoCard);
-    displayContainer.appendChild(languageCard);
-
-    // Compose settings container (centered by default)
-    settingsContainer.appendChild(settingsContainerHeader);
-    settingsContainer.appendChild(tabsBar);
-    settingsContainer.appendChild(settingsContainerBody);
-    settingsContainerBody.appendChild(recordsContainer);
-    settingsContainerBody.appendChild(prefsContainer);
-    settingsContainerBody.appendChild(transcriptContainer);
-    settingsContainerBody.appendChild(displayContainer);
-
-    Object.assign(settingsContainer.style, {
-      all: 'initial',
-      position: 'fixed',
-      left: '50%',
-      top: '50%',
-      transform: 'translate(-50%, -50%)',
-      fontFamily: 'inherit',
-      flexDirection: 'column',
-      display: 'none',
-      boxShadow: 'rgba(0, 0, 0, 0.24) 0px 3px 8px',
-      border: styles.border,
-      padding: '1rem',
-      width: '50rem',
-      maxWidth: '90vw',
-      maxHeight: '80vh',
-      borderRadius: '.5rem',
-      background: styles.background,
-      zIndex: '9999', // Above backdrop and player overlays
-      color: styles.color,
-      overflow: 'hidden'
-    });
-
-    hostRoot.appendChild(settingsContainer);
-
-    // Tabs interactions
-    function setActiveAndLock(tab) {
-      setActiveTab(tab);
-      injectSettingsScrollbarsCSS();
+      items.set(option.value, { row, input });
+      node.appendChild(row);
     }
-    const availableTabs = [tabRecords, tabPrefs, tabTranscript, tabDisplay];
-    const defaultTabButton = availableTabs.find(btn => btn.dataset.tabId === opts.defaultTab) || tabRecords;
-    setActiveAndLock(defaultTabButton);
-    tabRecords.addEventListener('click', () => setActiveAndLock(tabRecords));
-    tabPrefs.addEventListener('click', () => setActiveAndLock(tabPrefs));
-    tabTranscript.addEventListener('click', () => setActiveAndLock(tabTranscript));
-    tabDisplay.addEventListener('click', () => setActiveAndLock(tabDisplay));
-
-    // Build initial list
-    rebuildRecords();
-
-    // Storage apply & migrate
-    applyBtn.addEventListener('click', () => {
-      const selected = radioGM.input.checked ? 'gm' : 'local';
-      const current = Storage.getMode();
-      if (selected === current) return;
-      const prevText = applySpan.textContent;
-      applySpan.textContent = localizeText('Migrating...', '正在迁移...');
-      applyBtn.style.opacity = '0.6';
-      applyBtn.style.pointerEvents = 'none';
-      try {
-        Storage.setMode(selected, { migrate: true, clearSource: true });
-        radioLocal.input.checked = selected === 'local';
-        radioGM.input.checked = selected === 'gm';
-        refreshStorageChoiceStyles();
-        modeBadge.textContent = selected === 'gm'
-          ? localizeText('GM Storage', 'GM 存储')
-          : localizeText('localStorage', '浏览器本地存储');
-        rebuildRecords();
-      } catch (e) {
-        console.error('Failed to switch storage:', e);
-      } finally {
-        setTimeout(() => {
-          applySpan.textContent = prevText;
-          applyBtn.style.opacity = '1';
-          applyBtn.style.pointerEvents = 'auto';
-        }, 500);
+    function select(value) {
+      for (const [key, item] of items) {
+        item.input.checked = key === value;
+        item.row.classList.toggle("is-selected", key === value);
       }
+    }
+    select(selected);
+    return { node, select, value: () => [...items].find(([, item]) => item.input.checked)?.[0] };
+  }
+  function secretInput(placeholder, showLabel, hideLabel, accentVar) {
+    const input = h("input", { class: "ysrp-input", type: "password", placeholder, autocomplete: "new-password", spellcheck: "false" });
+    const toggle = h("button", { type: "button", class: "ysrp-btn", text: showLabel() });
+    toggle.style.setProperty("--ysrp-btn-accent", `var(${accentVar})`);
+    toggle.addEventListener("click", () => {
+      const hidden = input.type === "password";
+      input.type = hidden ? "text" : "password";
+      toggle.textContent = hidden ? hideLabel() : showLabel();
     });
+    return { input, node: h("div", { class: "ysrp-inline" }, input, toggle) };
+  }
 
-    // Export actions
-    function triggerJsonDownload(json, fileName) {
-      const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      requestAnimationFrame(() => {
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+  // src/api/Modal.ts
+  var ui = null;
+  var activeTab = "records";
+  var keyListener = null;
+  var unsubscribeTabs = null;
+  function hostRoot() {
+    return document.querySelector("ytd-app #content") || document.querySelector("#content") || document.querySelector("#page-manager") || document.body;
+  }
+  var SCROLL_KEYS = new Set([" ", "PageUp", "PageDown", "Home", "End", "ArrowUp", "ArrowDown"]);
+  var scrollGuard = null;
+  function scrollableInside(target, container) {
+    for (let el = target;el && el !== container.parentElement; el = el.parentElement) {
+      if (el.scrollHeight > el.clientHeight && /(auto|scroll)/.test(getComputedStyle(el).overflowY))
+        return true;
+      if (el === container)
+        break;
+    }
+    return false;
+  }
+  function lockScroll() {
+    if (scrollGuard)
+      return;
+    scrollGuard = (event) => {
+      if (!ui)
+        return;
+      if (event instanceof KeyboardEvent) {
+        const target = event.target;
+        if (!SCROLL_KEYS.has(event.key) || ui.container.contains(target) || target?.closest?.("input, textarea, select, [contenteditable]"))
+          return;
+      } else if (scrollableInside(event.target, ui.container)) {
+        return;
+      }
+      event.preventDefault();
+    };
+    for (const type of ["wheel", "touchmove", "keydown"])
+      window.addEventListener(type, scrollGuard, { capture: true, passive: false });
+  }
+  function unlockScroll() {
+    if (!scrollGuard)
+      return;
+    for (const type of ["wheel", "touchmove", "keydown"])
+      window.removeEventListener(type, scrollGuard, { capture: true });
+    scrollGuard = null;
+  }
+  function isOpen() {
+    return Boolean(ui && ui.container.style.display !== "none" && ui.container.isConnected);
+  }
+  function open(tab) {
+    if (!keyListener)
+      return;
+    ensureFontAwesome();
+    if (!ui)
+      ui = build();
+    const root = hostRoot();
+    if (!ui.backdrop.isConnected)
+      root.appendChild(ui.backdrop);
+    if (!ui.container.isConnected)
+      root.appendChild(ui.container);
+    ui.backdrop.style.display = "block";
+    ui.container.style.display = "flex";
+    ui.setTab(tab || activeTab);
+    ui.refresh();
+    lockScroll();
+  }
+  function close() {
+    if (!ui)
+      return;
+    ui.container.style.display = "none";
+    ui.backdrop.style.display = "none";
+    unlockScroll();
+  }
+  function rebuild() {
+    const wasOpen = isOpen();
+    if (ui) {
+      ui.destroy();
+      ui = null;
+    }
+    if (wasOpen)
+      open(activeTab);
+    else
+      unlockScroll();
+  }
+  function mount() {
+    if (keyListener)
+      return;
+    keyListener = (event) => {
+      if (event.key !== "Escape" || !isOpen())
+        return;
+      event.stopPropagation();
+      const nested = ui?.container.querySelector(".ysrp-dialog-layer");
+      if (nested)
+        nested.remove();
+      else
+        close();
+    };
+    document.addEventListener("keydown", keyListener, true);
+    unsubscribeTabs = onSettingsTabsChange(() => {
+      if (ui)
+        rebuild();
+    });
+  }
+  function unmount() {
+    if (isOpen())
+      close();
+    ui?.destroy();
+    ui = null;
+    if (keyListener)
+      document.removeEventListener("keydown", keyListener, true);
+    keyListener = null;
+    unsubscribeTabs?.();
+    unsubscribeTabs = null;
+  }
+  function build() {
+    const cleanups = [];
+    const listen = (target, name, fn) => {
+      target.addEventListener(name, fn);
+      cleanups.push(() => target.removeEventListener(name, fn));
+    };
+    const backdrop = h("div", { class: "ysrp-backdrop ysrp-theme", style: { display: "none" } });
+    backdrop.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      close();
+    });
+    const title = h("h3");
+    const modeBadge = h("span", { class: "ysrp-badge" });
+    const spinner = h("span", { class: "ysrp-spinner", title: t("Refreshing…", "正在更新列表…") }, h("i", { class: "fa-solid fa-arrows-rotate fa-spin" }));
+    let count = list().length;
+    const renderTitle = () => {
+      const tab = tabs.find((x) => x.id === activeTab);
+      title.textContent = activeTab === "records" || !tab ? t("Saved Videos - ({count})", "已保存视频 - ({count})", { count }) : tab.label();
+    };
+    const setCount = (n) => {
+      count = n;
+      renderTitle();
+    };
+    const renderModeBadge = () => {
+      modeBadge.textContent = getMode() === "gm" ? t("GM Storage", "GM 存储") : t("localStorage", "浏览器本地存储");
+    };
+    renderModeBadge();
+    const closeButton = h("button", { type: "button", class: "ysrp-close", title: t("Close", "关闭"), "aria-label": t("Close", "关闭"), onclick: close }, icon("xmark"));
+    const header = h("div", { class: "ysrp-header" }, h("div", { class: "ysrp-header-left" }, title, modeBadge, spinner), closeButton);
+    const ctx = {
+      setCount,
+      spin: (on) => spinner.classList.toggle("is-active", on),
+      renderModeBadge,
+      listen
+    };
+    const tabs = getSettingsTabs();
+    const panes = new Map;
+    const tabButtons = new Map;
+    const nav = h("nav", { class: "ysrp-tabs ysrp-nav", role: "tablist" });
+    const groupLabels = { general: t("Video Memory", "视频记忆"), plugins: t("Plugins", "插件") };
+    const body = h("div", { class: "ysrp-body ysrp-settings-container-body" });
+    let lastGroup = "";
+    for (const tab of tabs) {
+      if (tab.group !== lastGroup) {
+        lastGroup = tab.group;
+        nav.appendChild(h("div", { class: "ysrp-nav-group", text: groupLabels[tab.group] }));
+      }
+      const pane = tab.render(ctx);
+      pane.node.classList.add("ysrp-pane");
+      pane.node.dataset.pane = tab.id;
+      panes.set(tab.id, pane);
+      const button = h("button", { type: "button", class: "ysrp-tab", role: "tab", dataset: { tabId: tab.id }, onclick: () => setTab(tab.id) }, icon(tab.icon), h("span", { text: tab.label() }));
+      tabButtons.set(tab.id, button);
+      nav.appendChild(button);
+      body.appendChild(pane.node);
+    }
+    nav.appendChild(h("div", { class: "ysrp-version" }, h("a", { href: "https://github.com/0-V-linuxdo/Youtube-Memory", target: "_blank", rel: "noreferrer", text: "Video Memory" }), h("span", { text: ` • ${"[20261010] v2.1.0"}` })));
+    const main = h("section", { class: "ysrp-main" }, header, body);
+    const container = h("div", { class: "ysrp-settings-container ysrp-theme", role: "dialog", "aria-modal": "true", style: { display: "none" } }, nav, main);
+    for (const name of ["keydown", "keyup", "keypress"]) {
+      container.addEventListener(name, (event) => {
+        if (event.key !== "Escape")
+          event.stopPropagation();
       });
     }
-
-    function openJsonDataInNewTab(json) {
-      if (typeof window === 'undefined' || typeof window.open !== 'function') return false;
-      try {
-        const dataUrl = `data:application/json;charset=utf-8,${encodeURIComponent(json)}`;
-        const win = window.open(dataUrl, '_blank', 'noopener');
-        return !!win;
-      } catch (err) {
-        console.warn('Opening data URL in new tab failed:', err);
-        return false;
+    function setTab(id) {
+      activeTab = panes.has(id) ? id : tabs[0]?.id ?? "records";
+      container.dataset.activeTab = activeTab;
+      modeBadge.style.display = activeTab === "records" || activeTab === "storage" ? "" : "none";
+      for (const [key, button] of tabButtons) {
+        const on = key === activeTab;
+        button.classList.toggle("is-active", on);
+        button.setAttribute("aria-selected", String(on));
+        panes.get(key)?.node.classList.toggle("is-active", on);
       }
+      renderTitle();
     }
+    return {
+      backdrop,
+      container,
+      setTab,
+      refresh() {
+        renderModeBadge();
+        for (const pane of panes.values())
+          pane.refresh?.();
+      },
+      destroy() {
+        for (const fn of cleanups)
+          fn();
+        for (const pane of panes.values())
+          pane.destroy?.();
+        container.remove();
+        backdrop.remove();
+      }
+    };
+  }
 
-    async function tryShareJsonExport(json, fileName) {
-      if (!iosShareCapabilities.canShareFile || typeof navigator === 'undefined' || typeof File !== 'function') {
-        return { status: 'unsupported' };
+  // src/api/Badge.ts
+  var node = null;
+  var textNode = null;
+  var state = { kind: "loading" };
+  var pending = null;
+  var resumedTimer = null;
+  var mountListeners = new Set;
+  function render() {
+    if (!textNode)
+      return;
+    textNode.classList.remove("is-error", "is-resumed");
+    textNode.removeAttribute("title");
+    switch (state.kind) {
+      case "saved":
+        textNode.textContent = formatTime(state.seconds);
+        textNode.title = t("Last saved position", "最近保存的位置");
+        break;
+      case "resumed":
+        textNode.textContent = t("Resumed {time}", "已恢复 {time}", { time: formatTime(state.seconds) });
+        textNode.classList.add("is-resumed");
+        break;
+      case "error":
+        textNode.textContent = t("⚠ Save failed", "⚠ 保存失败");
+        textNode.title = state.message || "";
+        textNode.classList.add("is-error");
+        break;
+      case "live":
+        textNode.textContent = t("Live · not saved", "直播 · 不保存");
+        break;
+      case "choosing":
+        textNode.textContent = t("Choose a position…", "请选择播放位置…");
+        break;
+      case "syncing":
+        textNode.textContent = t("Syncing…", "正在同步…");
+        break;
+      case "idle":
+        textNode.textContent = formatTime(0);
+        break;
+      default:
+        textNode.textContent = t("Loading...", "加载中...");
+    }
+  }
+  function show(next) {
+    if (state.kind === "resumed" && next.kind === "saved" && resumedTimer) {
+      pending = next;
+      return;
+    }
+    if (resumedTimer)
+      clearTimeout(resumedTimer);
+    resumedTimer = null;
+    pending = null;
+    state = next;
+    if (next.kind === "resumed") {
+      resumedTimer = setTimeout(() => {
+        resumedTimer = null;
+        state = pending || { kind: "saved", seconds: next.seconds };
+        pending = null;
+        render();
+      }, RESUMED_NOTICE_MS);
+    }
+    render();
+  }
+  function build2() {
+    textNode = h("span", { class: "last-save-info-text" });
+    const label = t("Open settings", "打开设置");
+    const button = h("button", { type: "button", class: "ysrp-settings-button", title: label, "aria-label": label }, icon("gear"));
+    shieldFromPlayer(button, () => open());
+    node = h("div", { class: "last-save-info-container" }, h("div", { class: "last-save-info" }, textNode, button));
+    render();
+  }
+  function ensure() {
+    const host = document.querySelector("#movie_player .ytp-left-controls");
+    if (!host)
+      return;
+    if (node && node.parentNode === host)
+      return;
+    document.querySelectorAll(".last-save-info-container").forEach((n) => n.remove());
+    if (!node)
+      build2();
+    host.appendChild(node);
+    for (const listener of mountListeners)
+      listener(node);
+  }
+  function rebuild2() {
+    node?.remove();
+    node = null;
+    textNode = null;
+    ensure();
+  }
+  function destroy() {
+    node?.remove();
+    node = null;
+    textNode = null;
+  }
+  var current = () => node?.isConnected ? node : null;
+  function onMount(listener) {
+    mountListeners.add(listener);
+    return () => mountListeners.delete(listener);
+  }
+
+  // src/api/ResumePrompt.ts
+  var node2 = null;
+  function close2() {
+    node2?.remove();
+    node2 = null;
+  }
+  function open2(times, onChoose) {
+    close2();
+    const host = document.getElementById("movie_player");
+    if (!host) {
+      onChoose("link");
+      return;
+    }
+    const choose = (choice) => {
+      close2();
+      onChoose(choice);
+    };
+    const option = (choice, iconName, label, seconds) => {
+      const button = h("button", { type: "button", class: `ysrp-btn ysrp-resume-${choice}`, dataset: { choice } }, icon(iconName), h("span", { text: `${label} ${formatTime(seconds)}` }));
+      shieldFromPlayer(button, () => choose(choice));
+      button.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ")
+          return;
+        event.preventDefault();
+        event.stopPropagation();
+        choose(choice);
+      });
+      return button;
+    };
+    const saved = option("saved", "clock-rotate-left", t("Saved progress", "上次进度"), times.saved);
+    const title = t("Where to continue?", "从哪里继续播放？");
+    const dialog = h("div", { class: "ysrp-theme ysrp-resume", role: "dialog", "aria-modal": "false", "aria-label": title }, h("div", { class: "ysrp-resume-title", text: title }), h("div", { class: "ysrp-resume-sub", text: t("This link starts at a different time than your saved progress.", "这个链接指定的时间与你上次的进度不同。") }), h("div", { class: "ysrp-row-actions" }, saved, option("link", "link", t("Link time", "链接时间"), times.link)));
+    for (const type of ["click", "mousedown", "pointerdown", "touchstart", "dblclick"]) {
+      dialog.addEventListener(type, (event) => event.stopPropagation());
+    }
+    dialog.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        choose("link");
       }
-      if (typeof navigator.share !== 'function') {
-        return { status: 'unsupported' };
+    });
+    node2 = dialog;
+    host.appendChild(dialog);
+    saved.focus({ preventScroll: true });
+  }
+
+  // src/api/Titles.ts
+  var originals = new Map;
+  var originalFetches = new Map;
+  var dearrows = new Map;
+  var dearrowFetches = new Map;
+  function rememberOriginal(id, title) {
+    const value = normTitle(title);
+    if (id && value)
+      originals.set(id, value);
+  }
+  function getOriginal(id) {
+    if (!id)
+      return Promise.resolve(null);
+    const known = originals.get(id);
+    if (known)
+      return Promise.resolve(known);
+    const pending = originalFetches.get(id);
+    if (pending)
+      return pending;
+    const url = OEMBED_API + encodeURIComponent(`https://youtu.be/${id}`);
+    const promise = fetch(url, { credentials: "omit", cache: "no-store" }).then((res) => res.ok ? res.json() : null).then((data) => {
+      const title = data && typeof data.title === "string" ? normTitle(data.title) : null;
+      if (title) {
+        originals.set(id, title);
+        updateIfExists(id, (rec) => Object.assign(rec, { originalTitle: title }));
       }
-      let shareFile;
-      try {
-        shareFile = new File([json], fileName, { type: 'application/json' });
-      } catch (err) {
-        console.warn('Failed to create shareable file:', err);
-        return { status: 'unsupported' };
-      }
-      if (typeof navigator.canShare === 'function') {
-        try {
-          if (!navigator.canShare({ files: [shareFile] })) {
-            return { status: 'unsupported' };
-          }
-        } catch (err) {
-          console.warn('navigator.canShare check failed:', err);
-          return { status: 'unsupported' };
-        }
-      }
-      try {
-        await navigator.share({
-          files: [shareFile],
-          title: localizeText('Video Memory Export', '视频记忆导出'),
-          text: localizeText('Choose “Save to Files” to store your backup.', '请选择“存储到文件”以保存备份。')
+      return title || null;
+    }).catch(() => null).finally(() => originalFetches.delete(id));
+    originalFetches.set(id, promise);
+    return promise;
+  }
+  function pickDeArrow(data) {
+    if (!data || !Array.isArray(data.titles))
+      return null;
+    const entry = data.titles.find((item) => item && typeof item.title === "string" && item.original !== true && (Boolean(item.locked) || (typeof item.votes === "number" ? item.votes : 0) >= 0));
+    return entry ? normTitle(entry.title) || null : null;
+  }
+  function cachedDeArrow(id) {
+    const hit = dearrows.get(id);
+    return hit && Date.now() - hit.at < DEARROW_TTL_MS ? hit : null;
+  }
+  function getDeArrow(id) {
+    if (!id)
+      return Promise.resolve(null);
+    const hit = cachedDeArrow(id);
+    if (hit)
+      return Promise.resolve(hit.title);
+    const pending = dearrowFetches.get(id);
+    if (pending)
+      return pending;
+    const promise = fetch(DEARROW_API + encodeURIComponent(id), { credentials: "omit", cache: "no-store" }).then((res) => {
+      if (res.status === 404)
+        return { titles: [] };
+      if (!res.ok)
+        throw new Error(`DeArrow HTTP ${res.status}`);
+      return res.json();
+    }).then((data) => {
+      let title = pickDeArrow(data);
+      if (title && sameTitle(title, originals.get(id)))
+        title = null;
+      dearrows.set(id, { title, at: Date.now() });
+      if (title)
+        emit(EVT_TITLE, { videoId: id, title });
+      return title;
+    }).catch(() => null).finally(() => dearrowFetches.delete(id));
+    dearrowFetches.set(id, promise);
+    return promise;
+  }
+  var knownOriginal = (id) => originals.get(id) || null;
+  function knownDeArrow(id) {
+    const hit = cachedDeArrow(id);
+    return hit ? hit.title : undefined;
+  }
+
+  // src/utils/youtube.ts
+  function getPlayer() {
+    const player = document.querySelector("#movie_player");
+    return player && typeof player.getCurrentTime === "function" && typeof player.getDuration === "function" && typeof player.seekTo === "function" ? player : null;
+  }
+  function urlVideoId() {
+    if (!/^\/watch\/?$/.test(location.pathname))
+      return null;
+    const id = new URLSearchParams(location.search).get("v");
+    return id && /^[\w-]+$/.test(id) ? id : null;
+  }
+  function urlHasStartTime() {
+    const params = new URLSearchParams(location.search);
+    if (params.has("t") || params.has("start"))
+      return true;
+    return /(?:^|[#&])t=/.test(location.hash.replace(/^#/, "&"));
+  }
+  function urlStartTime() {
+    const params = new URLSearchParams(location.search);
+    const hash = new URLSearchParams(location.hash.replace(/^#/, ""));
+    const raw = params.get("t") || params.get("start") || hash.get("t");
+    if (!raw)
+      return null;
+    if (/^\d+(?:\.\d+)?s?$/.test(raw))
+      return parseFloat(raw);
+    const m = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/.exec(raw);
+    return m ? Number(m[1] || 0) * 3600 + Number(m[2] || 0) * 60 + Number(m[3] || 0) : null;
+  }
+  function playerVideoData(player) {
+    try {
+      const data = player.getVideoData?.();
+      return data && typeof data === "object" ? data : {};
+    } catch {
+      return {};
+    }
+  }
+  function isAdShowing(player) {
+    return player.classList.contains("ad-showing") || player.classList.contains("ad-interrupting");
+  }
+  function isPlayerReadyFor(player, id) {
+    if (!player || !id)
+      return false;
+    const loadedId = playerVideoData(player).video_id;
+    if (loadedId && loadedId !== id)
+      return false;
+    let duration = 0;
+    try {
+      duration = Number(player.getDuration()) || 0;
+    } catch {}
+    return duration > 0 && !isAdShowing(player);
+  }
+
+  // src/plugins/_core/engine/index.ts
+  var logger3 = new Logger("Engine");
+  var session = null;
+  var timer = null;
+  var cleanups = [];
+  function newSession(id) {
+    return {
+      id,
+      phase: "waiting",
+      ready: true,
+      isLive: false,
+      duration: 0,
+      lastTime: null,
+      lastWritten: null,
+      lastWriteAt: 0,
+      restoreTarget: 0,
+      restoreStartedAt: 0,
+      lastSeekAt: 0,
+      seekAttempts: 0,
+      confirmations: 0
+    };
+  }
+  function titleFor(id, rec) {
+    const dearrow = knownDeArrow(id);
+    const original = knownOriginal(id) || rec && normTitle(rec.originalTitle) || null;
+    if (dearrow)
+      return { videoName: dearrow, originalTitle: original };
+    const stored = rec && !isPlaceholderTitle(rec.videoName) ? normTitle(rec.videoName) : null;
+    return { videoName: stored || original || UNKNOWN_TITLE, originalTitle: original };
+  }
+  function write(s) {
+    if (s.phase !== "tracking" || s.isLive || s.lastTime === null)
+      return false;
+    const position = Math.round(s.lastTime * 1000) / 1000;
+    try {
+      update(s.id, (rec) => {
+        const titles = titleFor(s.id, rec);
+        return Object.assign(rec, {
+          videoProgress: position,
+          saveDate: Date.now(),
+          videoName: titles.videoName,
+          originalTitle: titles.originalTitle || rec.originalTitle || null,
+          videoDuration: s.duration || rec.videoDuration
         });
-        return { status: 'shared' };
-      } catch (err) {
-        if (err && (err.name === 'AbortError' || err.name === 'NotAllowedError')) {
-          return { status: 'cancelled' };
-        }
-        console.warn('navigator.share failed:', err);
-        return { status: 'failed' };
-      }
+      });
+    } catch (err) {
+      logger3.error("Failed to save progress:", err);
+      show({ kind: "error", message: errorMessage(err) });
+      return false;
     }
-
-    btnCopyExport.addEventListener('click', async () => {
-      try {
-        const payload = Storage.exportAll();
-        const json = JSON.stringify(payload, null, 2);
-        await navigator.clipboard.writeText(json);
-        btnCopyExport.style.opacity = '0.7';
-        setTimeout(() => { btnCopyExport.style.opacity = '1'; }, 300);
-        updateActionStatus(
-          exportStatus,
-          localizeText('JSON copied to clipboard.', 'JSON 已复制到剪贴板。'),
-          styles.copyButtonColor
-        );
-      } catch (e) {
-        console.error('Copy export failed:', e);
-        updateActionStatus(
-          exportStatus,
-          localizeText('Copy export failed: {message}', '复制导出失败：{message}', { message: (e && e.message) || e || '' }),
-          styles.deleteButtonColor
-        );
+    s.lastWritten = position;
+    s.lastWriteAt = Date.now();
+    show({ kind: "saved", seconds: position });
+    emit(EVT_RECORD, { videoId: s.id, videoProgress: position });
+    return true;
+  }
+  function maybeWrite(s, force) {
+    if (!s || s.phase !== "tracking" || s.isLive || s.lastTime === null)
+      return;
+    if (s.lastWritten !== null && Math.abs(s.lastTime - s.lastWritten) < MIN_SAVE_DELTA)
+      return;
+    if (!force && Date.now() - s.lastWriteAt < SAVE_THROTTLE_MS)
+      return;
+    write(s);
+  }
+  function enterTracking(s, notice) {
+    s.phase = "tracking";
+    if (notice)
+      show(notice);
+    else if (s.lastWritten === null)
+      show({ kind: "idle" });
+  }
+  function beginRestore(s, player) {
+    const data = playerVideoData(player);
+    s.isLive = Boolean(data.isLive);
+    if (data.title)
+      rememberOriginal(s.id, data.title);
+    if (s.isLive)
+      return enterTracking(s, { kind: "live" });
+    const rec = get(s.id);
+    const target = rec ? Number(rec.videoProgress) : NaN;
+    if (!Number.isFinite(target) || target <= MIN_RESTORE_POSITION)
+      return enterTracking(s);
+    if (target >= s.duration - END_GUARD_SECONDS)
+      return enterTracking(s);
+    s.restoreTarget = target;
+    if (urlHasStartTime())
+      return askForChoice(s, player);
+    startRestoring(s, player);
+  }
+  function startRestoring(s, player) {
+    s.phase = "restoring";
+    s.restoreStartedAt = Date.now();
+    s.seekAttempts = 0;
+    seek(s, player);
+  }
+  function askForChoice(s, player) {
+    const linkTime = urlStartTime() ?? (Number(player.getCurrentTime()) || 0);
+    if (Math.abs(linkTime - s.restoreTarget) <= RESTORE_TOLERANCE)
+      return enterTracking(s);
+    s.phase = "choosing";
+    let wasPlaying = false;
+    try {
+      wasPlaying = player.getPlayerState?.() === 1;
+      player.pauseVideo?.();
+    } catch {}
+    show({ kind: "choosing" });
+    open2({ saved: s.restoreTarget, link: linkTime }, (choice) => {
+      if (session !== s || s.phase !== "choosing")
+        return;
+      const current = getPlayer();
+      if (choice === "saved" && current)
+        startRestoring(s, current);
+      else
+        enterTracking(s);
+      if (wasPlaying && current) {
+        try {
+          current.playVideo?.();
+        } catch {}
       }
     });
+  }
+  function seek(s, player) {
+    s.seekAttempts++;
+    s.lastSeekAt = Date.now();
+    s.confirmations = 0;
+    try {
+      player.seekTo(s.restoreTarget, true);
+    } catch (err) {
+      logger3.error("seekTo failed", err);
+    }
+  }
+  function continueRestore(s, player, now) {
+    const current = Number(player.getCurrentTime()) || 0;
+    if (Math.abs(current - s.restoreTarget) <= RESTORE_TOLERANCE) {
+      s.confirmations++;
+      if (s.confirmations >= 2) {
+        s.lastWritten = s.restoreTarget;
+        enterTracking(s, { kind: "resumed", seconds: s.restoreTarget });
+      }
+      return;
+    }
+    s.confirmations = 0;
+    if (s.seekAttempts >= RESTORE_MAX_ATTEMPTS || now - s.restoreStartedAt > RESTORE_TIMEOUT_MS) {
+      logger3.warn("Could not restore position for", s.id);
+      s.lastWritten = current;
+      enterTracking(s);
+      return;
+    }
+    if (now - s.lastSeekAt >= RESTORE_RETRY_MS)
+      seek(s, player);
+  }
+  function startSession(id) {
+    close2();
+    const s = id ? newSession(id) : null;
+    session = s;
+    show({ kind: "loading" });
+    if (s) {
+      const rec = get(s.id);
+      if (rec && normTitle(rec.originalTitle))
+        rememberOriginal(s.id, rec.originalTitle);
+      getDeArrow(s.id).then((title) => {
+        if (title)
+          updateIfExists(s.id, (r) => Object.assign(r, { videoName: title }));
+      });
+      const hooks = runRestoreHooks(s.id);
+      if (hooks.length) {
+        s.ready = false;
+        show({ kind: "syncing" });
+        const timeout = new Promise((resolve) => setTimeout(resolve, BEFORE_RESTORE_TIMEOUT_MS));
+        Promise.race([Promise.allSettled(hooks), timeout]).then(() => {
+          s.ready = true;
+          if (session === s && s.phase === "waiting")
+            show({ kind: "loading" });
+        });
+      }
+    }
+    emit(EVT_VIDEO, { videoId: id, title: id ? titleFor(id, get(id)).videoName : null });
+  }
+  function sample(s) {
+    const player = getPlayer();
+    if (!isPlayerReadyFor(player, s.id))
+      return null;
+    const time = Number(player.getCurrentTime());
+    s.duration = Number(player.getDuration()) || s.duration;
+    if (s.phase === "tracking" && Number.isFinite(time))
+      s.lastTime = time;
+    return player;
+  }
+  function tick() {
+    const id = urlVideoId();
+    if (!session || session.id !== id) {
+      if (session) {
+        sample(session);
+        maybeWrite(session, true);
+      }
+      startSession(id);
+    }
+    const s = session;
+    if (!s)
+      return;
+    const player = sample(s);
+    if (!player)
+      return;
+    if (s.phase === "waiting") {
+      if (!s.ready)
+        return;
+      beginRestore(s, player);
+    } else if (s.phase === "restoring")
+      continueRestore(s, player, Date.now());
+    if (s.phase === "tracking") {
+      if (s.lastTime === null)
+        sample(s);
+      maybeWrite(s, false);
+    }
+  }
+  function flush() {
+    const s = session;
+    if (!s || s.id !== urlVideoId()) {
+      tick();
+      return;
+    }
+    sample(s);
+    maybeWrite(s, true);
+  }
+  var safeTick = () => {
+    try {
+      tick();
+    } catch (err) {
+      logger3.error("tick failed", err);
+    }
+  };
+  var safeFlush = () => {
+    try {
+      flush();
+    } catch (err) {
+      logger3.error("flush failed", err);
+    }
+  };
+  function listen(target, name, handler, capture = false) {
+    target.addEventListener(name, handler, capture);
+    cleanups.push(() => target.removeEventListener(name, handler, capture));
+  }
+  var fromPlayer = (event) => Boolean(event.target?.closest?.("#movie_player"));
+  var currentId = () => session?.id ?? null;
+  var currentDuration = () => session?.duration ?? 0;
+  var engine_default = definePlugin({
+    name: "Engine",
+    title: () => t("Progress engine", "进度引擎"),
+    description: () => t("Saves the playback position and resumes it when you come back.", "保存播放位置，回来时自动接着播放。"),
+    icon: "gauge-high",
+    authors: [Devs.V],
+    required: true,
+    start() {
+      cleanup();
+      timer = setInterval(safeTick, TICK_MS);
+      setTimeout(safeTick, 0);
+      for (const name of ["pause", "seeked"])
+        listen(document, name, (event) => {
+          if (fromPlayer(event))
+            safeFlush();
+        }, true);
+      for (const name of ["loadedmetadata", "durationchange", "playing"])
+        listen(document, name, (event) => {
+          if (fromPlayer(event))
+            safeTick();
+        }, true);
+      listen(window, "yt-navigate-start", safeFlush, true);
+      listen(window, "yt-navigate-finish", safeTick, true);
+      listen(window, "popstate", safeTick);
+      listen(document, "visibilitychange", () => document.hidden ? safeFlush() : safeTick());
+      listen(window, "pagehide", safeFlush);
+      listen(window, "beforeunload", safeFlush);
+    },
+    stop() {
+      safeFlush();
+      if (timer)
+        clearInterval(timer);
+      timer = null;
+      for (const fn of cleanups.splice(0))
+        fn();
+      session = null;
+    }
+  });
 
-    btnDownloadExport.addEventListener('click', async () => {
+  // src/plugins/_core/playerBadge/index.ts
+  var timer2 = null;
+  var languageTimer = null;
+  var offLanguage = null;
+  var ensure2 = () => ensure();
+  var playerBadge_default = definePlugin({
+    name: "PlayerBadge",
+    title: () => t("Player badge", "播放器徽标"),
+    description: () => t("Shows the last saved time and the settings button in the player controls.", "在播放器控制栏显示最近保存的时间和设置按钮。"),
+    icon: "tag",
+    authors: [Devs.V],
+    required: true,
+    start() {
+      timer2 = setInterval(ensure2, TICK_MS);
+      window.addEventListener("yt-navigate-finish", ensure2, true);
+      ensure2();
+      offLanguage = on(EVT_LANG, () => {
+        if (languageTimer)
+          clearTimeout(languageTimer);
+        languageTimer = setTimeout(() => rebuild2(), 50);
+      });
+    },
+    stop() {
+      if (timer2)
+        clearInterval(timer2);
+      timer2 = null;
+      window.removeEventListener("yt-navigate-finish", ensure2, true);
+      offLanguage?.();
+      offLanguage = null;
+      close2();
+      destroy();
+    }
+  });
+
+  // src/plugins/_core/settings/DisplayPane.ts
+  function DisplayPane() {
+    const names = { zh: "中文", en: "English" };
+    const status = h("div", { class: "ysrp-msg", style: { display: "none" } });
+    const choice = ChoiceGroup("ysrp-language", "--ysrp-display", [
+      { value: "auto", badge: t("Auto", "自动"), label: t("Auto", "自动"), hint: t("Match the browser language automatically.", "自动跟随浏览器语言。") },
+      { value: "zh", badge: "中文", label: "中文", hint: "始终使用简体中文。" },
+      { value: "en", badge: "English", label: "English", hint: "Always use English." }
+    ], languagePreference(), (value) => {
+      if (!setLanguagePreference(value))
+        setMessage(status, t("Already using this language.", "当前已使用该语言。"));
+    });
+    choice.node.classList.add("ysrp-language-options");
+    return {
+      node: h("div", {}, card("globe", "--ysrp-display", t("Interface Language", "界面语言"), t("Choose how the script UI should appear.", "为脚本界面选择显示语言。"), choice.node, h("div", { class: "ysrp-info" }, h("div", { class: "ysrp-info-row" }, h("b", { text: t("Active language", "当前语言") }), h("span", { text: names[resolvedLanguage()] })), h("div", { class: "ysrp-info-row" }, h("b", { text: t("Browser language", "浏览器语言") }), h("span", { text: names[detectBrowserLanguage()] }))), status))
+    };
+  }
+
+  // src/plugins/_core/settings/PluginsPane.ts
+  function Switch(checked, label, onChange, disabled = false) {
+    const node = h("button", { type: "button", class: "ysrp-switch", role: "switch", "aria-label": label });
+    const set = (value) => node.setAttribute("aria-checked", String(value));
+    set(checked);
+    node.disabled = disabled;
+    node.addEventListener("click", () => {
+      if (node.disabled)
+        return;
+      const next = node.getAttribute("aria-checked") !== "true";
+      set(next);
+      onChange(next);
+    });
+    return { node, set };
+  }
+  var visibleSettings = (plugin) => plugin.settings ? Object.entries(plugin.settings.def).filter(([, def]) => !def.hidden) : [];
+  function SettingRow(settings, key, def) {
+    const store = settings.store;
+    const label = h("div", { class: "ysrp-row-label" }, h("div", { class: "ysrp-row-title", text: def.description() }));
+    if (def.type === 2 /* BOOLEAN */) {
+      const sw = Switch(Boolean(store[key]), def.description(), (next) => {
+        store[key] = next;
+      });
+      sw.node.dataset.setting = key;
+      return { node: h("div", { class: "ysrp-setting-row" }, label, sw.node), reset: () => sw.set(Boolean(store[key])) };
+    }
+    if (def.type === 3 /* SELECT */) {
+      const select = h("select", { class: "ysrp-select", dataset: { setting: key } }, def.options.map((option) => h("option", { value: option.value, text: option.label() })));
+      select.value = String(store[key]);
+      select.addEventListener("change", () => {
+        store[key] = select.value;
+      });
+      return { node: h("div", { class: "ysrp-setting-row" }, label, select), reset: () => {
+        select.value = String(store[key]);
+      } };
+    }
+    const input = h("input", {
+      class: "ysrp-input",
+      type: def.type === 1 /* NUMBER */ ? "number" : "text",
+      placeholder: def.type === 0 /* STRING */ ? def.placeholder : undefined,
+      min: def.type === 1 /* NUMBER */ ? def.min : undefined,
+      max: def.type === 1 /* NUMBER */ ? def.max : undefined,
+      dataset: { setting: key }
+    });
+    input.value = String(store[key] ?? "");
+    input.addEventListener("change", () => {
+      store[key] = def.type === 1 /* NUMBER */ ? Number(input.value) : input.value;
+    });
+    return { node: h("div", { class: "ysrp-setting-row is-stacked" }, label, input), reset: () => {
+      input.value = String(store[key] ?? "");
+    } };
+  }
+  function openPluginDialog(plugin, host) {
+    host.querySelector(".ysrp-dialog-layer")?.remove();
+    const settings = plugin.settings;
+    const entries = visibleSettings(plugin);
+    const rows = entries.map(([key, def]) => SettingRow(settings, key, def));
+    const layer = h("div", { class: "ysrp-dialog-layer" });
+    const close = () => layer.remove();
+    let armed = null;
+    const reset = h("button", { type: "button", class: "ysrp-btn is-small", text: t("Reset", "重置") });
+    reset.addEventListener("click", () => {
+      if (!armed) {
+        reset.textContent = t("Click again to reset", "再点一次确认重置");
+        reset.classList.add("is-armed");
+        armed = setTimeout(() => {
+          armed = null;
+          reset.classList.remove("is-armed");
+          reset.textContent = t("Reset", "重置");
+        }, 3000);
+        return;
+      }
+      clearTimeout(armed);
+      armed = null;
+      for (const [key, def] of entries) {
+        if (getPluginSettings(plugin.name)?.[key] !== undefined)
+          setPluginSetting(plugin.name, key, defaultValue(def));
+      }
+      for (const row of rows)
+        row.reset();
+      reset.classList.remove("is-armed");
+      reset.textContent = t("Reset", "重置");
+    });
+    const dialog = h("div", { class: "ysrp-dialog", role: "dialog", "aria-label": plugin.title(), dataset: { plugin: plugin.name } }, h("button", { type: "button", class: "ysrp-close ysrp-dialog-close", title: t("Close", "关闭"), "aria-label": t("Close", "关闭"), onclick: close }, icon("xmark")), h("div", { class: "ysrp-dialog-header" }, h("div", { class: "ysrp-dialog-title", text: plugin.title() }), h("div", { class: "ysrp-dialog-desc", text: plugin.description() })), h("div", { class: "ysrp-separator" }), h("div", { class: "ysrp-dialog-field" }, h("div", { class: "ysrp-dialog-label", text: t("Authors", "作者") }), h("div", { class: "ysrp-dialog-text", text: plugin.authors.join(", ") })), h("div", { class: "ysrp-dialog-field is-grow" }, h("div", { class: "ysrp-dialog-label", text: t("Settings", "设置") }), rows.length ? h("div", { class: "ysrp-dialog-settings" }, rows.map((r) => r.node)) : h("div", { class: "ysrp-dialog-text", text: t("No configurable settings.", "没有可配置的设置。") })), rows.length ? h("div", { class: "ysrp-dialog-footer" }, reset) : null);
+    layer.addEventListener("click", (event) => {
+      if (event.target === layer)
+        close();
+    });
+    layer.appendChild(dialog);
+    host.appendChild(layer);
+  }
+  function PluginCard(plugin, openSettings) {
+    const sw = Switch(isPluginEnabled(plugin.name), plugin.title(), (next) => setPluginEnabled(plugin.name, next), Boolean(plugin.required));
+    sw.node.dataset.plugin = plugin.name;
+    const controls = h("div", { class: "ysrp-card-controls" });
+    if (visibleSettings(plugin).length) {
+      controls.appendChild(iconButton("sliders", t("Settings", "设置"), () => openSettings(plugin), "ysrp-plugin-config"));
+    }
+    controls.appendChild(sw.node);
+    const node = h("div", { class: `ysrp-plugin${plugin.required ? " is-required" : ""}`, dataset: { plugin: plugin.name } }, h("div", { class: "ysrp-plugin-body" }, h("div", { class: "ysrp-plugin-head" }, h("div", { class: "ysrp-plugin-name" }, h("span", { class: "ysrp-plugin-icon" }, icon(plugin.icon || "puzzle-piece")), h("span", { class: "ysrp-plugin-title", text: plugin.title(), title: plugin.title() }), plugin.required ? h("span", { class: "ysrp-plugin-tag", title: t("Core plugin, always on", "核心插件，始终开启") }, icon("circle-exclamation")) : null), controls), h("div", { class: "ysrp-plugin-desc", text: plugin.description() })), h("div", { class: "ysrp-separator" }), h("div", { class: "ysrp-plugin-footer", text: plugin.authors.join(", ") || " " }));
+    return {
+      node,
+      plugin,
+      render() {
+        sw.set(isPluginEnabled(plugin.name));
+        sw.node.title = plugin.required ? t("Core plugin, always on", "核心插件，始终开启") : isPluginEnabled(plugin.name) ? t("Turn off", "关闭") : t("Turn on", "开启");
+      }
+    };
+  }
+  function PluginsPane() {
+    const all = listPlugins();
+    const optional = all.filter((p) => !p.required);
+    const required = all.filter((p) => p.required);
+    let search = "";
+    let filter = "all";
+    const node = h("div", { class: "ysrp-plugins" });
+    const openSettings = (plugin) => {
+      const host = node.closest(".ysrp-settings-container");
+      if (host)
+        openPluginDialog(plugin, host);
+    };
+    const cards = [...optional, ...required].map((p) => PluginCard(p, openSettings));
+    const input = h("input", { class: "ysrp-input ysrp-search", type: "text", placeholder: t("Search {n} plugins...", "搜索 {n} 个插件...", { n: all.length }) });
+    const select = h("select", { class: "ysrp-select ysrp-filter" }, h("option", { value: "all", text: t("All", "全部") }), h("option", { value: "enabled", text: t("Enabled", "已开启") }), h("option", { value: "disabled", text: t("Disabled", "已关闭") }));
+    const userGrid = h("div", { class: "ysrp-grid" });
+    const requiredGrid = h("div", { class: "ysrp-grid" });
+    const divider = h("div", { class: "ysrp-separator" });
+    const empty = h("div", { class: "ysrp-empty", text: t("No plugins match your search.", "没有符合条件的插件。") });
+    function apply() {
+      const q = search.trim().toLowerCase();
+      const visible = (c) => {
+        const enabled = isPluginEnabled(c.plugin.name);
+        if (filter === "enabled" && !enabled)
+          return false;
+        if (filter === "disabled" && enabled)
+          return false;
+        return !q || `${c.plugin.name} ${c.plugin.title()} ${c.plugin.description()} ${c.plugin.authors.join(" ")}`.toLowerCase().includes(q);
+      };
+      const user = cards.filter((c) => !c.plugin.required && visible(c));
+      const core = cards.filter((c) => c.plugin.required && visible(c));
+      userGrid.replaceChildren(...user.map((c) => c.node));
+      requiredGrid.replaceChildren(...core.map((c) => c.node));
+      userGrid.hidden = !user.length;
+      requiredGrid.hidden = !core.length;
+      divider.hidden = !user.length || !core.length;
+      empty.hidden = Boolean(user.length || core.length);
+    }
+    input.addEventListener("input", () => {
+      search = input.value;
+      apply();
+    });
+    select.addEventListener("change", () => {
+      filter = select.value;
+      apply();
+    });
+    node.append(h("div", { class: "ysrp-pane-hint", text: t("Turn features on or off. Changes apply immediately. Click the sliders icon to configure.", "开启或关闭各项功能，立即生效。点滑杆图标进行配置。") }), h("div", { class: "ysrp-search-bar" }, input, select), userGrid, divider, requiredGrid, empty);
+    apply();
+    const off = onPluginToggle(() => {
+      for (const c of cards)
+        c.render();
+      apply();
+    });
+    return {
+      node,
+      refresh() {
+        for (const c of cards)
+          c.render();
+        apply();
+      },
+      destroy: off
+    };
+  }
+
+  // src/plugins/_core/settings/RecordsPane.ts
+  var logger4 = new Logger("Records");
+  function RecordsPane(ctx) {
+    const list2 = h("ul", { class: "ysrp-list" });
+    const empty = h("div", { class: "ysrp-empty", text: t("No saved videos yet.", "还没有保存的视频。") });
+    const node = h("div", {}, empty, list2);
+    const rows = new Map;
+    let renderedKey = null;
+    function render() {
+      ctx.spin(true);
       try {
-        const payload = Storage.exportAll();
-        const json = JSON.stringify(payload, null, 2);
-        const now = new Date();
-        const pad = value => String(value).padStart(2, '0');
-        const formattedDate = `${now.getFullYear()} ${pad(now.getMonth() + 1)} ${pad(now.getDate())}`;
-        const formattedTime = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
-        const fileName = `[Youtube] Video Memory「${formattedDate}」「${formattedTime}」.json`;
-        if (runtimeBrowserInfo.isIOS) {
-          if (iosShareCapabilities.canShareFile) {
-            const shareResult = await tryShareJsonExport(json, fileName);
-            if (shareResult.status === 'shared') {
-              updateActionStatus(
-                exportStatus,
-                localizeText('Share sheet opened. Choose “Save to Files”.', '已打开系统分享面板，请选择“存储到文件”。'),
-                styles.openButtonColor
-              );
+        const current = currentId();
+        const items = list().sort((a, b) => Number(b.id === current) - Number(a.id === current) || (Number(b.rec.saveDate) || 0) - (Number(a.rec.saveDate) || 0));
+        ctx.setCount(items.length);
+        empty.style.display = items.length ? "none" : "";
+        const key = `${current}|${items.map((item) => item.id).join(",")}`;
+        if (key !== renderedKey) {
+          renderedKey = key;
+          const next = new Map;
+          list2.replaceChildren(...items.map(({ id, rec }) => {
+            const row = rows.get(id) || RecordRow(id, rec, () => remove2(id));
+            next.set(id, row);
+            return row.node;
+          }));
+          rows.clear();
+          next.forEach((row, id) => rows.set(id, row));
+        }
+        for (const { id, rec } of items)
+          rows.get(id)?.update(rec, id === current);
+      } finally {
+        ctx.spin(false);
+      }
+    }
+    function remove2(id) {
+      remove(id);
+      for (const action of getRecordActions())
+        action.onRemoved?.(id);
+      render();
+    }
+    ctx.listen(document, EVT_RECORD, () => {
+      if (isOpen())
+        render();
+    });
+    ctx.listen(document, EVT_VIDEO, () => {
+      if (isOpen())
+        render();
+    });
+    ctx.listen(document, EVT_TITLE, (event) => {
+      const detail = event.detail;
+      if (detail && rows.has(detail.videoId))
+        rows.get(detail.videoId)?.setDeArrow(detail.title);
+    });
+    const offActions = onRecordActionsChange(() => {
+      rows.clear();
+      renderedKey = null;
+      if (isOpen())
+        render();
+    });
+    return { node, refresh: render, destroy: offActions };
+  }
+  function RecordRow(id, initialRecord, onDelete) {
+    const url = `https://www.youtube.com/watch?v=${id}`;
+    let rec = initialRecord;
+    let isCurrent = false;
+    let original = normTitle(rec.originalTitle) || knownOriginal(id) || null;
+    let dearrow;
+    let showOriginal = false;
+    const titleEl = h("span", { class: "ysrp-title" });
+    const pctEl = h("span", { class: "ysrp-pct" });
+    const daButton = h("button", { type: "button", class: "ysrp-ibtn ysrp-da" }, deArrowIcon());
+    daButton.addEventListener("click", () => {
+      if (typeof dearrow !== "string")
+        return;
+      showOriginal = !showOriginal;
+      if (showOriginal && !original) {
+        titleEl.textContent = t("Loading original title…", "正在获取原标题…");
+        getOriginal(id).then((value) => {
+          original = value || original;
+          renderTitle();
+        });
+        return;
+      }
+      renderTitle();
+    });
+    const storedName = () => isPlaceholderTitle(rec.videoName) ? null : normTitle(rec.videoName);
+    function renderTitle() {
+      const missing = t("Original title unavailable", "未找到原标题");
+      if (dearrow === null) {
+        daButton.remove();
+        titleEl.textContent = original || storedName() || missing;
+        return;
+      }
+      if (dearrow === undefined) {
+        daButton.disabled = true;
+        daButton.classList.add("is-pending");
+        daButton.title = t("Checking DeArrow title…", "正在检测 DeArrow 标题…");
+        titleEl.textContent = original || storedName() || t("Loading original title…", "正在获取原标题…");
+        return;
+      }
+      daButton.disabled = false;
+      daButton.classList.remove("is-pending");
+      daButton.classList.toggle("is-off", showOriginal);
+      daButton.title = showOriginal ? t("Show DeArrow title", "恢复 DeArrow 标题") : t("Show original title", "显示原标题");
+      daButton.setAttribute("aria-label", daButton.title);
+      titleEl.textContent = showOriginal ? original || missing : dearrow;
+    }
+    function setDeArrow(value) {
+      const title = normTitle(value);
+      if (title && !sameTitle(title, original)) {
+        dearrow = title;
+        if (rec.videoName !== title)
+          updateIfExists(id, (r) => Object.assign(r, { videoName: title }));
+      } else {
+        dearrow = null;
+        if (isPlaceholderTitle(rec.videoName) && original)
+          updateIfExists(id, (r) => Object.assign(r, { videoName: original }));
+      }
+      renderTitle();
+    }
+    function resolveTitles() {
+      const cached = knownDeArrow(id);
+      if (cached !== undefined)
+        setDeArrow(cached);
+      else if (original && storedName() && !sameTitle(storedName(), original)) {
+        dearrow = storedName();
+        renderTitle();
+      }
+      const originalReady = original ? Promise.resolve(original) : getOriginal(id);
+      originalReady.then((value) => {
+        if (value && !original) {
+          original = value;
+          renderTitle();
+        }
+        if (knownDeArrow(id) !== undefined || typeof dearrow === "string")
+          return;
+        return getDeArrow(id).then(setDeArrow);
+      });
+    }
+    const copiedTip = h("span", { class: "ysrp-status", text: t("Copied", "已复制"), style: { display: "none", flex: "0 0 auto" } });
+    const copyBtn = iconButton("copy", t("Copy URL", "复制 URL"), async () => {
+      try {
+        await navigator.clipboard.writeText(url);
+        copyBtn.classList.add("is-copied");
+        setIcon(copyBtn, "check");
+        copiedTip.style.display = "";
+        setTimeout(() => {
+          copyBtn.classList.remove("is-copied");
+          setIcon(copyBtn, "copy");
+        }, 1000);
+        setTimeout(() => {
+          copiedTip.style.display = "none";
+        }, 2000);
+      } catch (err) {
+        logger4.error("copy failed", err);
+      }
+    }, "is-link");
+    const linkPanel = h("div", { class: "ysrp-panel ysrp-link-container" }, h("div", { class: "ysrp-url" }, h("span", { text: t("URL: {url}", "链接：{url}", { url }) }), copiedTip, copyBtn, iconButton("arrow-up-right-from-square", t("Open in new tab", "在新标签页中打开 URL"), () => window.open(url, "_blank"), "is-note")));
+    let editing = false;
+    let noteTextarea = null;
+    const noteText = h("div", { class: "ysrp-note-text" });
+    const noteEditButton = iconButton("pencil", t("Edit note", "编辑笔记"), () => editing ? commitNote() : startNote(), "is-link");
+    const notePanel = h("div", { class: "ysrp-panel ysrp-note-container" }, h("div", { class: "ysrp-panel-head" }, h("strong", { class: "ysrp-panel-label", text: t("Notes", "笔记") }), noteEditButton), noteText);
+    const noteValue = () => typeof rec.videoNote === "string" ? rec.videoNote : "";
+    function renderNote() {
+      const value = noteValue();
+      noteText.textContent = value || t("No notes yet", "暂无笔记");
+      noteText.classList.toggle("is-empty", !value);
+      const noteOpen = notePanel.classList.contains("is-open");
+      noteButton.title = editing ? t("Save & collapse note", "保存并折叠笔记") : value ? noteOpen ? t("Hide notes", "隐藏笔记") : t("Show notes", "显示笔记") : t("Add note", "添加笔记");
+      noteEditButton.title = editing ? t("Save note", "保存笔记") : t("Edit note", "编辑笔记");
+      setIcon(noteEditButton, editing ? "floppy-disk" : "pencil");
+    }
+    function setNoteOpen(open) {
+      notePanel.classList.toggle("is-open", open);
+      renderNote();
+    }
+    function startNote() {
+      if (editing)
+        return;
+      editing = true;
+      const textarea = h("textarea", { class: "ysrp-textarea", rows: "3" });
+      textarea.value = noteValue();
+      noteTextarea = textarea;
+      noteText.replaceWith(textarea);
+      setNoteOpen(true);
+      requestAnimationFrame(() => {
+        try {
+          textarea.focus();
+          textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+        } catch {}
+      });
+    }
+    function commitNote() {
+      if (!editing || !noteTextarea)
+        return;
+      const value = noteTextarea.value.trim();
+      editing = false;
+      noteTextarea.replaceWith(noteText);
+      noteTextarea = null;
+      try {
+        rec = update(id, (r) => {
+          if (value)
+            r.videoNote = value;
+          else
+            delete r.videoNote;
+          return r;
+        });
+      } catch (err) {
+        logger4.error("Failed to save note", err);
+      }
+      renderNote();
+    }
+    const actions = getRecordActions().map((action) => action.create({ id, url, record: () => rec }));
+    const noteButton = iconButton("pen-to-square", t("Show notes", "显示笔记"), () => {
+      if (editing) {
+        commitNote();
+        setNoteOpen(false);
+        return;
+      }
+      if (!noteValue()) {
+        startNote();
+        return;
+      }
+      setNoteOpen(!notePanel.classList.contains("is-open"));
+    }, "is-note");
+    const linkButton = iconButton("link", t("Show / hide URL", "显示/隐藏 URL"), () => linkPanel.classList.toggle("is-open"), "is-link");
+    const deleteButton = iconButton("trash-can", t("Delete record", "删除保存记录"), () => onDelete(), "is-delete");
+    const node = h("li", { class: "ysrp-row", dataset: { videoId: id } }, h("div", { class: "ysrp-row-top" }, pctEl, titleEl, daButton, actions.map((a) => a.button), noteButton, linkButton, deleteButton), linkPanel, actions.map((a) => a.panel), notePanel);
+    function renderPercent() {
+      const progress = Number(rec.videoProgress) || 0;
+      const duration = Number(rec.videoDuration) || (isCurrent ? currentDuration() : 0);
+      pctEl.textContent = duration > 0 ? `${Math.min(100, progress / duration * 100).toFixed(1)}%` : formatTime(progress);
+      pctEl.title = duration > 0 ? `${formatTime(progress)} / ${formatTime(duration)}` : t("Saved position", "保存的位置");
+    }
+    function update2(nextRecord, current) {
+      rec = nextRecord;
+      isCurrent = Boolean(current);
+      node.classList.toggle("is-current", isCurrent);
+      if (!original && normTitle(rec.originalTitle))
+        original = normTitle(rec.originalTitle);
+      renderPercent();
+      renderTitle();
+      if (!editing)
+        renderNote();
+      for (const action of actions)
+        action.update?.(rec);
+    }
+    renderTitle();
+    renderNote();
+    resolveTitles();
+    return { node, update: update2, setDeArrow };
+  }
+
+  // src/plugins/_core/settings/StoragePane.ts
+  function StoragePane(ctx) {
+    const modeMsg = h("div", { class: "ysrp-msg", style: { display: "none" } });
+    const modeChoice = ChoiceGroup("ysrp-storage-mode", "--ysrp-storage", [
+      { value: "local", badge: t("LOCAL", "本地"), label: t("localStorage (default)", "localStorage（默认）"), hint: t("Fast storage scoped to this browser profile.", "快速、本地浏览器可用的存储。") },
+      { value: "gm", badge: "GM", label: t("GM storage", "GM 存储"), hint: hasGM ? t("Userscript-manager storage that can sync across profiles.", "由脚本管理器提供、可在配置间同步的存储。") : t("Not available in this userscript manager.", "当前脚本管理器不支持。"), disabled: !hasGM }
+    ], getMode());
+    const applyButton = textButton("right-left", t("Apply & Migrate", "应用并迁移"), () => {
+      const target = modeChoice.value();
+      if (!target || target === getMode()) {
+        setMessage(modeMsg, t("Already using this backend.", "当前已在使用该存储。"));
+        return;
+      }
+      try {
+        const moved = setMode(target);
+        ctx.renderModeBadge();
+        setMessage(modeMsg, t("Moved {count} record(s).", "已迁移 {count} 条记录。", { count: moved }), "ok");
+        emit(EVT_RECORD, { videoId: null });
+      } catch (err) {
+        modeChoice.select(getMode());
+        setMessage(modeMsg, t("Migration failed: {message}", "迁移失败：{message}", { message: errorMessage(err) }), "error");
+      }
+    });
+    applyButton.style.setProperty("--ysrp-btn-accent", "var(--ysrp-storage)");
+    applyButton.style.flex = "0 0 auto";
+    const storageCard = card("database", "--ysrp-storage", t("Storage Backend", "存储后端"), t("Choose where to store your progress data.", "选择保存进度的存储方式。"), modeChoice.node, h("div", { class: "ysrp-row-actions" }, applyButton, h("span", { class: "ysrp-msg", text: t("Migrates all saved records to the selected backend (moves data).", "将所有记录迁移至所选存储后端（移动数据）。") })), modeMsg);
+    const exportMsg = h("div", { class: "ysrp-msg", style: { display: "none" } });
+    const exportJson = () => JSON.stringify(exportAll(), null, 2);
+    const exportFileName = () => {
+      const now = new Date;
+      const p = (n) => String(n).padStart(2, "0");
+      return `[Youtube] Video Memory「${now.getFullYear()} ${p(now.getMonth() + 1)} ${p(now.getDate())}」「${p(now.getHours())}:${p(now.getMinutes())}:${p(now.getSeconds())}」.json`;
+    };
+    const copyExport = textButton("copy", t("Copy JSON", "复制 JSON"), async () => {
+      try {
+        await navigator.clipboard.writeText(exportJson());
+        setMessage(exportMsg, t("JSON copied to clipboard.", "JSON 已复制到剪贴板。"), "ok");
+      } catch (err) {
+        setMessage(exportMsg, t("Copy export failed: {message}", "复制导出失败：{message}", { message: errorMessage(err) }), "error");
+      }
+    });
+    const downloadExport = textButton("file-arrow-down", t("Download JSON", "下载 JSON"), async () => {
+      try {
+        const json = exportJson();
+        const fileName = exportFileName();
+        if (runtime.isIOS) {
+          if (runtime.canShareFile) {
+            try {
+              await navigator.share({
+                files: [new File([json], fileName, { type: "application/json" })],
+                title: t("Video Memory Export", "视频记忆导出"),
+                text: t("Choose “Save to Files” to store your backup.", "请选择“存储到文件”以保存备份。")
+              });
+              setMessage(exportMsg, t("Share sheet opened. Choose “Save to Files”.", "已打开系统分享面板，请选择“存储到文件”。"), "ok");
               return;
+            } catch (err) {
+              const name = err?.name;
+              if (name === "AbortError" || name === "NotAllowedError") {
+                setMessage(exportMsg, t("Share cancelled.", "已取消分享。"));
+                return;
+              }
             }
-            if (shareResult.status === 'cancelled') {
-              updateActionStatus(
-                exportStatus,
-                localizeText('Share cancelled.', '已取消分享。'),
-                styles.subtleText
-              );
-              return;
-            }
-            // For failed shares fall through to default download attempt.
-          } else {
-            const opened = openJsonDataInNewTab(json);
-            if (opened) {
-              updateActionStatus(
-                exportStatus,
-                localizeText('Export opened in a new tab. Use the share menu to save it.', '已在新标签页打开导出，请通过分享菜单保存。'),
-                styles.openButtonColor
-              );
-              return;
-            }
+          } else if (window.open(`data:application/json;charset=utf-8,${encodeURIComponent(json)}`, "_blank", "noopener")) {
+            setMessage(exportMsg, t("Export opened in a new tab. Use the share menu to save it.", "已在新标签页打开导出，请通过分享菜单保存。"), "ok");
+            return;
           }
         }
-        triggerJsonDownload(json, fileName);
-        updateActionStatus(
-          exportStatus,
-          localizeText('Export download started.', '导出下载已开始。'),
-          styles.openButtonColor
-        );
-      } catch (e) {
-        console.error('Download export failed:', e);
-        updateActionStatus(
-          exportStatus,
-          localizeText('Download failed: {message}', '下载失败：{message}', { message: (e && e.message) || e || '' }),
-          styles.deleteButtonColor
-        );
+        const blobUrl = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+        const anchor = h("a", { href: blobUrl, download: fileName, style: { display: "none" } });
+        document.body.appendChild(anchor);
+        anchor.click();
+        setTimeout(() => {
+          anchor.remove();
+          URL.revokeObjectURL(blobUrl);
+        }, 1000);
+        setMessage(exportMsg, t("Export download started.", "导出下载已开始。"), "ok");
+      } catch (err) {
+        setMessage(exportMsg, t("Download failed: {message}", "下载失败：{message}", { message: errorMessage(err) }), "error");
       }
     });
-
-    // Import actions
-    function doImport(jsonText) {
+    for (const btn of [copyExport, downloadExport])
+      btn.style.setProperty("--ysrp-btn-accent", "var(--ysrp-ok)");
+    const exportCard = card("file-arrow-down", "--ysrp-ok", t("Export Data", "导出数据"), t("Back up your saved progress as JSON.", "将保存的进度备份为 JSON。"), h("div", { class: "ysrp-row-actions" }, copyExport, downloadExport), h("div", { class: "ysrp-msg", text: t("Exports all saved records from the currently selected backend.", "导出当前存储后端中的所有记录。") }), exportMsg);
+    const importMsg = h("div", { class: "ysrp-msg", style: { display: "none" } });
+    const overwrite = h("input", { type: "checkbox", class: "ysrp-overwrite" });
+    const importText = h("textarea", { class: "ysrp-textarea", rows: "3", placeholder: t("Paste exported JSON here...", "在此粘贴导出的 JSON...") });
+    function doImport(text) {
       try {
-        const payload = JSON.parse(jsonText);
-        const count = Storage.importPayload(payload, { clearExisting: !!chk.checked });
-        updateActionStatus(
-          importStatus,
-          localizeText('Imported {count} record(s).', '已导入 {count} 条记录。', { count }),
-          styles.openButtonColor
-        );
-        rebuildRecords();
-      } catch (e) {
-        updateActionStatus(
-          importStatus,
-          localizeText('Import failed: {message}', '导入失败：{message}', { message: e.message || e }),
-          styles.deleteButtonColor
-        );
-        console.error('Import failed:', e);
+        const count = importPayload(JSON.parse(text), { overwrite: overwrite.checked });
+        setMessage(importMsg, t("Imported {count} record(s).", "已导入 {count} 条记录。", { count }), "ok");
+        emit(EVT_RECORD, { videoId: null });
+      } catch (err) {
+        setMessage(importMsg, t("Import failed: {message}", "导入失败：{message}", { message: errorMessage(err) }), "error");
       }
     }
-
-    btnImportText.addEventListener('click', () => {
-      const text = importTextarea.value.trim();
+    const importButton = textButton("file-arrow-up", t("Import from Text", "从文本导入"), () => {
+      const text = importText.value.trim();
       if (!text) {
-        updateActionStatus(importStatus, localizeText('Nothing to import.', '没有可导入的内容。'), styles.subtleText);
+        setMessage(importMsg, t("Nothing to import.", "没有可导入的内容。"));
         return;
       }
       doImport(text);
     });
-
-    fileInput.addEventListener('change', () => {
-      const file = fileInput.files && fileInput.files[0];
-      fileNameDisplay.textContent = file ? file.name : fileInputDefaultLabel;
-      if (!file) return;
-      const reader = new FileReader();
+    const noFile = t("No file chosen", "未选择文件");
+    const fileName = h("span", { class: "ysrp-file-name", text: noFile });
+    const fileInput = h("input", { type: "file", accept: "application/json,.json" });
+    const fileLabel = h("label", { class: `ysrp-file${runtime.isIOS ? " is-ios" : ""}`, tabindex: "0", title: t("Select an export JSON file", "选择要导入的 JSON 文件") }, icon("file-arrow-up"), h("strong", { text: t("Choose File", "选择文件") }), fileName, fileInput);
+    if (!runtime.isIOS) {
+      const openPicker = (event) => {
+        event.preventDefault();
+        try {
+          if (typeof fileInput.showPicker === "function") {
+            fileInput.showPicker();
+            return;
+          }
+        } catch {}
+        fileInput.click();
+      };
+      fileLabel.addEventListener("click", openPicker);
+      fileLabel.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ")
+          openPicker(event);
+      });
+    }
+    fileInput.addEventListener("change", () => {
+      const file = fileInput.files?.[0];
+      if (!file)
+        return;
+      fileName.textContent = file.name;
+      const reader = new FileReader;
       reader.onload = () => {
-        const text = String(reader.result || '');
-        importTextarea.value = text;
-        doImport(text);
+        importText.value = String(reader.result || "");
+        doImport(importText.value);
+        fileInput.value = "";
+        fileName.textContent = noFile;
       };
       reader.readAsText(file);
-      fileInput.value = '';
-      fileNameDisplay.textContent = fileInputDefaultLabel;
     });
-
+    const importCard = card("file-arrow-up", "--ysrp-accent", t("Import Data", "导入数据"), t("Restore a previous export to merge or replace your saved records.", "导入之前的导出文件，用于合并或替换记录。"), h("label", { class: "ysrp-check" }, overwrite, h("strong", { text: t("Overwrite", "覆盖") }), h("span", { class: "ysrp-msg", text: t("Clears the current backend before importing; otherwise records are merged.", "勾选后导入前先清空当前存储后端，否则合并。") })), importText, h("div", { class: "ysrp-row-actions" }, importButton, fileLabel), importMsg);
+    return { node: h("div", {}, storageCard, exportCard, importCard) };
   }
 
-  function createInfoUI() {
-    if (document.querySelector(SELECTORS.infoContainer)) return;
-
-    const infoElContainer = document.createElement('div');
-    infoElContainer.classList.add(CLASS_NAMES.infoContainer);
-
-    const infoEl = document.createElement('div');
-    infoEl.classList.add('last-save-info');
-
-    const infoElText = document.createElement('span');
-    infoElText.textContent = localizeText('Loading...', '加载中...');
-    infoElText.classList.add('last-save-info-text');
-
-    const settingsButton = document.createElement('button');
-    settingsButton.classList.add('ysrp-settings-button');
-    settingsButton.style.background = styles.buttonBackground;
-    settingsButton.style.border = 'none';
-    settingsButton.style.marginLeft = '0.5rem';
-    settingsButton.style.cursor = 'pointer';
-    settingsButton.style.display = 'flex';
-    settingsButton.style.alignItems = 'center';
-    settingsButton.style.justifyContent = 'center';
-    settingsButton.style.width = '2rem';
-    settingsButton.style.height = '2rem';
-    settingsButton.style.borderRadius = '0.5rem';
-    settingsButton.title = localizeText('Open settings', '打开设置');
-
-    const gearIcon = createIcon('gear', styles.color);
-    settingsButton.appendChild(gearIcon);
-
-    infoEl.appendChild(infoElText);
-    infoEl.appendChild(settingsButton);
-
-    Object.assign(infoEl.style, {
-      textShadow: 'none',
-      background: styles.background,
-      color: styles.color,
-      padding: '.5rem',
-      borderRadius: '.5rem',
-      display: 'flex',
-      alignItems: 'center'
-    });
-
-    Object.assign(infoElContainer.style, {
-      all: 'initial',
-      fontFamily: 'inherit',
-      fontSize: '1.3rem',
-      marginLeft: '0.5rem',
-      display: 'flex',
-      alignItems: 'center'
-    });
-
-    infoElContainer.appendChild(infoEl);
-    return infoElContainer;
-  }
-
-  async function onChaptersReadyToMount(callback) {
-    await waitForElm('.ytp-chapter-container[style=""]');
-    callback();
-  }
-
-  function recreateInfoContainer() {
-    const existing = document.querySelector(SELECTORS.infoContainer);
-    if (existing && existing.parentNode) {
-      existing.parentNode.removeChild(existing);
+  // src/plugins/_core/settings/index.ts
+  var tabs2 = [
+    { id: "records", group: "general", order: 10, icon: "database", label: () => t("Records", "记录"), render: RecordsPane },
+    { id: "storage", group: "general", order: 20, icon: "gear", label: () => t("Storage", "存储"), render: StoragePane },
+    { id: "plugins", group: "plugins", order: 10, icon: "puzzle-piece", label: () => t("Plugins", "插件"), render: PluginsPane },
+    { id: "display", group: "general", order: 30, icon: "globe", label: () => t("Display", "界面"), render: DisplayPane }
+  ];
+  var languageTimer2 = null;
+  var offLanguage2 = null;
+  var settings_default = definePlugin({
+    name: "Settings",
+    title: () => t("Settings dialog", "设置弹窗"),
+    description: () => t("The records list, storage, plugins and language settings.", "记录列表，以及存储、插件、语言等设置。"),
+    icon: "gear",
+    authors: [Devs.V],
+    required: true,
+    start() {
+      mount();
+      for (const tab of tabs2)
+        addSettingsTab(tab);
+      offLanguage2 = on(EVT_LANG, () => {
+        if (languageTimer2)
+          clearTimeout(languageTimer2);
+        languageTimer2 = setTimeout(() => rebuild(), 50);
+      });
+    },
+    stop() {
+      offLanguage2?.();
+      offLanguage2 = null;
+      for (const tab of tabs2)
+        removeSettingsTab(tab.id);
+      unmount();
     }
-    const infoEl = createInfoUI();
-    insertInfoElement(infoEl);
-    insertInfoElementInChaptersContainer(infoEl);
-  }
+  });
 
-  function refreshLanguageDependentUI() {
-    const settingsContainer = document.querySelector(SELECTORS.settingsContainer);
-    const wasOpen = settingsContainer && settingsContainer.style.display !== 'none';
-    const activeTabId = settingsContainer && settingsContainer.dataset ? settingsContainer.dataset.activeTab : null;
-    if (settingsContainer) {
-      if (typeof settingsContainer._ysrpClose === 'function') {
-        settingsContainer._ysrpClose();
-      }
-      settingsContainer.remove();
+  // src/plugins/badgeToggle/styles.css
+  var styles_default = `.ysrp-badge-toggle {
+    flex: 0 0 auto;
+    margin-right: .5rem;
+    padding: 0;
+    border: none;
+    background: transparent;
+    font-size: 1.5rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.last-save-info-container.ysrp-badge-hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+`;
+
+  // src/plugins/badgeToggle/index.ts
+  var settings = definePluginSettings({
+    startHidden: {
+      type: 2 /* BOOLEAN */,
+      default: true,
+      description: () => t("Hide the badge when a page opens", "打开页面时先隐藏徽标")
     }
-    recreateInfoContainer();
-    createSettingsUI({ defaultTab: activeTabId || SETTINGS_TABS.records });
-    bindSettingsToggle();
-    if (wasOpen) {
-      const freshContainer = document.querySelector(SELECTORS.settingsContainer);
-      if (freshContainer && typeof freshContainer._ysrpOpen === 'function') {
-        freshContainer._ysrpOpen();
-      }
-      if (activeTabId) {
-        const targetTab = freshContainer && freshContainer.querySelector(`[data-tab-id="${activeTabId}"]`);
-        if (targetTab) targetTab.click();
-      }
+  });
+  var button = null;
+  var hidden = true;
+  var offMount = null;
+  function render2(badge) {
+    if (!button)
+      return;
+    button.setAttribute("aria-pressed", String(!hidden));
+    button.title = hidden ? t("Show progress badge", "显示进度徽标") : t("Hide progress badge", "隐藏进度徽标");
+    button.setAttribute("aria-label", button.title);
+    if (badge)
+      badge.classList.toggle("ysrp-badge-hidden", hidden);
+  }
+  function attach(badge) {
+    if (!button) {
+      button = h("button", { type: "button", class: "ysrp-badge-toggle", text: "\uD83D\uDCBE" });
+      shieldFromPlayer(button, () => {
+        hidden = !hidden;
+        render2(current());
+      });
     }
+    if (button.nextElementSibling !== badge)
+      badge.before(button);
+    render2(badge);
   }
+  var badgeToggle_default = definePlugin({
+    name: "BadgeToggle",
+    title: () => t("Badge toggle", "徽标开关"),
+    description: () => t("Adds a \uD83D\uDCBE button that shows or hides the progress badge.", "在徽标旁加一个 \uD83D\uDCBE 按钮，点击显示或隐藏进度徽标。"),
+    icon: "floppy-disk",
+    authors: [Devs.V],
+    enabledByDefault: true,
+    settings,
+    start() {
+      hidden = settings.store.startHidden;
+      registerStyle("badgeToggle", styles_default);
+      offMount = onMount(attach);
+      const badge = current();
+      if (badge)
+        attach(badge);
+    },
+    stop() {
+      offMount?.();
+      offMount = null;
+      button?.remove();
+      button = null;
+      current()?.classList.remove("ysrp-badge-hidden");
+      unregisterStyle("badgeToggle");
+    }
+  });
 
-  if (LANGUAGE_EVENT_NAME) {
-    let pendingLanguageRefresh = null;
-    document.addEventListener(LANGUAGE_EVENT_NAME, () => {
-      if (pendingLanguageRefresh) {
-        clearTimeout(pendingLanguageRefresh);
-      }
-      pendingLanguageRefresh = setTimeout(() => {
-        pendingLanguageRefresh = null;
-        refreshLanguageDependentUI();
-      }, 50);
-    });
+  // src/utils/http.ts
+  function wrap(status, text) {
+    return {
+      status,
+      ok: status >= 200 && status < 300,
+      text,
+      json: () => JSON.parse(text || "null")
+    };
   }
-
-/* -------------------------------------------------------------------------- *
- * Module 12 · External dependency loaders (fonts, scrollbars)
- * -------------------------------------------------------------------------- */
-
-  // ========== Dependencies ==========
-  function addFontawesomeIcons() {
-    const head = document.getElementsByTagName('HEAD')[0];
-    const iconsUi = document.createElement('link');
-    Object.assign(iconsUi, {
-      rel: 'stylesheet',
-      type: 'text/css',
-      href: configData.dependenciesURLs.fontAwesomeIcons
-    });
-    head.appendChild(iconsUi);
-  }
-
-  function initializeDependencies() {
-    addFontawesomeIcons();
-    injectSettingsScrollbarsCSS();
-  }
-
-  function initializeUI() {
-    const infoEl = createInfoUI();
-    insertInfoElement(infoEl);
-    createSettingsUI();          // build settings UI ASAP
-    initializeDependencies();
-
-    // Bind toggle after both button and popup exist
-    bindSettingsToggle();
-
-    onChaptersReadyToMount(() => {
-      insertInfoElementInChaptersContainer(infoEl);
-      createSettingsUI();
-      bindSettingsToggle();
-    });
-
-    observeDomForRebinds();
-  }
-
-/* -------------------------------------------------------------------------- *
- * Module 13 · Housekeeping observers and invalid entry cleanup
- * -------------------------------------------------------------------------- */
-
-  // ========== Housekeeping ==========
-  function cleanInvalidEntries() {
-    const savedVideos = getSavedVideoList();
-    savedVideos.forEach(([key, value]) => {
-      try {
-        const parsed = JSON.parse(value);
-        if (!parsed || typeof parsed !== 'object') {
-          throw new Error('Invalid record');
-        }
-
-        let shouldRewrite = false;
-        if (typeof parsed.videoName !== 'string') {
-          parsed.videoName = DEFAULT_VIDEO_NAME;
-          shouldRewrite = true;
-        } else {
-          const trimmed = parsed.videoName.trim();
-          if (!trimmed) {
-            parsed.videoName = DEFAULT_VIDEO_NAME;
-            shouldRewrite = true;
-          } else if (trimmed !== parsed.videoName) {
-            parsed.videoName = trimmed;
-            shouldRewrite = true;
-          }
-        }
-
-        const normalizedVideo = typeof parsed.videoName === 'string' ? parsed.videoName.trim().toLowerCase() : '';
-        const normalizedOriginal = typeof parsed.originalTitle === 'string' ? parsed.originalTitle.trim().toLowerCase() : '';
-        if (normalizedVideo && normalizedOriginal && normalizedVideo === normalizedOriginal) {
-          parsed.videoName = DEFAULT_VIDEO_NAME;
-          shouldRewrite = true;
-        }
-
-        if (shouldRewrite) {
-          Storage.setItem(key, JSON.stringify(parsed));
-        }
-      } catch {
-        Storage.removeItem(key);
-      }
-    });
-  }
-
-  function observeDomForRebinds() {
-    const observer = new MutationObserver(mutations => {
-      let needBind = false;
-      mutations.forEach(mutation => {
-        mutation.removedNodes.forEach(removedNode => {
-          if (removedNode.classList && removedNode.classList.contains(CLASS_NAMES.infoContainer)) {
-            const infoEl = createInfoUI();
-            insertInfoElement(infoEl);
-            createSettingsUI();
-            needBind = true;
-          }
-        });
-        mutation.addedNodes.forEach(addedNode => {
-          if (addedNode.id === 'movie_player' ||
-              (addedNode.classList && addedNode.classList.contains('ytp-chapter-container'))) {
-            const infoEl = createInfoUI();
-            insertInfoElement(infoEl);
-            insertInfoElementInChaptersContainer(infoEl);
-            createSettingsUI();
-            needBind = true;
-          }
+  var hasGMXhr = () => typeof GM_xmlhttpRequest === "function";
+  function request(req) {
+    const timeoutMs = req.timeoutMs ?? 30000;
+    if (hasGMXhr()) {
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: req.method,
+          url: req.url,
+          headers: req.headers,
+          data: req.body,
+          timeout: timeoutMs,
+          onload: (res) => resolve(wrap(res.status, res.responseText ?? "")),
+          onerror: () => reject(new Error(`Network error: ${req.method} ${new URL(req.url).host}`)),
+          ontimeout: () => reject(new Error(`Timed out: ${req.method} ${new URL(req.url).host}`)),
+          onabort: () => reject(new Error("Request aborted"))
         });
       });
-      if (needBind) {
-        // Ensure host/backdrop exist and toggle is bound
-        const hostRoot = getHostRoot();
-        ensureBackdrop(hostRoot);
-        bindSettingsToggle();
+    }
+    const controller = new AbortController;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    return fetch(req.url, { method: req.method, headers: req.headers, body: req.body, signal: controller.signal, credentials: "omit", cache: "no-store" }).then(async (res) => wrap(res.status, await res.text())).finally(() => clearTimeout(timer));
+  }
+
+  // src/plugins/driveSync/drive.ts
+  var TOKEN_URL = "https://oauth2.googleapis.com/token";
+  var FILES_URL = "https://www.googleapis.com/drive/v3/files";
+  var UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files";
+  var FOLDER_NAME = "[Youtube] Video Memory";
+  var LEGACY_FILE_NAME = "[Youtube] Video Memory Sync.json";
+  var FOLDER_MIME = "application/vnd.google-apps.folder";
+  var JSON_MIME = "application/json";
+  var FILE_FIELDS = "id,name,modifiedTime";
+
+  class DriveError extends Error {
+    status;
+    constructor(message, status = 0) {
+      super(message);
+      this.status = status;
+    }
+  }
+  function readCredentials() {
+    let stored = {};
+    try {
+      stored = JSON.parse(readSecret(KEY_DRIVE) || "{}") || {};
+    } catch {}
+    return {
+      clientId: typeof stored.clientId === "string" ? stored.clientId.trim() : "",
+      clientSecret: typeof stored.clientSecret === "string" ? stored.clientSecret.trim() : "",
+      refreshToken: typeof stored.refreshToken === "string" ? stored.refreshToken.trim() : ""
+    };
+  }
+  function writeCredentials(creds) {
+    let stored = {};
+    try {
+      stored = JSON.parse(readSecret(KEY_DRIVE) || "{}") || {};
+    } catch {}
+    writeSecret(KEY_DRIVE, JSON.stringify({ ...stored, ...creds }));
+  }
+  var hasCredentials = (c) => Boolean(c.clientId && c.clientSecret && c.refreshToken);
+  function fileNameFor(title, videoId) {
+    const clean = String(title ?? "").replace(/[\u0000-\u001f\u007f]/g, "").replace(/[\\/:*?"<>|]/g, "-").replace(/\s+/g, " ").trim().slice(0, 120).trim();
+    return `${clean || UNKNOWN_TITLE}｜${videoId}.json`;
+  }
+  function videoIdFromName(name) {
+    const m = /(?:｜([\w-]+)|\[([\w-]+)\])\.json$/.exec(name);
+    return m ? m[1] || m[2] : null;
+  }
+  var quote = (value) => `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`;
+  function describe(status, text) {
+    try {
+      const body = JSON.parse(text);
+      const message = body?.error?.message || body?.error_description || body?.error;
+      if (message)
+        return `HTTP ${status}: ${typeof message === "string" ? message : JSON.stringify(message)}`;
+    } catch {}
+    return `HTTP ${status}`;
+  }
+
+  class DriveClient {
+    credentials;
+    token = null;
+    folder = null;
+    constructor(credentials) {
+      this.credentials = credentials;
+    }
+    reset() {
+      this.token = null;
+      this.folder = null;
+    }
+    async accessToken(force = false) {
+      if (!force && this.token && Date.now() < this.token.expiresAt)
+        return this.token.value;
+      const c = this.credentials();
+      if (!hasCredentials(c))
+        throw new DriveError("Missing credentials");
+      const body = new URLSearchParams({
+        client_id: c.clientId,
+        client_secret: c.clientSecret,
+        refresh_token: c.refreshToken,
+        grant_type: "refresh_token"
+      }).toString();
+      const res = await request({ method: "POST", url: TOKEN_URL, headers: { "Content-Type": "application/x-www-form-urlencoded" }, body });
+      if (!res.ok)
+        throw new DriveError(describe(res.status, res.text), res.status);
+      const data = res.json();
+      if (!data?.access_token)
+        throw new DriveError("Token response has no access_token");
+      const lifetime = (Number(data.expires_in) || 3600) * 1000;
+      this.token = { value: data.access_token, expiresAt: Date.now() + Math.max(0, lifetime - 60000) };
+      return this.token.value;
+    }
+    async call(method, url, init = {}, retry = true) {
+      const token = await this.accessToken();
+      const res = await request({ method, url, headers: { ...init.headers, Authorization: `Bearer ${token}` }, body: init.body });
+      if (res.status === 401 && retry) {
+        this.token = null;
+        return this.call(method, url, init, false);
+      }
+      if (!res.ok && !(method === "DELETE" && res.status === 404))
+        throw new DriveError(describe(res.status, res.text), res.status);
+      return res.text;
+    }
+    async list(q, orderBy) {
+      const params = new URLSearchParams({ q, fields: `files(${FILE_FIELDS})`, pageSize: "100", spaces: "drive" });
+      if (orderBy)
+        params.set("orderBy", orderBy);
+      const text = await this.call("GET", `${FILES_URL}?${params}`);
+      return JSON.parse(text || "{}").files ?? [];
+    }
+    async folderId() {
+      if (this.folder)
+        return this.folder;
+      const found = await this.list(`name = ${quote(FOLDER_NAME)} and mimeType = ${quote(FOLDER_MIME)} and trashed = false`, "createdTime");
+      if (found[0])
+        return this.folder = found[0].id;
+      const text = await this.call("POST", `${FILES_URL}?fields=id`, {
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: FOLDER_NAME, mimeType: FOLDER_MIME })
+      });
+      return this.folder = JSON.parse(text).id;
+    }
+    async filesFor(videoId) {
+      const folder = await this.folderId();
+      const files = await this.list(`name contains ${quote(videoId)} and mimeType = ${quote(JSON_MIME)} and trashed = false and ${quote(folder)} in parents`, "modifiedTime desc");
+      return files.filter((f) => videoIdFromName(f.name) === videoId);
+    }
+    async findByName(name) {
+      return this.list(`name = ${quote(name)} and trashed = false`, "modifiedTime desc");
+    }
+    async download(fileId) {
+      const text = await this.call("GET", `${FILES_URL}/${encodeURIComponent(fileId)}?alt=media`);
+      return JSON.parse(text);
+    }
+    async upload(name, content, existingId) {
+      const boundary = `ysrp-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+      const metadata = { name, mimeType: JSON_MIME };
+      if (!existingId)
+        metadata.parents = [await this.folderId()];
+      const body = [
+        `--${boundary}`,
+        "Content-Type: application/json; charset=UTF-8",
+        "",
+        JSON.stringify(metadata),
+        `--${boundary}`,
+        "Content-Type: application/json; charset=UTF-8",
+        "",
+        JSON.stringify(content),
+        `--${boundary}--`,
+        ""
+      ].join(`\r
+`);
+      const url = existingId ? `${UPLOAD_URL}/${encodeURIComponent(existingId)}?uploadType=multipart&fields=${FILE_FIELDS}` : `${UPLOAD_URL}?uploadType=multipart&fields=${FILE_FIELDS}`;
+      const text = await this.call(existingId ? "PATCH" : "POST", url, {
+        headers: { "Content-Type": `multipart/related; boundary=${boundary}` },
+        body
+      });
+      return JSON.parse(text);
+    }
+    async remove(fileId) {
+      await this.call("DELETE", `${FILES_URL}/${encodeURIComponent(fileId)}`);
+    }
+  }
+
+  // src/plugins/driveSync/sync.ts
+  var logger5 = new Logger("DriveSync");
+  var DEBOUNCE_MS = 1500;
+  var MIN_INTERVAL_MS = 15000;
+  var RETRY_MS = 30000;
+  var PAYLOAD_VERSION = "2";
+  var client = new DriveClient(readCredentials);
+  var queue = new Map;
+  var lastUpload = new Map;
+  var timer3 = null;
+  var timerDue = 0;
+  var running = false;
+  var rerun = false;
+  var active2 = false;
+  var fullSyncPending = false;
+  var status = { state: "idle", done: 0, total: 0, message: "", at: 0 };
+  var configured = () => hasCredentials(readCredentials());
+  var getStatus = () => status;
+  function setStatus(next) {
+    status = { done: 0, total: 0, message: "", ...next, at: Date.now() };
+    emit(EVT_DRIVE_STATUS, status);
+  }
+  function arm(ms) {
+    if (!active2)
+      return;
+    const due = Date.now() + Math.max(0, ms);
+    if (timer3 && timerDue <= due)
+      return;
+    if (timer3)
+      clearTimeout(timer3);
+    timerDue = due;
+    timer3 = setTimeout(() => {
+      timer3 = null;
+      flush2();
+    }, Math.max(0, ms));
+  }
+  function schedule(videoId, action, force = false) {
+    if (!active2 || !configured())
+      return;
+    const previous = queue.get(videoId);
+    queue.set(videoId, { action, force: force || previous?.action === action && previous.force });
+    arm(DEBOUNCE_MS);
+  }
+  var stripMeta = ({ driveSync: _meta, ...rest }) => rest;
+  async function uploadRecord(videoId, force) {
+    const startedAt = Date.now();
+    const rec = get(videoId);
+    if (!rec)
+      return false;
+    if (!force && (Number(rec.updatedAt) || 0) <= (Number(rec.driveSync?.lastUploadAt) || 0))
+      return false;
+    const files = await client.filesFor(videoId);
+    const payload = {
+      version: PAYLOAD_VERSION,
+      videoId,
+      videoUrl: `https://www.youtube.com/watch?v=${videoId}`,
+      exportedAt: startedAt,
+      record: stripMeta(rec)
+    };
+    const saved = await client.upload(fileNameFor(rec.videoName, videoId), payload, files[0]?.id);
+    for (const extra of files.slice(1))
+      await client.remove(extra.id);
+    const remoteModifiedAt = Date.parse(saved?.modifiedTime) || Date.now();
+    updateIfExists(videoId, (r) => ({ ...r, driveSync: { ...r.driveSync, lastUploadAt: startedAt, remoteModifiedAt } }), { touch: false, source: "sync" });
+    return true;
+  }
+  async function removeRemote(videoId) {
+    for (const file of await client.filesFor(videoId))
+      await client.remove(file.id);
+  }
+  async function flush2() {
+    if (!active2)
+      return;
+    if (running) {
+      rerun = true;
+      return;
+    }
+    if (!queue.size)
+      return;
+    running = true;
+    let failed = false;
+    try {
+      const total = queue.size;
+      let done = 0;
+      let nextDue = Infinity;
+      setStatus({ state: "start", done, total });
+      for (const [videoId, job] of [...queue]) {
+        if (!active2)
+          break;
+        const last = lastUpload.get(videoId) || 0;
+        if (!job.force && job.action === "set" && Date.now() - last < MIN_INTERVAL_MS) {
+          nextDue = Math.min(nextDue, last + MIN_INTERVAL_MS);
+          continue;
+        }
+        queue.delete(videoId);
+        try {
+          if (job.action === "remove")
+            await removeRemote(videoId);
+          else if (await uploadRecord(videoId, job.force))
+            lastUpload.set(videoId, Date.now());
+        } catch (err) {
+          failed = true;
+          if (!queue.has(videoId))
+            queue.set(videoId, job);
+          logger5.warn(`${job.action} ${videoId} failed`, err);
+          setStatus({ state: "error", done, total, message: errorMessage(err) });
+          arm(RETRY_MS);
+          break;
+        }
+        done++;
+        setStatus({ state: "progress", done, total });
+      }
+      if (!failed) {
+        if (nextDue < Infinity) {
+          setStatus({ state: "deferred", done, total });
+          arm(nextDue - Date.now());
+        } else {
+          if (fullSyncPending && !queue.size) {
+            fullSyncPending = false;
+            writeSetting(KEY_DRIVE_FULL_SYNC, "1");
+          }
+          setStatus({ state: "done", done, total });
+        }
+      }
+    } finally {
+      running = false;
+      if (rerun) {
+        rerun = false;
+        arm(0);
+      }
+    }
+  }
+  function uploadAll() {
+    if (!active2 || !configured())
+      return 0;
+    const items = list();
+    for (const { id } of items)
+      queue.set(id, { action: "set", force: true });
+    arm(0);
+    return items.length;
+  }
+  async function importLegacy() {
+    const [file] = await client.findByName(LEGACY_FILE_NAME);
+    if (!file)
+      return 0;
+    const payload = await client.download(file.id);
+    const count = importPayload(payload, {
+      source: "sync",
+      accept: (_id, incoming, existing) => !existing || (Number(incoming.saveDate) || 0) > (Number(existing.saveDate) || 0)
+    });
+    if (count)
+      emit(EVT_RECORD, { videoId: null });
+    logger5.info(`Imported ${count} record(s) from ${LEGACY_FILE_NAME}`);
+    return count;
+  }
+  async function fullSync() {
+    if (!active2 || !configured())
+      return;
+    fullSyncPending = true;
+    try {
+      await importLegacy();
+    } catch (err) {
+      logger5.warn("Legacy import failed", err);
+    }
+    uploadAll();
+  }
+  function maybeFirstFullSync() {
+    if (readSetting(KEY_DRIVE_FULL_SYNC) !== "1")
+      fullSync();
+  }
+  async function pullRecord(videoId) {
+    if (!active2 || !configured())
+      return;
+    const [file] = await client.filesFor(videoId);
+    const local = get(videoId);
+    if (!file) {
+      if (local)
+        schedule(videoId, "set");
+      return;
+    }
+    const remoteTime = Date.parse(file.modifiedTime) || 0;
+    const meta = local?.driveSync ?? {};
+    const newer = remoteTime > (Number(local?.updatedAt) || 0) && remoteTime > (Number(meta.lastDownloadAt) || 0) && remoteTime > (Number(meta.remoteModifiedAt) || 0);
+    if (!newer) {
+      if (local && (Number(local.updatedAt) || 0) > (Number(meta.lastUploadAt) || 0))
+        schedule(videoId, "set");
+      return;
+    }
+    const payload = await client.download(file.id);
+    const remote = payload?.record;
+    if (!remote || typeof remote !== "object" || Array.isArray(remote) || payload.videoId && payload.videoId !== videoId)
+      return;
+    const now = Date.now();
+    update(videoId, (r) => ({
+      ...r,
+      ...stripMeta(remote),
+      updatedAt: Number(remote.updatedAt) || remoteTime,
+      driveSync: { ...r.driveSync, lastDownloadAt: now, lastUploadAt: now, remoteModifiedAt: remoteTime }
+    }), { touch: false, source: "sync" });
+    emit(EVT_RECORD, { videoId, videoProgress: remote.videoProgress });
+  }
+  function activate() {
+    active2 = true;
+    if (queue.size)
+      arm(DEBOUNCE_MS);
+  }
+  function deactivate() {
+    active2 = false;
+    if (timer3)
+      clearTimeout(timer3);
+    timer3 = null;
+    queue.clear();
+    fullSyncPending = false;
+    setStatus({ state: "idle" });
+  }
+
+  // src/plugins/driveSync/DrivePane.ts
+  function statusText(s) {
+    if (!configured())
+      return t("Not configured: fill in the three fields below.", "未配置：请填写下面三项。");
+    switch (s.state) {
+      case "start":
+      case "progress":
+        return t("Syncing… {done} / {total}", "同步中… {done} / {total}", { done: s.done, total: s.total });
+      case "done":
+        return t("Synced at {time}", "已同步（{time}）", { time: new Date(s.at).toLocaleTimeString() });
+      case "deferred":
+        return t("Waiting a few seconds before the next upload…", "稍后继续上传…");
+      case "error":
+        return t("Sync failed: {message}", "同步出错：{message}", { message: s.message });
+      default:
+        return t("Ready. Changes upload automatically.", "已就绪，修改会自动上传。");
+    }
+  }
+  function DrivePane(ctx) {
+    const creds = readCredentials();
+    const clientId = h("input", { class: "ysrp-input", type: "text", placeholder: "xxxx.apps.googleusercontent.com", autocomplete: "off", spellcheck: "false" });
+    const secret = secretInput("GOCSPX-…", () => t("Show", "显示"), () => t("Hide", "隐藏"), "--ysrp-accent");
+    const token = secretInput("1//…", () => t("Show", "显示"), () => t("Hide", "隐藏"), "--ysrp-accent");
+    clientId.value = creds.clientId;
+    secret.input.value = creds.clientSecret;
+    token.input.value = creds.refreshToken;
+    const status = h("div", { class: "ysrp-msg ysrp-drive-status" });
+    const result = h("div", { class: "ysrp-msg", style: { display: "none" } });
+    const renderStatus = () => {
+      const s = getStatus();
+      status.textContent = statusText(s);
+      status.className = `ysrp-msg ysrp-drive-status${s.state === "error" ? " is-error" : s.state === "done" ? " is-ok" : ""}`;
+    };
+    const save = textButton("floppy-disk", t("Save & verify", "保存并验证"), async () => {
+      const next = { clientId: clientId.value.trim(), clientSecret: secret.input.value.trim(), refreshToken: token.input.value.trim() };
+      const wasConfigured = configured();
+      writeCredentials(next);
+      client.reset();
+      renderStatus();
+      if (!hasCredentials(next)) {
+        setMessage(result, t("Saved. All three fields are needed to sync.", "已保存。三项都填写后才会同步。"));
+        return;
+      }
+      save.disabled = true;
+      setMessage(result, t("Checking…", "正在验证…"));
+      try {
+        await client.accessToken(true);
+        setMessage(result, t("Connected to Google Drive.", "已连接 Google Drive。"), "ok");
+        if (!wasConfigured)
+          fullSync();
+      } catch (err) {
+        setMessage(result, t("Could not connect: {message}", "连接失败：{message}", { message: errorMessage(err) }), "error");
+      } finally {
+        save.disabled = false;
       }
     });
-
-    observer.observe(document.body, { childList: true, subtree: true });
-  }
-
-/* -------------------------------------------------------------------------- *
- * Module 14 · Bootstrap sequence wiring everything together
- * -------------------------------------------------------------------------- */
-
-  // ========== Bootstrap ==========
-  function initialize() {
-    configData.storageMode = Storage.getMode();
-
-    cleanInvalidEntries();
-
-    // Build UI as soon as the player exists
-    onPlayerElementExist(() => {
-      // Ensure host/backdrop first to avoid race on first click
-      const hostRoot = getHostRoot();
-      ensureBackdrop(hostRoot);
-
-      initializeUI();
-
-      const progressSetInterval = setInterval(() => {
-        if (isReadyToSetSavedProgress()) {
-          setSavedProgress();
-          clearInterval(progressSetInterval);
-        }
-      }, 500);
+    const upload = textButton("cloud-arrow-up", t("Upload all", "全部上传"), () => {
+      if (!configured()) {
+        setMessage(result, t("Fill in and save the credentials first.", "请先填写并保存凭据。"), "error");
+        return;
+      }
+      const count = uploadAll();
+      setMessage(result, t("Uploading {count} record(s)…", "正在上传 {count} 条记录…", { count }));
     });
-
-    setInterval(saveVideoProgress, configData.savingInterval);
+    upload.style.setProperty("--ysrp-btn-accent", "var(--ysrp-ok)");
+    ctx.listen(document, EVT_DRIVE_STATUS, renderStatus);
+    renderStatus();
+    return {
+      node: h("div", {}, card("cloud", "--ysrp-accent", t("Google Drive sync", "Google Drive 同步"), t("Each video is saved as one JSON file in the “{folder}” folder of your Drive, and pulled back when you open the video on another device.", "每个视频在你云端硬盘的“{folder}”文件夹里保存为一个 JSON 文件；在另一台设备打开该视频时会先拉取云端进度。", { folder: FOLDER_NAME }), status, field(t("OAuth client ID", "OAuth 客户端 ID"), clientId), field(t("Client secret", "客户端密钥"), secret.node), field(t("Refresh token", "Refresh token"), token.node), h("div", { class: "ysrp-row-actions" }, save, upload), result), card("circle-info", "--ysrp-fg", t("Getting credentials", "如何获取凭据"), t("Create an OAuth client in Google Cloud Console, enable the Drive API, then use the OAuth Playground with your own client and the Drive scope to get a refresh token.", "在 Google Cloud Console 创建 OAuth 客户端并启用 Drive API，然后在 OAuth Playground 里用你自己的客户端和 Drive 权限换取 refresh token。"))),
+      refresh: renderStatus
+    };
   }
 
-  initialize();
+  // src/plugins/driveSync/index.ts
+  var STARTUP_DELAY_MS = 2000;
+  var offChange = null;
+  var startupTimer = null;
+  var driveSync_default = definePlugin({
+    name: "DriveSync",
+    title: () => t("Google Drive sync", "云同步"),
+    description: () => t("Keeps your records in your own Google Drive and picks up progress from other devices.", "把记录同步到你自己的 Google Drive，在其它设备上接着看。"),
+    icon: "cloud",
+    authors: [Devs.V],
+    enabledByDefault: true,
+    settingsTab: {
+      id: "drive",
+      group: "plugins",
+      order: 30,
+      icon: "cloud",
+      label: () => t("Sync", "云同步"),
+      render: DrivePane
+    },
+    start() {
+      activate();
+      offChange = onRecordChange((change) => {
+        if (change.source !== "local" || !change.id)
+          return;
+        if (change.type === "set")
+          schedule(change.id, "set");
+        else if (change.type === "remove")
+          schedule(change.id, "remove");
+      });
+      startupTimer = setTimeout(() => {
+        if (configured())
+          maybeFirstFullSync();
+      }, STARTUP_DELAY_MS);
+    },
+    stop() {
+      offChange?.();
+      offChange = null;
+      if (startupTimer)
+        clearTimeout(startupTimer);
+      startupTimer = null;
+      deactivate();
+    },
+    beforeRestore(videoId) {
+      if (!configured())
+        return;
+      return pullRecord(videoId);
+    }
+  });
+
+  // src/plugins/transcript/api.ts
+  var SUFFIX = "/v1/chat/completions";
+  var DEFAULTS = Object.freeze({
+    endpoint: "https://0-v-YouTube-Transcript-Generator-api.hf.space/v1/chat/completions",
+    model: "transcript",
+    apiKey: "sk-asdlfjalalfja",
+    timeoutMs: 10 * 60 * 1000
+  });
+  var MIN_MINUTES = 1;
+  var MAX_MINUTES = 60;
+  var CACHE_TTL_MS = 30 * 60 * 1000;
+  var cache = new Map;
+  var inflight = new Map;
+  function clampTimeoutMs(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0)
+      return DEFAULTS.timeoutMs;
+    return Math.min(MAX_MINUTES * 60000, Math.max(MIN_MINUTES * 60000, Math.round(n)));
+  }
+  function normalizeEndpoint(value) {
+    let raw = typeof value === "string" ? value.trim() : "";
+    if (!raw)
+      return "";
+    if (!/^https?:\/\//i.test(raw))
+      raw = `https://${raw}`;
+    try {
+      const url = new URL(raw);
+      const path = url.pathname.replace(/\/+$/, "");
+      url.pathname = path || SUFFIX;
+      return url.toString().replace(/\/+$/, "");
+    } catch {
+      const trimmed = raw.replace(/\/+$/, "");
+      return /\/\/[^/]+$/.test(trimmed) ? trimmed + SUFFIX : trimmed;
+    }
+  }
+  function getSettings() {
+    const merged = { ...DEFAULTS, ...readJsonSetting(KEY_TRANSCRIPT) };
+    return {
+      endpoint: normalizeEndpoint(merged.endpoint) || DEFAULTS.endpoint,
+      model: String(merged.model || DEFAULTS.model),
+      apiKey: typeof merged.apiKey === "string" ? merged.apiKey : "",
+      timeoutMs: clampTimeoutMs(merged.timeoutMs)
+    };
+  }
+  function saveSettings(partial) {
+    const next = getSettings();
+    if (typeof partial.endpoint === "string" && partial.endpoint.trim())
+      next.endpoint = normalizeEndpoint(partial.endpoint);
+    if (typeof partial.model === "string" && partial.model.trim())
+      next.model = partial.model.trim();
+    if (typeof partial.apiKey === "string" && partial.apiKey.trim())
+      next.apiKey = partial.apiKey.trim();
+    if (partial.timeoutMs !== undefined && Number(partial.timeoutMs) > 0)
+      next.timeoutMs = clampTimeoutMs(partial.timeoutMs);
+    writeSetting(KEY_TRANSCRIPT, JSON.stringify(next));
+    return next;
+  }
+  function extractText(payload) {
+    if (!payload)
+      return "";
+    if (typeof payload === "string")
+      return payload.trim();
+    if (Array.isArray(payload))
+      return payload.map(extractText).filter(Boolean).join(`
+`).trim();
+    if (payload.error?.message)
+      throw new Error(payload.error.message);
+    if (typeof payload.transcript === "string")
+      return payload.transcript.trim();
+    if (Array.isArray(payload.transcript))
+      return payload.transcript.join(`
+`).trim();
+    if (typeof payload.output_text === "string")
+      return payload.output_text.trim();
+    if (Array.isArray(payload.output_text))
+      return payload.output_text.join(`
+`).trim();
+    if (Array.isArray(payload.output)) {
+      const joined = payload.output.flatMap((entry) => entry && Array.isArray(entry.content) ? entry.content : []).map((part) => part && typeof part.text === "string" ? part.text : "").filter(Boolean).join(`
+`).trim();
+      if (joined)
+        return joined;
+    }
+    if (Array.isArray(payload.choices)) {
+      const joined = payload.choices.map((choice) => {
+        if (!choice)
+          return "";
+        const content = choice.message?.content;
+        if (typeof content === "string")
+          return content;
+        if (Array.isArray(content))
+          return content.map((part) => part?.text || "").join(`
+`);
+        return typeof choice.text === "string" ? choice.text : "";
+      }).filter(Boolean).join(`
+`).trim();
+      if (joined)
+        return joined;
+    }
+    if (typeof payload.text === "string")
+      return payload.text.trim();
+    if (typeof payload.data === "string")
+      return payload.data.trim();
+    return "";
+  }
+  function cached(id) {
+    const hit = cache.get(id);
+    if (hit && Date.now() - hit.at <= CACHE_TTL_MS)
+      return hit.text;
+    const rec = get(id);
+    if (rec && typeof rec.videoTranscript === "string" && rec.videoTranscript.trim()) {
+      const text = rec.videoTranscript.trim();
+      cache.set(id, { text, at: rec.videoTranscriptUpdatedAt || Date.now() });
+      return text;
+    }
+    return "";
+  }
+  function fetchFor(id, force) {
+    if (!id)
+      return Promise.reject(new Error(t("Cannot detect the video id.", "无法识别当前视频 ID。")));
+    if (!force) {
+      const hit = cached(id);
+      if (hit)
+        return Promise.resolve(hit);
+    }
+    const pending = inflight.get(id);
+    if (pending)
+      return pending;
+    const settings = getSettings();
+    if (!settings.endpoint)
+      return Promise.reject(new Error(t("Please configure the transcript endpoint first.", "请先配置字幕接口路径。")));
+    const headers = { "Content-Type": "application/json" };
+    if (settings.apiKey.trim())
+      headers.Authorization = `Bearer ${settings.apiKey.trim()}`;
+    const body = JSON.stringify({
+      model: settings.model,
+      messages: [{ role: "user", content: `https://www.youtube.com/watch?v=${id}` }]
+    });
+    const minutes = Math.round(settings.timeoutMs / 60000);
+    const controller = new AbortController;
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        try {
+          controller.abort();
+        } catch {}
+        reject(new Error(t("The transcript endpoint did not respond within {n} minute(s); request cancelled.", "字幕接口在 {n} 分钟内无响应，已自动取消请求。", { n: minutes })));
+      }, settings.timeoutMs);
+    });
+    const requestText = (async () => {
+      const res = await fetch(settings.endpoint, { method: "POST", headers, body, signal: controller.signal });
+      const rawText = await res.text();
+      let payload = rawText;
+      try {
+        payload = rawText ? JSON.parse(rawText) : null;
+      } catch {}
+      if (!res.ok) {
+        const detail = payload?.error?.message || payload?.message || rawText || `HTTP ${res.status}`;
+        throw new Error(String(detail));
+      }
+      const text = extractText(payload);
+      if (!text)
+        throw new Error(t("The transcript endpoint returned no content.", "字幕接口未返回有效内容。"));
+      cache.set(id, { text, at: Date.now() });
+      updateIfExists(id, (rec) => Object.assign(rec, { videoTranscript: text, videoTranscriptUpdatedAt: Date.now() }));
+      return text;
+    })();
+    const promise = Promise.race([requestText, timeout]).finally(() => {
+      clearTimeout(timer);
+      inflight.delete(id);
+    });
+    inflight.set(id, promise);
+    return promise;
+  }
+
+  // src/plugins/transcript/TranscriptPane.ts
+  function TranscriptPane(ctx) {
+    const settings = getSettings();
+    const endpoint = h("input", { class: "ysrp-input", type: "text", placeholder: "https://example.com/v1/chat/completions", autocomplete: "off", spellcheck: "false" });
+    const model = h("input", { class: "ysrp-input", type: "text", placeholder: "transcript", autocomplete: "off", spellcheck: "false" });
+    const apiKey = secretInput("sk-***", () => t("Show", "显示"), () => t("Hide", "隐藏"), "--ysrp-transcript");
+    const timeout = h("input", { class: "ysrp-input", type: "number", min: String(MIN_MINUTES), max: String(MAX_MINUTES), step: "1", placeholder: "10" });
+    endpoint.value = settings.endpoint;
+    model.value = settings.model;
+    apiKey.input.value = settings.apiKey;
+    timeout.value = String(Math.round(settings.timeoutMs / 60000));
+    let timer;
+    const persist = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        const minutes = parseFloat(timeout.value);
+        saveSettings({
+          endpoint: endpoint.value,
+          model: model.value,
+          apiKey: apiKey.input.value,
+          timeoutMs: Number.isFinite(minutes) && minutes > 0 ? minutes * 60000 : undefined
+        });
+      }, 250);
+    };
+    for (const input of [endpoint, model, apiKey.input, timeout]) {
+      input.addEventListener("input", persist);
+      input.addEventListener("change", persist);
+    }
+    const videoTitle = h("span");
+    const videoId = h("span", { class: "ysrp-mono" });
+    const videoIdRow = h("div", { class: "ysrp-info-row" }, h("b", { text: t("Video ID", "视频 ID") }), videoId);
+    function updateVideo() {
+      const id = currentId();
+      if (!id) {
+        videoTitle.textContent = t("No active video detected", "未检测到可用的影片");
+        videoIdRow.style.display = "none";
+        return;
+      }
+      const rec = get(id);
+      videoTitle.textContent = knownDeArrow(id) || knownOriginal(id) || (rec && !isPlaceholderTitle(rec.videoName) ? rec.videoName : "") || UNKNOWN_TITLE;
+      videoId.textContent = id;
+      videoIdRow.style.display = "";
+    }
+    updateVideo();
+    ctx.listen(document, EVT_VIDEO, updateVideo);
+    return {
+      node: h("div", {}, card("closed-captioning", "--ysrp-transcript", t("Subtitles · Transcript", "字幕与接口设置"), t("Configure the OpenAI-compatible endpoint used for subtitles. Fetching lives in the Records tab.", "配置字幕接口（兼容 OpenAI）。字幕获取功能位于“记录”标签。"), field(t("API Endpoint", "API 接口路径"), endpoint), field(t("Model", "模型名称"), model), field(t("API Key", "API 密钥"), apiKey.node), field(t("Timeout (minutes)", "超时时长（分钟）"), timeout)), card("pen-to-square", "--ysrp-fg", t("Status & Tips", "状态与提示"), t("These settings apply instantly. Use the Records tab to fetch transcripts for specific videos.", "设置立即生效，具体字幕获取请在“记录”标签中触发。"), h("div", { class: "ysrp-info" }, h("div", { class: "ysrp-info-row" }, h("b", { text: t("Active video", "当前视频") }), videoTitle), videoIdRow))),
+      refresh: updateVideo
+    };
+  }
+
+  // src/plugins/transcript/index.ts
+  var openState = new Set;
+  function TranscriptAction({ id }) {
+    const status = h("span", { class: "ysrp-status" });
+    const output = h("textarea", { class: "ysrp-textarea is-mono", readonly: "readonly", rows: "5", placeholder: t("Transcript will appear here…", "字幕内容加载后会显示在这里…") });
+    let loading = false;
+    const setStatus = (text, isError = false) => {
+      status.textContent = text || "";
+      status.classList.toggle("is-error", isError);
+    };
+    const refresh = iconButton("arrows-rotate", t("Refresh transcript", "刷新字幕"), () => load(true));
+    const copy = iconButton("copy", t("Copy transcript", "复制字幕"), async () => {
+      if (!output.value.trim())
+        return setStatus(t("No transcript content to copy.", "暂无字幕内容可复制。"));
+      try {
+        await navigator.clipboard.writeText(output.value.trim());
+        setStatus(t("Transcript copied.", "字幕内容已复制。"));
+      } catch (err) {
+        setStatus(t("Copy failed: {message}", "复制失败：{message}", { message: errorMessage(err) }), true);
+      }
+    }, "is-link");
+    const panel = h("div", { class: "ysrp-panel ysrp-transcript-container" }, h("div", { class: "ysrp-panel-head" }, h("div", { class: "ysrp-header-left" }, h("strong", { class: "ysrp-panel-label", text: t("Transcript", "字幕") }), status), h("div", { class: "ysrp-header-left" }, refresh, copy)), output);
+    const button = iconButton("closed-captioning", t("Show transcript", "获取字幕"), () => setOpen(!panel.classList.contains("is-open")), "is-transcript");
+    function setOpen(open) {
+      panel.classList.toggle("is-open", open);
+      button.title = open ? t("Hide transcript", "隐藏字幕") : t("Show transcript", "获取字幕");
+      if (open)
+        openState.add(id);
+      else
+        openState.delete(id);
+      if (open && !output.value)
+        load(false);
+    }
+    function load(force) {
+      if (loading)
+        return;
+      if (!force) {
+        const hit = cached(id);
+        if (hit) {
+          output.value = hit;
+          copy.disabled = false;
+          setStatus(t("Transcript loaded from cache.", "字幕来自缓存。"));
+          return;
+        }
+      }
+      loading = true;
+      refresh.disabled = true;
+      button.disabled = true;
+      setStatus(t("Loading…", "正在获取…"));
+      fetchFor(id, force).then((text) => {
+        output.value = text;
+        setStatus(t("Transcript updated ({time})", "字幕已更新（{time}）", { time: new Date().toLocaleTimeString() }));
+      }).catch((err) => setStatus(t("Transcript failed: {message}", "字幕获取失败：{message}", { message: errorMessage(err) }), true)).finally(() => {
+        loading = false;
+        refresh.disabled = false;
+        button.disabled = false;
+        copy.disabled = !output.value;
+      });
+    }
+    if (openState.has(id))
+      setOpen(true);
+    return { button, panel };
+  }
+  var transcript_default = definePlugin({
+    name: "Transcript",
+    title: () => t("Transcript", "字幕"),
+    description: () => t("Fetch a video's transcript from an OpenAI-compatible endpoint, from the records list.", "在记录列表里通过兼容 OpenAI 的接口获取视频字幕。"),
+    icon: "closed-captioning",
+    authors: [Devs.V],
+    enabledByDefault: true,
+    settingsTab: {
+      id: "transcript",
+      group: "plugins",
+      order: 20,
+      icon: "closed-captioning",
+      label: () => t("Transcript", "字幕"),
+      render: TranscriptPane
+    },
+    recordAction: {
+      id: "transcript",
+      order: 10,
+      create: TranscriptAction,
+      onRemoved: (id) => openState.delete(id)
+    }
+  });
+
+  // virtual:~plugins
+  var __plugins_default = { [engine_default.name]: engine_default, [playerBadge_default.name]: playerBadge_default, [settings_default.name]: settings_default, [badgeToggle_default.name]: badgeToggle_default, [driveSync_default.name]: driveSync_default, [transcript_default.name]: transcript_default };
+
+  // src/api/PluginManager.ts
+  var logger6 = new Logger("PluginManager");
+  var plugins = {};
+  var order = [];
+  var toggleListeners = new Set;
+  for (const plugin of Object.values(__plugins_default)) {
+    plugin.started = false;
+    if (plugin.settings)
+      plugin.settings.pluginName = plugin.name;
+    plugins[plugin.name] = plugin;
+    order.push(plugin.name);
+  }
+  onPluginSettingChange((name, key) => {
+    const plugin = plugins[name];
+    if (key === "enabled" || !plugin?.started)
+      return;
+    try {
+      plugin.onSettingsChange?.(key);
+    } catch (err) {
+      logger6.error(`${name}.onSettingsChange failed`, err);
+    }
+  });
+  function listPlugins() {
+    return order.map((name) => plugins[name]);
+  }
+  function isPluginEnabled(name) {
+    const plugin = plugins[name];
+    if (!plugin)
+      return false;
+    if (plugin.required)
+      return true;
+    return getPluginSettings(name)?.enabled ?? plugin.enabledByDefault ?? false;
+  }
+  function startPlugin(plugin) {
+    if (plugin.started)
+      return true;
+    try {
+      plugin.start?.();
+      if (plugin.settingsTab)
+        addSettingsTab(plugin.settingsTab);
+      if (plugin.recordAction)
+        addRecordAction(plugin.recordAction);
+      if (plugin.beforeRestore)
+        addRestoreHook(plugin.name, plugin.beforeRestore.bind(plugin));
+      plugin.started = true;
+      return true;
+    } catch (err) {
+      logger6.error(`Failed to start ${plugin.name}`, err);
+      return false;
+    }
+  }
+  function stopPlugin(plugin) {
+    if (!plugin.started)
+      return true;
+    try {
+      if (plugin.settingsTab)
+        removeSettingsTab(plugin.settingsTab.id);
+      if (plugin.recordAction)
+        removeRecordAction(plugin.recordAction.id);
+      removeRestoreHook(plugin.name);
+      plugin.stop?.();
+      plugin.started = false;
+      return true;
+    } catch (err) {
+      logger6.error(`Failed to stop ${plugin.name}`, err);
+      return false;
+    }
+  }
+  function setPluginEnabled(name, enabled) {
+    const plugin = plugins[name];
+    if (!plugin || plugin.required)
+      return false;
+    setPluginSetting(name, "enabled", enabled);
+    const ok = enabled ? startPlugin(plugin) : stopPlugin(plugin);
+    for (const listener of toggleListeners)
+      listener();
+    return ok;
+  }
+  function onPluginToggle(listener) {
+    toggleListeners.add(listener);
+    return () => toggleListeners.delete(listener);
+  }
+  function startAllPlugins() {
+    for (const name of order) {
+      if (isPluginEnabled(name))
+        startPlugin(plugins[name]);
+    }
+  }
+
+  // src/styles.css
+  var styles_default2 = `/* Sizes are in px: YouTube sets html { font-size: 10px }, so rem would shrink everything.
+   Monochrome tokens modelled on void++'s settings UI (Grok surface/fg scale). */
+.ysrp-theme, .last-save-info-container {
+  --ysrp-bg: #ffffff; --ysrp-nav-bg: #f7f7f7; --ysrp-card: #fafafa; --ysrp-l2: #f0f0f0;
+  --ysrp-border: rgba(0, 0, 0, .08); --ysrp-border-strong: rgba(0, 0, 0, .16);
+  --ysrp-fg: #0d0d0d; --ysrp-sub: #5e5e5e; --ysrp-tertiary: #8f8f8f; --ysrp-hover: rgba(0, 0, 0, .05);
+  --ysrp-input: #ffffff; --ysrp-input-border: rgba(0, 0, 0, .12);
+  --ysrp-danger: #d93025; --ysrp-ok: #188038; --ysrp-backdrop: rgba(0, 0, 0, .4);
+  --ysrp-thumb: rgba(0, 0, 0, .2); --ysrp-track: transparent;
+  --ysrp-accent: var(--ysrp-fg); --ysrp-link: var(--ysrp-fg); --ysrp-note: var(--ysrp-fg);
+  --ysrp-storage: var(--ysrp-fg); --ysrp-display: var(--ysrp-fg); --ysrp-transcript: var(--ysrp-fg);
+  --ysrp-font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  .ysrp-theme, .last-save-info-container {
+    --ysrp-bg: #1a1a1a; --ysrp-nav-bg: #161616; --ysrp-card: #212121; --ysrp-l2: #2a2a2a;
+    --ysrp-border: rgba(255, 255, 255, .08); --ysrp-border-strong: rgba(255, 255, 255, .16);
+    --ysrp-fg: #fafafa; --ysrp-sub: #a3a3a3; --ysrp-tertiary: #737373; --ysrp-hover: rgba(255, 255, 255, .06);
+    --ysrp-input: #1f1f1f; --ysrp-input-border: rgba(255, 255, 255, .12);
+    --ysrp-danger: #f28b82; --ysrp-ok: #81c995; --ysrp-backdrop: rgba(0, 0, 0, .6);
+    --ysrp-thumb: rgba(255, 255, 255, .18);
+  }
+}
+
+/* Player badge */
+.last-save-info-container { display: flex; align-items: center; margin-left: 8px; font-family: var(--ysrp-font); font-size: 13px; line-height: normal; text-shadow: none; }
+.last-save-info { display: flex; align-items: center; gap: 6px; padding: 4px 4px 4px 8px; border-radius: 999px; background: var(--ysrp-bg); color: var(--ysrp-fg); }
+.last-save-info-text { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.last-save-info-text.is-error { color: var(--ysrp-danger); font-weight: 600; }
+.last-save-info-text.is-resumed { color: var(--ysrp-ok); font-weight: 600; }
+.ysrp-settings-button { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; border-radius: 999px; background: transparent; color: var(--ysrp-fg); cursor: pointer; font-size: 13px; }
+.ysrp-settings-button:hover { background: var(--ysrp-hover); }
+
+/* Dialog shell: left nav + main column */
+.ysrp-backdrop { position: fixed; inset: 0; background: var(--ysrp-backdrop); z-index: 9998; }
+.ysrp-settings-container { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 9999; box-sizing: border-box;
+  display: flex; flex-direction: row; width: min(896px, 92vw); height: min(640px, 85vh); padding: 0; border-radius: 16px;
+  border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); color: var(--ysrp-fg); box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
+  font-family: var(--ysrp-font); font-size: 14px; line-height: 1.5; text-align: left; overflow: hidden; }
+.ysrp-settings-container *, .ysrp-settings-container *::before, .ysrp-settings-container *::after { box-sizing: border-box; }
+.ysrp-settings-container, .ysrp-settings-container * { scrollbar-width: thin; scrollbar-color: var(--ysrp-thumb) var(--ysrp-track); }
+.ysrp-settings-container ::-webkit-scrollbar { width: 8px; height: 8px; }
+.ysrp-settings-container ::-webkit-scrollbar-track { background: transparent; }
+.ysrp-settings-container ::-webkit-scrollbar-thumb { background: var(--ysrp-thumb); border-radius: 999px; }
+.ysrp-settings-container button, .ysrp-settings-container input, .ysrp-settings-container select, .ysrp-settings-container textarea { font: inherit; color: inherit; }
+.ysrp-settings-container a { color: inherit; }
+.ysrp-settings-container [hidden] { display: none !important; }
+
+.ysrp-nav { display: flex; flex-direction: column; gap: 2px; flex: 0 0 208px; width: 208px; padding: 16px 12px 12px; background: var(--ysrp-nav-bg); border-right: 1px solid var(--ysrp-border); overflow-y: auto; }
+.ysrp-nav-group { padding: 12px 10px 4px; font-size: 12px; font-weight: 500; color: var(--ysrp-tertiary); }
+.ysrp-nav-group:first-child { padding-top: 4px; }
+.ysrp-tab { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 6px 10px; border: none; border-radius: 10px; background: transparent; color: var(--ysrp-sub); cursor: pointer; font-size: 14px; font-weight: 500; text-align: left; white-space: nowrap; }
+.ysrp-tab > i { width: 16px; text-align: center; font-size: 14px; }
+.ysrp-tab > span { overflow: hidden; text-overflow: ellipsis; }
+.ysrp-tab:hover { background: var(--ysrp-hover); color: var(--ysrp-fg); }
+.ysrp-tab.is-active { background: var(--ysrp-l2); color: var(--ysrp-fg); }
+.ysrp-version { margin-top: auto; padding: 12px 10px 0; font-size: 11px; line-height: 1.4; opacity: .3; overflow-wrap: anywhere; }
+.ysrp-version a { text-decoration: none; }
+.ysrp-version a:hover { text-decoration: underline; }
+
+.ysrp-main { position: relative; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; padding: 20px 24px 16px; }
+.ysrp-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; margin-bottom: 16px; }
+.ysrp-header-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ysrp-header h3 { margin: 0; font-size: 18px; font-weight: 600; color: var(--ysrp-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ysrp-badge { font-size: 12px; padding: 1px 10px; border-radius: 999px; border: 1px solid var(--ysrp-border-strong); color: var(--ysrp-sub); white-space: nowrap; }
+.ysrp-spinner { display: none; color: var(--ysrp-sub); }
+.ysrp-spinner.is-active { display: inline-flex; }
+.ysrp-close { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 32px; height: 32px; padding: 0; border: none; border-radius: 999px; background: transparent; color: var(--ysrp-sub); cursor: pointer; font-size: 16px; }
+.ysrp-close:hover { background: var(--ysrp-hover); color: var(--ysrp-fg); }
+.ysrp-body { display: flex; flex-direction: column; flex: 1; min-height: 0; overflow: hidden; }
+.ysrp-pane { overscroll-behavior: contain; display: none; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; margin-right: -12px; padding-right: 12px; -webkit-overflow-scrolling: touch; }
+.ysrp-pane.is-active { display: flex; }
+.ysrp-pane-hint { color: var(--ysrp-sub); font-size: 13px; }
+
+/* Shared controls */
+.ysrp-separator { flex: 0 0 auto; height: 1px; width: 100%; background: var(--ysrp-border); }
+.ysrp-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 16px; border-radius: 999px; border: 1px solid var(--ysrp-border-strong); color: var(--ysrp-fg) !important; background: transparent; font-size: 14px; font-weight: 500; cursor: pointer; flex: 1 1 auto; white-space: nowrap; transition: background .15s; }
+.ysrp-btn:hover:not(:disabled) { background: var(--ysrp-hover); }
+.ysrp-btn:disabled { opacity: .5; cursor: default; }
+.ysrp-btn.is-small { min-height: 30px; padding: 0 12px; font-size: 13px; flex: 0 0 auto; }
+.ysrp-btn.is-armed { border-color: var(--ysrp-danger); color: var(--ysrp-danger) !important; }
+.ysrp-ibtn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; flex: 0 0 auto; padding: 0; border: none; border-radius: 999px; background: transparent; cursor: pointer; color: var(--ysrp-sub); }
+.ysrp-ibtn:hover:not(:disabled) { background: var(--ysrp-hover); color: var(--ysrp-fg); }
+.ysrp-ibtn:disabled { cursor: default; }
+.ysrp-textarea, .ysrp-input, .ysrp-select { width: 100%; min-height: 36px; padding: 6px 12px; border: 1px solid var(--ysrp-input-border); border-radius: 10px; background: var(--ysrp-input); color: var(--ysrp-fg); font: inherit; font-size: 14px; outline: none; }
+.ysrp-input::placeholder, .ysrp-textarea::placeholder { color: var(--ysrp-tertiary); }
+.ysrp-textarea { resize: vertical; min-height: 72px; padding: 8px 12px; }
+.ysrp-textarea.is-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.ysrp-textarea:focus, .ysrp-input:focus, .ysrp-select:focus { border-color: var(--ysrp-border-strong); box-shadow: 0 0 0 2px var(--ysrp-hover); }
+.ysrp-select { width: auto; padding-right: 8px; cursor: pointer; }
+.ysrp-switch { position: relative; flex: 0 0 auto; width: 36px; height: 20px; padding: 0; border: none; border-radius: 999px; background: var(--ysrp-border-strong); cursor: pointer; transition: background .15s; }
+.ysrp-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .25); transition: transform .15s; }
+.ysrp-switch[aria-checked="true"] { background: var(--ysrp-fg); }
+.ysrp-switch[aria-checked="true"]::after { transform: translateX(16px); background: var(--ysrp-bg); }
+.ysrp-switch:disabled { opacity: .5; cursor: default; }
+.ysrp-check { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; }
+.ysrp-check input { width: 16px; height: 16px; margin: 0; accent-color: var(--ysrp-fg); }
+.ysrp-field { display: flex; flex-direction: column; gap: 6px; }
+.ysrp-field > span { font-weight: 500; color: var(--ysrp-sub); font-size: 13px; }
+.ysrp-inline { display: flex; gap: 8px; }
+.ysrp-inline .ysrp-btn { flex: 0 0 auto; }
+.ysrp-row-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.ysrp-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.ysrp-msg { color: var(--ysrp-sub); font-size: 13px; }
+.ysrp-msg.is-ok { color: var(--ysrp-ok); }
+.ysrp-msg.is-error { color: var(--ysrp-danger); }
+.ysrp-empty { color: var(--ysrp-tertiary); padding: 24px 0; text-align: center; }
+
+/* Section cards (storage, transcript, sync, display) */
+.ysrp-card { display: flex; flex-direction: column; gap: 12px; padding: 16px; border-radius: 16px; border: 1px solid var(--ysrp-border); background: var(--ysrp-card); }
+.ysrp-card-title { display: flex; align-items: center; gap: 10px; font-size: 15px; font-weight: 600; }
+.ysrp-card-icon, .ysrp-plugin-icon { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; width: 28px; height: 28px; border-radius: 8px; background: var(--ysrp-l2); color: var(--ysrp-fg); font-size: 13px; }
+.ysrp-card-sub { color: var(--ysrp-sub); font-size: 13px; margin-top: -4px; }
+.ysrp-choice { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 12px; border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); cursor: pointer; transition: border-color .15s, background .15s; }
+.ysrp-choice:hover:not(.is-disabled) { background: var(--ysrp-hover); }
+.ysrp-choice input { display: none; }
+.ysrp-choice.is-selected { border-color: var(--ysrp-fg); box-shadow: 0 0 0 1px var(--ysrp-fg); }
+.ysrp-choice.is-disabled { opacity: .5; cursor: not-allowed; }
+.ysrp-choice-badge { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; color: var(--ysrp-sub); border: 1px solid var(--ysrp-border-strong); flex: 0 0 auto; }
+.ysrp-choice.is-selected .ysrp-choice-badge { background: var(--ysrp-fg); border-color: var(--ysrp-fg); color: var(--ysrp-bg); }
+.ysrp-choice-text { display: flex; flex-direction: column; min-width: 0; }
+.ysrp-choice-label { font-weight: 500; }
+.ysrp-choice-hint { color: var(--ysrp-sub); font-size: 12px; }
+.ysrp-file { position: relative; overflow: hidden; display: flex; align-items: center; gap: 8px; flex: 1 1 200px; min-height: 36px; padding: 6px 14px; border: 1px dashed var(--ysrp-border-strong); border-radius: 999px; cursor: pointer; color: var(--ysrp-sub); }
+.ysrp-file:hover, .ysrp-file:focus-within { color: var(--ysrp-fg); background: var(--ysrp-hover); }
+.ysrp-file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ysrp-file input { display: none; }
+.ysrp-file.is-ios input { display: block; position: absolute; inset: 0; width: 100%; height: 100%; opacity: .01; margin: 0; cursor: pointer; }
+.ysrp-info { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border-radius: 12px; background: var(--ysrp-bg); border: 1px solid var(--ysrp-border); }
+.ysrp-info-row { display: flex; gap: 8px; flex-wrap: wrap; }
+.ysrp-info-row b { color: var(--ysrp-sub); font-weight: 500; white-space: nowrap; }
+
+/* Records list */
+.ysrp-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.ysrp-row { display: flex; flex-direction: column; gap: 6px; padding: 8px 8px 8px 12px; border-radius: 14px; border: 1px solid var(--ysrp-border); background: var(--ysrp-card); color: var(--ysrp-fg); }
+.ysrp-row.is-current { border-color: var(--ysrp-border-strong); box-shadow: inset 3px 0 0 var(--ysrp-fg); }
+.ysrp-row-top { display: flex; align-items: center; gap: 2px; }
+.ysrp-pct { min-width: 48px; margin-right: 8px; color: var(--ysrp-sub); font-size: 13px; font-variant-numeric: tabular-nums; }
+.ysrp-title { flex: 1; min-width: 0; word-break: break-word; }
+.ysrp-ibtn.ysrp-da.is-pending { filter: grayscale(1); opacity: .4; }
+.ysrp-ibtn.ysrp-da.is-off { filter: grayscale(1); opacity: .6; }
+.ysrp-ibtn.is-delete:hover:not(:disabled) { color: var(--ysrp-danger); }
+.ysrp-ibtn.is-copied { color: var(--ysrp-ok); }
+.ysrp-panel { display: none; flex-direction: column; gap: 6px; padding: 10px 12px; border-radius: 12px; background: var(--ysrp-bg); border: 1px solid var(--ysrp-border); }
+.ysrp-panel.is-open { display: flex; }
+.ysrp-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.ysrp-panel-label { font-weight: 500; color: var(--ysrp-sub); font-size: 13px; }
+.ysrp-status { font-size: 12px; color: var(--ysrp-sub); }
+.ysrp-status.is-error { color: var(--ysrp-danger); }
+.ysrp-url { display: flex; align-items: center; gap: 4px; word-break: break-all; color: var(--ysrp-sub); text-align: left; }
+.ysrp-url span { flex: 1; }
+.ysrp-note-text { white-space: pre-wrap; word-break: break-word; }
+.ysrp-note-text.is-empty { color: var(--ysrp-tertiary); }
+
+/* Plugins tab: search bar + two-column card grid */
+.ysrp-plugins { display: flex; flex-direction: column; gap: 12px; }
+.ysrp-search-bar { display: flex; gap: 8px; }
+.ysrp-search-bar .ysrp-search { flex: 1; min-width: 0; }
+.ysrp-search-bar .ysrp-filter { flex: 0 0 auto; }
+.ysrp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.ysrp-grid:empty { display: none; }
+.ysrp-plugin { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: 16px; border: 1px solid var(--ysrp-border); background: var(--ysrp-card); transition: border-color .15s; }
+.ysrp-plugin:hover { border-color: var(--ysrp-border-strong); }
+.ysrp-plugin.is-required { opacity: .4; }
+.ysrp-plugin.is-required:hover { opacity: .7; }
+.ysrp-plugin-body { display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.ysrp-plugin-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.ysrp-plugin-name { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.ysrp-plugin-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ysrp-plugin-tag { display: inline-flex; color: var(--ysrp-tertiary); font-size: 12px; }
+.ysrp-card-controls { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+.ysrp-plugin-desc { color: var(--ysrp-sub); font-size: 13px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 2.9em; }
+.ysrp-plugin-footer { color: var(--ysrp-tertiary); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Nested plugin config dialog */
+.ysrp-dialog-layer { position: absolute; inset: 0; z-index: 2; display: flex; align-items: center; justify-content: center; padding: 24px; background: var(--ysrp-backdrop); }
+.ysrp-dialog { position: relative; display: flex; flex-direction: column; gap: 14px; width: min(512px, 100%); max-height: 100%; padding: 24px; border-radius: 16px; border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); box-shadow: 0 16px 48px rgba(0, 0, 0, .3); overflow-y: auto; overscroll-behavior: contain; }
+.ysrp-dialog-close { position: absolute; top: 12px; right: 12px; }
+.ysrp-dialog-header { display: flex; flex-direction: column; gap: 4px; padding-right: 32px; }
+.ysrp-dialog-title { font-size: 18px; font-weight: 600; }
+.ysrp-dialog-desc { color: var(--ysrp-sub); font-size: 13px; }
+.ysrp-dialog-field { display: flex; flex-direction: column; gap: 8px; }
+.ysrp-dialog-label { font-size: 12px; font-weight: 500; color: var(--ysrp-tertiary); }
+.ysrp-dialog-text { color: var(--ysrp-sub); }
+.ysrp-dialog-settings { display: flex; flex-direction: column; border-radius: 14px; border: 1px solid var(--ysrp-border); background: var(--ysrp-card); }
+.ysrp-dialog-footer { display: flex; justify-content: flex-end; }
+.ysrp-setting-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px; }
+.ysrp-setting-row + .ysrp-setting-row { border-top: 1px solid var(--ysrp-border); }
+.ysrp-setting-row.is-stacked { flex-direction: column; align-items: stretch; gap: 8px; }
+.ysrp-row-label { min-width: 0; }
+.ysrp-row-title { font-size: 14px; }
+
+/* In-player &t= choice (F-2.6) */
+.ysrp-resume { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 1000; box-sizing: border-box;
+  display: flex; flex-direction: column; gap: 10px; width: 360px; max-width: calc(100% - 32px); padding: 18px; border-radius: 16px;
+  border: 1px solid var(--ysrp-border); background: var(--ysrp-bg); color: var(--ysrp-fg); box-shadow: 0 8px 32px rgba(0, 0, 0, .4);
+  font-family: var(--ysrp-font); font-size: 14px; line-height: 1.5; text-align: left; text-shadow: none; }
+.ysrp-resume * { box-sizing: border-box; }
+.ysrp-resume button { font: inherit; }
+.ysrp-resume-title { font-size: 16px; font-weight: 600; }
+.ysrp-resume-sub { color: var(--ysrp-sub); font-size: 13px; }
+.ysrp-resume .ysrp-btn { font-variant-numeric: tabular-nums; }
+.ysrp-resume-saved { background: var(--ysrp-fg) !important; border-color: var(--ysrp-fg) !important; color: var(--ysrp-bg) !important; }
+
+/* Narrow screens: nav becomes a scrolling top row */
+@media (max-width: 640px) {
+  .ysrp-settings-container { flex-direction: column; width: 94vw; height: 88vh; }
+  .ysrp-nav { flex: 0 0 auto; width: auto; flex-direction: row; gap: 4px; padding: 8px; border-right: none; border-bottom: 1px solid var(--ysrp-border); overflow-x: auto; overflow-y: hidden; }
+  .ysrp-nav-group, .ysrp-version { display: none; }
+  .ysrp-tab { width: auto; flex: 0 0 auto; }
+  .ysrp-main { padding: 16px; }
+  .ysrp-grid { grid-template-columns: minmax(0, 1fr); }
+}
+`;
+
+  // src/index.ts
+  var logger7 = new Logger("Core");
+  var flag = "__ysrpVideoMemory";
+  var host = window;
+  if (!host[flag]) {
+    host[flag] = { version: "[20261010] v2.1.0", plugins };
+    try {
+      registerStyle("core", styles_default2);
+      ensureFontAwesome();
+      startAllPlugins();
+    } catch (err) {
+      logger7.error("Fatal init error", err);
+    }
+  }
 })();
