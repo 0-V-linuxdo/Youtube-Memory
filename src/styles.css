@@ -54,7 +54,7 @@
 .ysrp-tab > span { overflow: hidden; text-overflow: ellipsis; }
 .ysrp-tab:hover { background: var(--ysrp-hover); color: var(--ysrp-fg); }
 .ysrp-tab.is-active { background: var(--ysrp-l2); color: var(--ysrp-fg); }
-.ysrp-version { margin-top: auto; padding: 12px 10px 0; font-size: 11px; opacity: .3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ysrp-version { margin-top: auto; padding: 12px 10px 0; font-size: 11px; line-height: 1.4; opacity: .3; overflow-wrap: anywhere; }
 .ysrp-version a { text-decoration: none; }
 .ysrp-version a:hover { text-decoration: underline; }
 
