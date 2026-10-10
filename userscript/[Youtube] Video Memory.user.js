@@ -900,7 +900,7 @@
 .ysrp-panel-label { font-weight: 600; color: var(--ysrp-sub); }
 .ysrp-status { font-size: 12px; color: var(--ysrp-accent); }
 .ysrp-status.is-error { color: var(--ysrp-danger); }
-.ysrp-url { display: flex; align-items: center; gap: 4px; word-break: break-all; color: var(--ysrp-sub); }
+.ysrp-url { display: flex; align-items: center; gap: 4px; word-break: break-all; color: var(--ysrp-sub); text-align: left; }
 .ysrp-url span { flex: 1; }
 .ysrp-note-text { white-space: pre-wrap; word-break: break-word; }
 .ysrp-note-text.is-empty { color: var(--ysrp-sub); font-style: italic; }
@@ -1396,9 +1396,11 @@
       } catch (err) { console.error('[Video Memory] copy failed', err); }
     }, 'is-link');
     const copiedTip = h('span', { class: 'ysrp-status', text: t('Copied', '已复制'), style: { display: 'none', flex: '0 0 auto' } });
-    const linkPanel = h('div', { class: 'ysrp-panel ysrp-url' },
-      h('span', { text: t('URL: {url}', '链接：{url}', { url }) }), copiedTip, copyBtn,
-      iconButton('arrow-up-right-from-square', t('Open in new tab', '在新标签页中打开 URL'), () => window.open(url, '_blank'), 'is-note'));
+    // The panel and the URL row are separate elements: .ysrp-url's display must not override the collapsed panel.
+    const linkPanel = h('div', { class: 'ysrp-panel ysrp-link-container' },
+      h('div', { class: 'ysrp-url' },
+        h('span', { text: t('URL: {url}', '链接：{url}', { url }) }), copiedTip, copyBtn,
+        iconButton('arrow-up-right-from-square', t('Open in new tab', '在新标签页中打开 URL'), () => window.open(url, '_blank'), 'is-note')));
 
     /* --- transcript panel (F-4.10) --- */
     const tStatus = h('span', { class: 'ysrp-status' });
@@ -1526,8 +1528,9 @@
     function renderPercent() {
       const progress = Number(rec.videoProgress) || 0;
       const duration = Number(rec.videoDuration) || (isCurrent ? Engine.currentDuration() : 0);
-      pctEl.textContent = duration > 0 ? `${Math.min(100, (progress / duration) * 100).toFixed(1)}%` : '—';
-      pctEl.title = formatTime(progress);
+      // Records from older versions have no duration: show the saved position instead of a percentage.
+      pctEl.textContent = duration > 0 ? `${Math.min(100, (progress / duration) * 100).toFixed(1)}%` : formatTime(progress);
+      pctEl.title = duration > 0 ? `${formatTime(progress)} / ${formatTime(duration)}` : t('Saved position', '保存的位置');
     }
 
     function update(nextRecord, current) {

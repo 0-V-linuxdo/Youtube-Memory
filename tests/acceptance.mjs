@@ -370,6 +370,9 @@ const tests = {
     const ids = await page.$$eval('.ysrp-row', rows => rows.map(r => r.dataset.videoId));
     const heading = await page.textContent('.ysrp-header h3');
     const pct = await page.textContent('.ysrp-row[data-video-id="daolder"] .ysrp-pct');
+    const legacyPct = await page.textContent('.ysrp-row[data-video-id="plainnew"] .ysrp-pct');
+    // Every panel (link, note, transcript) starts collapsed.
+    const openPanels = await page.$$eval('.ysrp-panel', ps => ps.filter(p => getComputedStyle(p).display !== 'none').length);
     const daTitle = await page.textContent('.ysrp-row[data-video-id="daolder"] .ysrp-title');
     const plainTitle = await page.textContent('.ysrp-row[data-video-id="plainnew"] .ysrp-title');
     const plainHasDa = await page.locator('.ysrp-row[data-video-id="plainnew"] .ysrp-da').count();
@@ -382,6 +385,7 @@ const tests = {
     const noted = await record(page, 'plainnew');
     // link + copy
     await page.click('.ysrp-row[data-video-id="plainnew"] .ysrp-ibtn.is-link');
+    const urlRow = await page.$eval('.ysrp-row[data-video-id="plainnew"] .ysrp-url', el => getComputedStyle(el).flexDirection + '/' + el.getBoundingClientRect().height);
     await page.click('.ysrp-row[data-video-id="plainnew"] .ysrp-url .ysrp-ibtn.is-link');
     const clip = await page.evaluate(() => navigator.clipboard.readText());
     // delete
@@ -389,11 +393,11 @@ const tests = {
     const afterDelete = await page.$$eval('.ysrp-row', rows => rows.map(r => r.dataset.videoId));
     const heading2 = await page.textContent('.ysrp-header h3');
     const ok = ids[0] === 'a14current' && ids.join() === 'a14current,plainnew,daolder' && heading.includes('(3)') &&
-      pct === '25.0%' && daTitle === 'DeArrow daolder' && toggled === 'Original daolder' && plainTitle === 'Original plainnew' &&
+      pct === '25.0%' && legacyPct === '0:10' && openPanels === 0 && urlRow.startsWith('row/') && parseFloat(urlRow.split('/')[1]) < 60 && daTitle === 'DeArrow daolder' && toggled === 'Original daolder' && plainTitle === 'Original plainnew' &&
       plainHasDa === 0 && noted.videoNote === 'hello note' && clip === 'https://www.youtube.com/watch?v=plainnew' &&
       afterDelete.join() === 'a14current,plainnew' && heading2.includes('(2)') && !(await record(page, 'daolder'));
     check('A-14', 'records tab: ordering, count, %, DeArrow toggle, note, copy link, delete', ok,
-      `order ${ids.join()}, "${heading}", pct ${pct}, titles "${daTitle}"/"${toggled}"/"${plainTitle}", note "${noted.videoNote}", clip ${clip}, after delete ${afterDelete.join()} "${heading2}"`);
+      `order ${ids.join()}, "${heading}", pct ${pct}/${legacyPct}, open panels ${openPanels}, url row ${urlRow}, titles "${daTitle}"/"${toggled}"/"${plainTitle}", note "${noted.videoNote}", clip ${clip}, after delete ${afterDelete.join()} "${heading2}"`);
     await ctx.close();
   },
 
