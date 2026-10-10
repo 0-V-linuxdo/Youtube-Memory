@@ -92,6 +92,90 @@ async function seeded(context, records, config) {
   return newPage(context, config);
 }
 
+
+// The 💾 badge toggle (default-on plugin) hides the badge until it is clicked.
+async function openSettings(page) {
+  const hidden = await page.evaluate(() => document.querySelector('.last-save-info-container')?.classList.contains('ysrp-badge-hidden'));
+  if (hidden) await page.click('.ysrp-badge-toggle');
+  await page.click('.ysrp-settings-button');
+}
+
+
+// In-memory Google OAuth + Drive v3 used by the DriveSync tests.
+async function driveMock(context, initialFiles = []) {
+  const drive = { files: [], uploads: [], deletes: 0, tokenCalls: 0, seq: 0 };
+  const add = f => { const file = { id: `f${++drive.seq}`, parents: [], mimeType: 'application/json', modifiedTime: new Date().toISOString(), content: '', ...f }; drive.files.push(file); return file; };
+  drive.add = add;
+  const folder = () => drive.files.find(f => f.mimeType === 'application/vnd.google-apps.folder');
+  drive.folder = folder;
+  drive.inFolder = () => drive.files.filter(f => folder() && f.parents.includes(folder().id));
+  for (const f of initialFiles) add(f);
+  const meta = f => ({ id: f.id, name: f.name, modifiedTime: f.modifiedTime });
+  const matches = (f, q) => q.split(' and ').every(c => {
+    let m;
+    if ((m = /^name = '(.*)'$/.exec(c))) return f.name === m[1].replace(/\\'/g, "'");
+    if ((m = /^name contains '(.*)'$/.exec(c))) return f.name.includes(m[1]);
+    if ((m = /^mimeType = '(.*)'$/.exec(c))) return f.mimeType === m[1];
+    if ((m = /^'(.*)' in parents$/.exec(c))) return f.parents.includes(m[1]);
+    if (c === 'trashed = false') return true;
+    throw new Error(`unsupported query ${c}`);
+  });
+  await context.route('https://oauth2.googleapis.com/token', route => {
+    drive.tokenCalls++;
+    const body = new URLSearchParams(route.request().postData());
+    if (body.get('refresh_token') !== 'rt-ok' || body.get('grant_type') !== 'refresh_token') return route.fulfill({ status: 400, json: { error: 'invalid_grant' } });
+    return route.fulfill({ json: { access_token: 'at-1', expires_in: 3600 } });
+  });
+  await context.route('https://www.googleapis.com/**', route => {
+    const req = route.request();
+    const url = new URL(req.url());
+    if (req.headers().authorization !== 'Bearer at-1') return route.fulfill({ status: 401, json: { error: { message: 'no auth' } } });
+    const idMatch = /\/files\/([^/?]+)$/.exec(url.pathname);
+    if (url.pathname.startsWith('/upload/')) {
+      const raw = req.postData();
+      const boundary = /boundary=(\S+)/.exec(req.headers()['content-type'])[1];
+      const parts = raw.split(`--${boundary}`).slice(1, 3).map(p => p.split('\r\n\r\n').slice(1).join('\r\n\r\n').replace(/\r\n$/, ''));
+      const metadata = JSON.parse(parts[0]);
+      let file;
+      if (idMatch) {
+        file = drive.files.find(f => f.id === idMatch[1]);
+        Object.assign(file, { name: metadata.name, content: parts[1], modifiedTime: new Date().toISOString() });
+      } else {
+        file = add({ name: metadata.name, parents: metadata.parents || [], content: parts[1] });
+      }
+      drive.uploads.push({ name: file.name, method: req.method() });
+      return route.fulfill({ json: meta(file) });
+    }
+    if (req.method() === 'GET' && !idMatch) {
+      const q = url.searchParams.get('q');
+      let list = drive.files.filter(f => matches(f, q));
+      if ((url.searchParams.get('orderBy') || '').startsWith('modifiedTime desc')) list = list.sort((a, b) => b.modifiedTime.localeCompare(a.modifiedTime));
+      return route.fulfill({ json: { files: list.map(meta) } });
+    }
+    if (req.method() === 'POST' && !idMatch) {
+      const body = JSON.parse(req.postData());
+      return route.fulfill({ json: { id: add({ name: body.name, mimeType: body.mimeType, parents: body.parents || [] }).id } });
+    }
+    const file = idMatch && drive.files.find(f => f.id === idMatch[1]);
+    if (!file) return route.fulfill({ status: 404, json: { error: { message: 'not found' } } });
+    if (req.method() === 'GET') return route.fulfill({ status: 200, contentType: 'application/json', body: file.content });
+    if (req.method() === 'DELETE') { drive.files = drive.files.filter(f => f !== file); drive.deletes++; return route.fulfill({ status: 204, body: '' }); }
+    return route.fulfill({ status: 400, body: 'unexpected' });
+  });
+  return drive;
+}
+
+const DRIVE_CREDS = { clientId: 'cid.apps.googleusercontent.com', clientSecret: 'secret', refreshToken: 'rt-ok' };
+// GM shim values are JSON-encoded; DriveSync stores its settings as a JSON string in GM.
+const gmSeed = (key, value) => ['__gm__' + key, JSON.stringify(value)];
+async function seedRaw(context, pairs) {
+  const blank = await context.newPage();
+  await blank.goto(`${ORIGIN}/blank`);
+  await blank.evaluate(entries => entries.forEach(([k, v]) => localStorage.setItem(k, v)), pairs);
+  await blank.close();
+}
+const remotePayload = (id, record) => JSON.stringify({ version: '2', videoId: id, videoUrl: `https://www.youtube.com/watch?v=${id}`, exportedAt: 1, record });
+
 /* ------------------------------------------------------------------ tests */
 const results = [];
 function check(id, name, ok, detail) {
@@ -337,17 +421,17 @@ const tests = {
     await goto(page, 'v=a13modal');
     await sleep(2000);
     const playingBefore = await page.evaluate(() => window.__mock.state.playing);
-    await page.click('.ysrp-settings-button');
+    await openSettings(page);
     const visible = await page.isVisible('.ysrp-settings-container');
     const playingAfter = await page.evaluate(() => window.__mock.state.playing);
     const clicks = await page.evaluate(() => window.__mock.state.clicks);
     const host = await page.evaluate(() => document.querySelector('.ysrp-settings-container').parentElement.id);
     await page.keyboard.press('Escape');
     const closedByEsc = !(await page.isVisible('.ysrp-settings-container'));
-    await page.click('.ysrp-settings-button');
+    await openSettings(page);
     await page.mouse.click(5, 5);
     const closedByBackdrop = !(await page.isVisible('.ysrp-settings-container'));
-    await page.click('.ysrp-settings-button');
+    await openSettings(page);
     await page.click('.ysrp-close');
     const closedByX = !(await page.isVisible('.ysrp-settings-container'));
     const overflow = await page.evaluate(() => document.body.style.overflow);
@@ -365,7 +449,7 @@ const tests = {
     });
     await goto(page, 'v=a14current');
     await sleep(3000);
-    await page.click('.ysrp-settings-button');
+    await openSettings(page);
     await sleep(800);
     const ids = await page.$$eval('.ysrp-row', rows => rows.map(r => r.dataset.videoId));
     const heading = await page.textContent('.ysrp-header h3');
@@ -406,7 +490,7 @@ const tests = {
     const page = await seeded(ctx, { s1: { videoProgress: 11, saveDate: 1, videoName: 'S1' }, s2: { videoProgress: 22, saveDate: 2, videoName: 'S2' } });
     await goto(page, 'v=a15store');
     await sleep(3000);
-    await page.click('.ysrp-settings-button');
+    await openSettings(page);
     await page.click('.ysrp-tab[data-tab-id="storage"]');
     await page.click('.ysrp-choice[data-value="gm"]');
     await page.click('.ysrp-pane[data-pane="storage"] .ysrp-btn >> nth=0');
@@ -446,7 +530,7 @@ const tests = {
     const page = await newPage(ctx);
     await goto(page, 'v=a16tr');
     await sleep(3000);
-    await page.click('.ysrp-settings-button');
+    await openSettings(page);
     await page.click('.ysrp-tab[data-tab-id="transcript"]');
     await page.fill('.ysrp-pane[data-pane="transcript"] input >> nth=0', 'example.com');
     await page.fill('.ysrp-pane[data-pane="transcript"] input >> nth=2', 'sk-test');
@@ -473,7 +557,7 @@ const tests = {
     const page = await newPage(ctx);
     await goto(page, 'v=a17lang');
     await sleep(2500);
-    await page.click('.ysrp-settings-button');
+    await openSettings(page);
     const before = await page.textContent('.ysrp-tab[data-tab-id="records"]');
     await page.click('.ysrp-tab[data-tab-id="display"]');
     await page.click('.ysrp-language-options .ysrp-choice[data-value="en"]');
@@ -488,6 +572,145 @@ const tests = {
     check('A-17', 'language switch applies immediately, keeps the dialog open and persists',
       before.trim() === '记录' && after.trim() === 'Records' && stillOpen && tab === 'display' && stored === 'en' && gearTitle === 'Open settings',
       `"${before.trim()}" → "${after.trim()}", open ${stillOpen}, tab ${tab}, stored ${stored}, after reload "${gearTitle}"`);
+    await ctx.close();
+  },
+  async 'A-19'() {
+    const ctx = await newContext();
+    const page = await seeded(ctx, { a19rec: { videoProgress: 20, saveDate: 1, videoName: 'R', originalTitle: 'R' } });
+    await goto(page, 'v=a19plugins');
+    await sleep(2000);
+    await openSettings(page);
+    await page.click('.ysrp-tab[data-tab-id="plugins"]');
+    const names = await page.$$eval('.ysrp-plugin', els => els.map(e => e.dataset.plugin));
+    const coreLocked = await page.$$eval('.ysrp-plugin[data-plugin="Engine"] .ysrp-switch', els => els[0].disabled);
+    await page.click('.ysrp-switch[data-plugin="Transcript"]');
+    await sleep(300);
+    const tabGone = await page.locator('.ysrp-tab[data-tab-id="transcript"]').count() === 0;
+    const activeTab = await page.evaluate(() => document.querySelector('.ysrp-settings-container').dataset.activeTab);
+    await page.click('.ysrp-tab[data-tab-id="records"]');
+    const rowButtonGone = await page.locator('.ysrp-row .is-transcript').count() === 0;
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('YSRP_Plugins')).plugins.Transcript.enabled);
+    await page.reload();
+    await sleep(2000);
+    await openSettings(page);
+    const stillOff = await page.locator('.ysrp-tab[data-tab-id="transcript"]').count() === 0;
+    await page.click('.ysrp-tab[data-tab-id="plugins"]');
+    await page.click('.ysrp-switch[data-plugin="Transcript"]');
+    await sleep(300);
+    await page.click('.ysrp-tab[data-tab-id="records"]');
+    const back = await page.locator('.ysrp-tab[data-tab-id="transcript"]').count() === 1 && await page.locator('.ysrp-row .is-transcript').count() > 0;
+    const expected = ['BadgeToggle', 'DriveSync', 'Transcript', 'Engine', 'PlayerBadge', 'Settings'];
+    check('A-19', 'plugins tab lists plugins; turning Transcript off removes its tab and row button, persists, and comes back',
+      JSON.stringify(names) === JSON.stringify(expected) && coreLocked && tabGone && activeTab === 'plugins' && rowButtonGone && stored === false && stillOff && back,
+      `plugins ${names.join(',')}, core locked ${coreLocked}, tab gone ${tabGone} (active ${activeTab}), row button gone ${rowButtonGone}, stored ${stored}, after reload off ${stillOff}, back ${back}`);
+    await ctx.close();
+  },
+
+  async 'A-20'() {
+    const ctx = await newContext();
+    const page = await newPage(ctx);
+    await goto(page, 'v=a20toggle');
+    await sleep(2500);
+    const toggles = await page.locator('.ysrp-badge-toggle').count();
+    const beforeBadge = await page.evaluate(() => document.querySelector('.ysrp-badge-toggle').nextElementSibling.classList.contains('last-save-info-container'));
+    const style = el => page.evaluate(() => { const b = document.querySelector('.last-save-info-container'); const cs = getComputedStyle(b); return `${cs.opacity}/${cs.pointerEvents}`; });
+    const hiddenAtStart = await style();
+    const playing = await page.evaluate(() => window.__mock.state.playing);
+    await page.click('.ysrp-badge-toggle');
+    const shown = await style();
+    const playingAfter = await page.evaluate(() => window.__mock.state.playing);
+    const clicks = await page.evaluate(() => window.__mock.state.clicks);
+    await page.evaluate(() => document.querySelector('.last-save-info-container').remove());
+    await sleep(1000);
+    const afterRebuild = await style();
+    const togglesAfterRebuild = await page.locator('.ysrp-badge-toggle').count();
+    await page.click('.ysrp-badge-toggle');
+    const hiddenAgain = await style();
+    await page.click('.ysrp-badge-toggle');
+    await page.click('.ysrp-settings-button');
+    await page.click('.ysrp-tab[data-tab-id="plugins"]');
+    await page.click('.ysrp-switch[data-plugin="BadgeToggle"]');
+    await page.keyboard.press('Escape');
+    const togglesOff = await page.locator('.ysrp-badge-toggle').count();
+    const visibleOff = await style();
+    check('A-20', 'badge toggle: one 💾 before the badge, hidden by default, toggles without touching playback, survives rebuilds, plugin off restores the badge',
+      toggles === 1 && beforeBadge && hiddenAtStart === '0/none' && shown === '1/auto' && playing === playingAfter && clicks === 0 &&
+      afterRebuild === '1/auto' && togglesAfterRebuild === 1 && hiddenAgain === '0/none' && togglesOff === 0 && visibleOff === '1/auto',
+      `toggles ${toggles}, start ${hiddenAtStart}, click ${shown}, player clicks ${clicks}, rebuilt ${afterRebuild} (${togglesAfterRebuild}), again ${hiddenAgain}, plugin off ${togglesOff} ${visibleOff}`);
+    await ctx.close();
+  },
+
+  async 'A-21'() {
+    const ctx = await newContext();
+    const drive = await driveMock(ctx);
+    const folderId = drive.add({ name: '[Youtube] Video Memory', mimeType: 'application/vnd.google-apps.folder' }).id;
+    drive.add({ name: 'Other｜a21other.json', parents: [folderId], modifiedTime: '2020-01-01T00:00:00.000Z', content: remotePayload('a21other', { videoProgress: 9 }) });
+    await seedRaw(ctx, [gmSeed('YSRP_DriveSettings', JSON.stringify(DRIVE_CREDS)), ['YSRP_DriveFullSyncDone', '1'],
+      ['Youtube_SaveResume_Progress-a21other', JSON.stringify({ videoProgress: 9, saveDate: 1, videoName: 'Other', updatedAt: 1 })]]);
+    const page = await newPage(ctx);
+    await goto(page, 'v=a21upload');
+    await sleep(4500);
+    const files = drive.inFolder().filter(f => f.name.endsWith('｜a21upload.json'));
+    const payload = files[0] && JSON.parse(files[0].content);
+    await sleep(6000);
+    const uploadsIn10s = drive.uploads.filter(u => u.name.endsWith('｜a21upload.json')).length;
+    await sleep(8000);
+    const uploads = drive.uploads.filter(u => u.name.endsWith('｜a21upload.json'));
+    const latest = JSON.parse(drive.inFolder().find(f => f.name.endsWith('｜a21upload.json')).content);
+    const rec = await record(page, 'a21upload');
+    await openSettings(page);
+    await page.click('.ysrp-row[data-video-id="a21other"] .is-delete');
+    await sleep(2500);
+    const remaining = drive.files.filter(f => f.name.endsWith('｜a21other.json')).length;
+    check('A-21', 'drive: progress uploads as "<title>｜<id>.json" in the folder, at most once per 15 s, delete removes the file',
+      files.length === 1 && files[0].name === 'Original a21upload｜a21upload.json' && payload.version === '2' && payload.videoId === 'a21upload' &&
+      payload.videoUrl === 'https://www.youtube.com/watch?v=a21upload' && typeof payload.record.videoProgress === 'number' && !('driveSync' in payload.record) &&
+      uploadsIn10s === 1 && uploads.length === 2 && uploads[1].method === 'PATCH' && latest.record.videoProgress > 10 &&
+      rec.driveSync && rec.driveSync.lastUploadAt > 0 && remaining === 0,
+      `files ${files.map(f => f.name).join(',')}, uploads ${uploadsIn10s} in 10s, ${uploads.length} in 18s (${uploads.map(u => u.method).join('/')}), latest progress ${latest.record.videoProgress}, after delete ${remaining}`);
+    await ctx.close();
+  },
+
+  async 'A-22'() {
+    const ctx = await newContext();
+    const drive = await driveMock(ctx);
+    const folderId = drive.add({ name: '[Youtube] Video Memory', mimeType: 'application/vnd.google-apps.folder' }).id;
+    const now = new Date().toISOString();
+    drive.add({ name: 'R｜a22remote.json', parents: [folderId], modifiedTime: now, content: remotePayload('a22remote', { videoProgress: 120, saveDate: Date.now(), videoName: 'R', videoNote: 'from phone', updatedAt: Date.now() - 1000 }) });
+    drive.add({ name: 'O｜a22old.json', parents: [folderId], modifiedTime: '2020-01-01T00:00:00.000Z', content: remotePayload('a22old', { videoProgress: 200, saveDate: 1, videoName: 'O' }) });
+    await seedRaw(ctx, [gmSeed('YSRP_DriveSettings', JSON.stringify(DRIVE_CREDS)), ['YSRP_DriveFullSyncDone', '1'],
+      ['Youtube_SaveResume_Progress-a22remote', JSON.stringify({ videoProgress: 30, saveDate: 1, videoName: 'R', updatedAt: Date.now() - 86400000 })],
+      ['Youtube_SaveResume_Progress-a22old', JSON.stringify({ videoProgress: 40, saveDate: 1, videoName: 'O', updatedAt: Date.now() })]]);
+    const page = await newPage(ctx);
+    await goto(page, 'v=a22remote');
+    await sleep(3000);
+    const remoteTime = await playerTime(page);
+    const remoteRec = await record(page, 'a22remote');
+    await goto(page, 'v=a22old');
+    await sleep(3000);
+    const oldTime = await playerTime(page);
+    check('A-22', 'drive: a newer remote record is applied before resuming; an older one does not overwrite local',
+      remoteTime >= 119 && remoteTime < 126 && remoteRec.videoNote === 'from phone' && oldTime >= 39 && oldTime < 46,
+      `newer remote → plays at ${remoteTime.toFixed(1)}s (note "${remoteRec.videoNote}"), older remote → plays at ${oldTime.toFixed(1)}s`);
+    await ctx.close();
+  },
+
+  async 'A-23'() {
+    const ctx = await newContext();
+    const drive = await driveMock(ctx);
+    const recs = ['a23one', 'a23two', 'a23three'].map(id => [`Youtube_SaveResume_Progress-${id}`, JSON.stringify({ videoProgress: 50, saveDate: 1, videoName: `Title ${id}` })]);
+    await seedRaw(ctx, [gmSeed('YSRP_DriveSettings', JSON.stringify(DRIVE_CREDS)), ...recs]);
+    const page = await newPage(ctx);
+    await page.goto(`${ORIGIN}/`);
+    await sleep(6000);
+    const names = drive.inFolder().map(f => f.name).sort();
+    const flag = await page.evaluate(() => localStorage.getItem('YSRP_DriveFullSyncDone'));
+    const uploads = drive.uploads.length;
+    await page.reload();
+    await sleep(4500);
+    check('A-23', 'drive: first configuration uploads every record once and sets the done flag',
+      names.join(',') === 'Title a23one｜a23one.json,Title a23three｜a23three.json,Title a23two｜a23two.json' && flag === '1' && drive.uploads.length === uploads,
+      `files ${names.join(',')}, flag ${flag}, uploads ${uploads} then ${drive.uploads.length} after reload`);
     await ctx.close();
   }
 };
@@ -507,8 +730,8 @@ const ctxErr = await newContext();
 const page = await newPage(ctxErr);
 await goto(page, 'v=a18tt');
 await sleep(2500);
-await page.click('.ysrp-settings-button');
-for (const tab of ['records', 'storage', 'transcript', 'display']) await page.click(`.ysrp-tab[data-tab-id="${tab}"]`);
+await openSettings(page);
+for (const tab of ['records', 'storage', 'transcript', 'drive', 'plugins', 'display']) await page.click(`.ysrp-tab[data-tab-id="${tab}"]`);
 await page.click('.ysrp-tab[data-tab-id="records"]');
 await page.click('.ysrp-row .ysrp-ibtn.is-note');
 await page.click('.ysrp-row .ysrp-note-container .ysrp-ibtn');

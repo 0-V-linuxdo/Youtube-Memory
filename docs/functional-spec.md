@@ -11,9 +11,10 @@
 |---|---|
 | 运行方式 | 用户脚本（Tampermonkey / Violentmonkey / Orion / iOS Userscripts 等） |
 | 匹配 | `*://*.youtube.com/*`（含 `www.` 与 `m.`），在 YouTube 的 SPA 内常驻 |
-| 授权 | `GM_getValue` `GM_setValue` `GM_deleteValue` `GM_listValues`；无这些 API 时自动降级为仅 localStorage |
+| 授权 | `GM_getValue` `GM_setValue` `GM_deleteValue` `GM_listValues`；无这些 API 时自动降级为仅 localStorage。`GM_xmlhttpRequest`（`@connect oauth2.googleapis.com`、`www.googleapis.com`）仅供 Drive 同步插件使用，缺失时退回 `fetch` |
 | 视频识别 | 观看页 `/watch?v=<id>`。Shorts、嵌入页不在范围内 |
-| 外部服务 | DeArrow 标题 `https://sponsor.ajay.app/api/branding?videoID=<id>`；YouTube oEmbed 原标题 `https://www.youtube.com/oembed?format=json&url=https://youtu.be/<id>`；字幕接口（OpenAI 兼容，可配置）；Font Awesome 6.5.1 图标 CSS（cdnjs） |
+| 外部服务 | DeArrow 标题 `https://sponsor.ajay.app/api/branding?videoID=<id>`；YouTube oEmbed 原标题 `https://www.youtube.com/oembed?format=json&url=https://youtu.be/<id>`；字幕接口（OpenAI 兼容，可配置）；Font Awesome 6.5.1 图标 CSS（cdnjs）；Google OAuth / Drive v3（仅 Drive 同步插件，见 9.4） |
+| 源码与构建 | TypeScript 源码在 `src/`，按功能拆成插件（第 9 节）；`bun run build` 打包成单文件 `userscript/[Youtube] Video Memory.user.js`（文件名、`@namespace` 不变，已安装的用户可直接更新） |
 | 安全 | YouTube 启用 Trusted Types，**任何地方都不得写 `innerHTML`**（包括赋空字符串），只能用 DOM API 构建界面 |
 
 ---
@@ -34,6 +35,8 @@
 | `videoTranscript` | string（可缺省） | 已获取的字幕全文 |
 | `videoTranscriptUpdatedAt` | number（可缺省） | 字幕获取时间 |
 | `videoDuration` | number（**新版新增，可缺省**） | 视频总时长（秒），用于在列表中计算任意记录的百分比 |
+| `updatedAt` | number（可缺省，与 v1.4.0 相同） | 记录最近一次被本地修改的时间（ms）。进度、标题、笔记、字幕写入时更新；仅改同步元数据时不更新 |
+| `driveSync` | object（可缺省，与 v1.4.0 相同） | `{lastUploadAt, lastDownloadAt}`，Drive 同步插件记录的最近上传/下载时间（ms）；新版另加 `remoteModifiedAt`（最近一次上传后云端文件的修改时间，避免把自己刚上传的文件再下载一遍） |
 
 读取时未知字段原样保留；写入一律“读取—合并—写回”，不得丢弃其它字段（笔记、字幕等）。
 
@@ -43,6 +46,9 @@
 | `YSRP_StorageMode` | `local` 或 `gm` |
 | `YSRP_TranscriptSettings` | JSON 字符串 `{endpoint, model, apiKey, timeoutMs}` |
 | `YSRP_LanguagePreference` | `auto` / `zh` / `en` |
+| `YSRP_Plugins` | JSON 字符串 `{"plugins": {"<插件名>": {"enabled": bool, ...该插件的设置}}}`；缺省的项取插件默认值 |
+| `YSRP_DriveSettings` | JSON 字符串 `{clientId, clientSecret, refreshToken}`（与 v1.4.0 同键同格式）。含密钥，**例外**：读取时 GM 优先、其次 localStorage（可直接沿用 v1.4.0 留在 localStorage 里的凭据）；写入只写 GM，GM 不可用时才写 localStorage |
+| `YSRP_DriveFullSyncDone` | `1` 表示已完成首次全量上传（与 v1.4.0 同键） |
 
 ### F-1.3 存储后端
 - `local`：`window.localStorage`（默认）。
@@ -140,7 +146,7 @@
 - **F-4.2** 打开时锁定 `body` 滚动，关闭时恢复原值；窗口尺寸变化保持居中。
 - **F-4.3** 关闭方式：右上角 ✖；点击遮罩；按 `Esc`（D-4，旧版仅 ✖）。
 - **F-4.4** 标题“已保存视频 - (N) / Saved Videos - (N)”，旁边徽章显示当前后端（“浏览器本地存储 / localStorage”或“GM 存储 / GM Storage”）；列表刷新时显示旋转刷新图标。
-- **F-4.5** 四个标签页：记录 Records、存储 Storage、字幕 Transcript、界面 Display；当前标签高亮。
+- **F-4.5** 标签页依次为：记录 Records、存储 Storage、插件提供的标签（默认有字幕 Transcript、云同步 Drive）、插件 Plugins、界面 Display；当前标签高亮。插件被关闭时它的标签随之消失，打开时出现，无需刷新页面。
 - **F-4.6** 弹窗内滚动条为细滚动条并随主题配色。
 
 ### 4.2 记录标签
@@ -193,6 +199,9 @@
 | D-5 | 列表按最近保存排序 | 易用性 |
 | D-6 | 导入时对象值自动序列化 | 防止手工编辑的备份导入后被启动清理删除 |
 | D-7 | 新增 `videoDuration` 字段 | 修复 BUG-8；旧数据缺失时安全降级 |
+| D-8 | 功能拆成可开关的插件（第 9 节），新增“插件”标签 | 参照 void++ 架构；可选功能可单独关闭 |
+| D-9 | Drive 同步在**每次打开视频、恢复进度之前**拉取该视频的云端记录（v1.4.0 只在页面加载时拉一次） | 站内跳转到另一台设备看过的视频时也能接着看 |
+| D-10 | 徽标显示/隐藏开关内置为默认开启的插件（原为单独的 Controller 脚本） | 用户要求 |
 
 ---
 
@@ -221,6 +230,11 @@
 | A-16 | 字幕 | 设置保存与地址规范化正确；请求体格式正确；响应解析正确 |
 | A-17 | 界面语言 | 切换中/英立即生效并持久化 |
 | A-18 | Trusted Types | 在 `require-trusted-types-for 'script'` 下无任何异常 |
+| A-19 | 插件标签 | 列出全部插件及开关；关闭“字幕”后字幕标签和行内字幕按钮立即消失，刷新后仍关闭；重新打开后恢复 |
+| A-20 | 徽标开关插件 | 默认开启：徽标前有唯一的 💾 按钮，徽标默认隐藏；点击显示、再点隐藏，播放状态不变；徽标重建后状态保持；关闭插件后按钮消失、徽标可见 |
+| A-21 | Drive 上传 | 填好凭据后，新进度约 1.5 秒后上传为文件夹内的 `<标题>｜<id>.json`，内容格式正确；同一视频 15 秒内的多次变化只上传一次；删除记录同时删除云端文件 |
+| A-22 | Drive 下载 | 云端记录比本地新：打开视频时先应用云端进度再恢复；云端更旧：不覆盖本地 |
+| A-23 | Drive 首次全量 | 第一次配置凭据后上传全部本地记录并写入完成标记，之后不再重复全量 |
 
 ---
 
@@ -229,6 +243,53 @@
 `tests/acceptance.mjs` 用 Playwright 在模拟的 YouTube 观看页（`tests/mock/`，带 `require-trusted-types-for 'script'`）上逐条跑上表场景：
 
 ```bash
+bun install && bun run build                                            # src/ → userscript/[Youtube] Video Memory.user.js
 NODE_PATH=$(npm root -g) node tests/acceptance.mjs                      # 新脚本
 NODE_PATH=$(npm root -g) node tests/acceptance.mjs path/to/old.user.js  # 对照旧版
 ```
+
+---
+
+## 9. 插件架构与插件（参照 void++）
+
+### 9.1 插件框架
+- **P-1** 每个功能是一个插件：名称、说明、作者、`enabledByDefault`（默认是否开启）、`required`（核心插件，不能关闭）、设置项定义、`start()` / `stop()`；可选地向设置弹窗贡献一个标签页、向记录行贡献一个按钮及其展开面板、向进度引擎贡献“恢复前”钩子（P-D.8）。
+- **P-2** 是否启用：核心插件始终启用；其余插件取 `YSRP_Plugins` 中该插件的 `enabled`，没有则取 `enabledByDefault`。
+- **P-3** 启动时按顺序启动所有启用的插件：先核心插件（进度引擎、播放器徽标、设置弹窗），再其它插件。某个插件启动失败只记日志，不影响其它插件和进度保存。
+- **P-4** 运行中开关插件立即生效并保存，无需刷新：关闭时插件移除它添加的一切（DOM、监听、定时器、样式、标签页、行按钮），打开时重新添加。
+- **P-5** 设置项类型：开关（布尔）、文本、数字、下拉选择。值保存在 `YSRP_Plugins` 中该插件名下，修改即保存，并通知插件。
+- **P-6** “插件”标签：每个插件一张卡片，显示名称、说明和开关；核心插件标“核心”且开关不可用；已开启的插件在卡片内显示它的设置项。
+- **P-7** 插件列表（括号内为默认状态）：
+
+| 插件 | 说明 |
+|---|---|
+| 进度引擎 Engine（核心） | 第 2 节 |
+| 播放器徽标 PlayerBadge（核心） | 第 3 节与 F-2.6 选择弹窗 |
+| 设置弹窗 Settings（核心） | 第 4 节的外壳、记录、存储、插件、界面标签 |
+| 徽标开关 BadgeToggle（开启） | 9.2 |
+| 字幕 Transcript（开启） | 9.3 |
+| 云同步 DriveSync（开启） | 9.4；没有凭据时什么也不做 |
+
+### 9.2 徽标开关（BadgeToggle）
+- **P-B.1** 在徽标 `.last-save-info-container` 前插入一个 💾 按钮 `.ysrp-badge-toggle`（透明背景、无边框、字号 1.5rem、右边距 .5rem），整个页面只有一个。
+- **P-B.2** 设置项“默认隐藏徽标”（开关，默认开）：开时每次打开页面徽标先隐藏（`opacity: 0`、`pointer-events: none`），关时先显示。点击 💾 在显示/隐藏之间切换；徽标被重建（语言切换、控制栏重建）后保持当前状态。
+- **P-B.3** 点击 💾 不影响播放（同 F-3.4 的事件拦截）。
+- **P-B.4** 关闭插件：移除按钮，徽标恢复可见。
+
+### 9.3 字幕（Transcript）
+- **P-T.1** 字幕标签（F-4.18 – F-4.23）和记录行的字幕按钮与面板（F-4.10）都由该插件提供。
+- **P-T.2** 关闭插件后两者都不出现；已保存在记录里的 `videoTranscript` 不删除。
+
+### 9.4 云同步（DriveSync，替代 v1.4.0 的 Google Drive 自动同步）
+- **P-D.1 凭据** 用户自己的 Google OAuth 客户端 ID、客户端密钥与 refresh token（需 Drive 权限），保存在 `YSRP_DriveSettings`（F-1.2）。三项不全时插件不发任何请求，只在标签里提示填写。
+- **P-D.2 访问令牌** 向 `https://oauth2.googleapis.com/token` `POST` 表单 `client_id`、`client_secret`、`refresh_token`、`grant_type=refresh_token`；令牌缓存到过期前 60 秒。Drive 返回 401 时丢弃缓存重新取一次再重试一次。
+- **P-D.3 文件夹** 在“我的云端硬盘”中使用名为 `[Youtube] Video Memory` 的文件夹（`mimeType = application/vnd.google-apps.folder`、未删除），没有则创建；本页内缓存其 ID。
+- **P-D.4 文件** 每个视频一个文件，名为 `<标题>｜<videoId>.json`：标题取记录的 `videoName`，去掉控制字符，把 `\ / : * ? " < > |` 换成 `-`，最长 120 字符，为空时用 `Unknown Title`。内容为 `{"version": "2", "videoId", "videoUrl": "https://www.youtube.com/watch?v=<id>", "exportedAt": <ms>, "record": <记录，去掉 driveSync 字段>}`。从文件名末尾的 `｜<id>` 或 `[<id>]` 解析视频 ID。
+- **P-D.5 查找** 在文件夹内查 `name contains '<id>'`、`mimeType = 'application/json'`、未删除，按修改时间倒序，只认文件名解析出的 ID 与之相等的文件；最新的一个为该视频的文件。
+- **P-D.6 上传** 记录在本地被修改（`updatedAt` 晚于 `driveSync.lastUploadAt`）后排队：第一次修改后 1.5 秒上传，期间的修改合并（后续修改不再推迟这个时间，否则每 1.5 秒一次的进度保存会让上传永远等下去）；同一视频两次上传至少间隔 15 秒（未到时间则推迟到 15 秒时）；同一时刻只有一个上传在进行。已有文件则更新内容（标题变化时同时改名），否则在文件夹中新建；同一视频多余的文件删除。成功后写入 `driveSync.lastUploadAt`（不改 `updatedAt`、不再次触发上传）。
+- **P-D.7 删除** 在记录标签删除一条记录时删除该视频的云端文件。导入、切换存储后端等批量操作不触发自动上传或删除（需要时用“全部上传”）。
+- **P-D.8 打开视频时下载（D-9）** 每次开始一个视频会话时拉取该视频的云端文件：云端修改时间晚于本地 `updatedAt`（缺省为 0）且晚于 `driveSync.lastDownloadAt` 时，用云端记录覆盖本地同名字段（本地独有的字段保留），并把 `driveSync.lastDownloadAt`、`lastUploadAt` 设为当前时间，此次写入不触发上传。进度引擎在读取存档前最多等待 4 秒（徽标显示“正在同步… / Syncing…”），超时或失败则按本地数据继续。云端没有文件但本地有记录时排队上传。
+- **P-D.9 首次全量** 凭据齐全且 `YSRP_DriveFullSyncDone` 未设置时，上传全部本地记录（不论是否改过），完成后写入该标记。同时若在云端找到 v1.4.0 早期的单文件 `[Youtube] Video Memory Sync.json`（格式同 F-1.4 的 `entries`），把其中本地没有或 `saveDate` 更新的记录导入本地（不删除该文件）。标签里的“全部上传”按钮随时执行一次全量上传。
+- **P-D.10 状态** 标签内状态行显示：未配置 / 同步中（已完成 N / 共 M）/ 已同步（时间）/ 已推迟 / 出错（原因）；同时以 `ysrp-drive-sync-status` 事件（`detail: {state, done, total, message}`，`state` 取 `start` `progress` `done` `deferred` `idle` `error`）广播。
+- **P-D.11 标签** “云同步”标签含：客户端 ID、客户端密钥（可显示/隐藏）、refresh token（可显示/隐藏）三个输入框；“保存并验证”按钮（保存后立即换取一次令牌，显示成功或错误；首次保存成功后开始 P-D.9）；“全部上传”按钮；状态行；获取凭据的简短说明。
+- **P-D.12** 同步出错不影响进度保存与恢复；网络请求优先用 `GM_xmlhttpRequest`，不可用时用 `fetch`。
