@@ -1,11 +1,11 @@
-// Core record-card controls: notes (N-5.4.5, saving rules R-63..R-73) and link (N-5.4.4).
+// Records plugin card controls: notes (N-5.4.5, saving rules R-63..R-73) and link (N-5.4.4).
 // Both open nested dialogs; nothing expands inside the card (N-5.4.3).
 
-import { openDialog } from '../../../api/dialogs';
-import { readRecord, updateRecord } from '../../../api/records';
-import type { RowContribution, RowContext } from '../../../api/rows';
-import { button, copyText, iconButton, setButtonLabel, setIconButtonLabel, textArea, textInput } from '../../../api/ui';
-import { tr } from '../../../utils/i18n';
+import { openDialog } from '../../api/dialogs';
+import { readRecord, updateRecord } from '../../api/records';
+import type { RowContribution, RowContext } from '../../api/rows';
+import { button, copyText, iconButton, setButtonLabel, setIconButtonLabel, textArea, textInput } from '../../api/ui';
+import { tr } from '../../utils/i18n';
 
 function storedNote(videoId: string): string {
   const rec = readRecord(videoId);

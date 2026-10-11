@@ -1,9 +1,9 @@
-// Player badge (S-71, S-86..S-89, L-56..L-61, L-74..L-77) and the N-3 resume choice dialog.
+// Player badge (S-71, S-86..S-89, L-56..L-61, L-74..L-77) with the gear button (N-5.9.1) and the N-3 resume choice dialog.
 
 import { badgeChanged, badgeText, badgeTooltip, setBadgeContainer } from '../../../api/badge';
 import { definePlugin, type PluginContext } from '../../../api/plugins';
 import { setResumePromptImpl } from '../../../api/resumePrompt';
-import { openSettings } from '../../../api/tabs';
+import { pressGear } from '../../../api/settingsWindow';
 import {
   CLS_BADGE_CONTAINER, CLS_BADGE_INNER, CLS_BADGE_TEXT, CLS_SETTINGS_BUTTON, EVT_LANGUAGE, FONT_AWESOME_URL
 } from '../../../utils/constants';
@@ -27,10 +27,10 @@ function createBadge(): HTMLElement {
   const tooltip = badgeTooltip();
   if (tooltip) text.title = tooltip;
   const gear = h('button', { class: CLS_SETTINGS_BUTTON, type: 'button', title: tr('Open settings', '打开设置') }, icon('gear'));
-  // S-100: open on pointerdown in the capture phase; nothing reaches the player.
+  // S-100 / N-5.9.1: respond on pointerdown in the capture phase; nothing reaches the player.
   gear.addEventListener('pointerdown', ev => {
     swallow(ev);
-    openSettings();
+    pressGear(gear);
   }, true);
   gear.addEventListener('click', swallow, true);
   gear.addEventListener('touchstart', swallow, { capture: true, passive: false });

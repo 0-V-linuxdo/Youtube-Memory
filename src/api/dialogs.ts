@@ -15,6 +15,7 @@ export interface DialogOptions {
   content?: Child[];
   footer?: Child[];
   cls?: string;
+  dataset?: Record<string, string>;
   /** Called once when the dialog closes, whatever closed it. */
   onClose?: () => void;
 }
@@ -50,7 +51,8 @@ export function openDialog(opts: DialogOptions): DialogHandle {
   const closeBtn = iconButton('xmark', tr('Close', '关闭'), 'ysrp-dialog-close');
   const el = h('div', {
     class: `ysrp-dialog is-${opts.size || 'md'}${opts.cls ? ` ${opts.cls}` : ''}`,
-    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': opts.title }
+    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': opts.title },
+    dataset: opts.dataset
   },
     closeBtn,
     h('div', { class: 'ysrp-dialog-head' },

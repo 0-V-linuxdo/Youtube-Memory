@@ -1,4 +1,5 @@
-/* Settings modal shell (N-5.3) and tab layouts. Parts (cards, rows, dialogs…) are in src/api/ui.css.
+/* Settings window shell (N-5.3), Plugins page, plugin settings dialogs (N-5.6), plugin menu (N-5.9) and the
+   feature plugins' panels. Parts (cards, rows, dialogs…) are in src/api/ui.css.
    All sizes in px: YouTube sets html { font-size: 10px }. */
 
 .ysrp-backdrop {
@@ -41,7 +42,7 @@
   padding: 12px 12px 56px;
   background: var(--ysrp-surface-base);
   border-right: 1px solid var(--ysrp-border-l1);
-  overflow-y: auto;
+  overflow: hidden;
 }
 .ysrp-nav-groups { display: flex; flex-direction: column; gap: 8px; }
 .ysrp-nav-group { display: flex; flex-direction: column; gap: 2px; }
@@ -71,8 +72,7 @@
   cursor: pointer;
   transition: background-color 150ms, color 150ms;
 }
-.ysrp-tab:hover { background: var(--ysrp-surface-l2); }
-.ysrp-tab.is-active { background: var(--ysrp-surface-l2); color: var(--ysrp-fg-primary); font-weight: 500; }
+.ysrp-tab.is-active { background: var(--ysrp-surface-l2); color: var(--ysrp-fg-primary); font-weight: 500; cursor: default; }
 .ysrp-tab-icon { display: inline-flex; justify-content: center; flex: 0 0 16px; width: 16px; font-size: 16px; }
 .ysrp-tab-icon i { font-size: 16px; }
 .ysrp-tab-label { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -90,6 +90,7 @@
   user-select: text;
   -webkit-user-select: text;
 }
+.ysrp-nav-footer.is-main { display: none; }
 .ysrp-version-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ysrp-version-link { color: inherit; text-decoration: none; }
 .ysrp-version-link:hover { text-decoration: underline; }
@@ -153,7 +154,88 @@
 .ysrp-pane.is-active { display: block; }
 .ysrp-pane-stack { display: flex; flex-direction: column; gap: 16px; }
 
-/* ---------------------------------------------------------------- records tab (N-5.4) */
+/* ---------------------------------------------------------------- N-5.6 plugin settings dialog */
+.ysrp-plugin-dialog { overflow: hidden; }
+.ysrp-plugin-dialog .ysrp-dialog-body { min-height: 0; }
+/* Only the settings list gives up height when the dialog is full; everything else keeps its size. */
+.ysrp-plugin-dialog > :not(.ysrp-dialog-body),
+.ysrp-plugin-dialog .ysrp-dialog-body > :not(.ysrp-settings-field) { flex-shrink: 0; }
+.ysrp-settings-field { flex: 1 1 auto; min-height: 0; }
+/* N-5.2.16: the settings list scrolls; it extends 20px to each side with the same padding. */
+.ysrp-plugin-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0 -20px;
+  padding: 0 20px 4px;
+}
+.ysrp-setting-slot { min-width: 0; }
+/* N-5.6.4 custom panel: full width, optional title + description in the settings-row style. */
+.ysrp-custom { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ysrp-custom-body { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.ysrp-panel-stack { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.ysrp-setting-slot + .ysrp-setting-slot:has(> .ysrp-custom) { border-top: 1px solid var(--ysrp-border-l1); padding-top: 12px; }
+
+/* ---------------------------------------------------------------- N-5.9 plugin menu */
+.ysrp-plugin-menu {
+  position: fixed;
+  z-index: 10001;
+  min-width: 200px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 4px;
+  box-sizing: border-box;
+  background: var(--ysrp-surface-base);
+  color: var(--ysrp-fg-primary);
+  border: 1px solid var(--ysrp-border-l1);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
+  font-family: var(--ysrp-font);
+}
+.ysrp-menu-title { padding: 6px 8px 4px; font-size: 12px; line-height: 16px; color: var(--ysrp-fg-tertiary); }
+.ysrp-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  margin: 0;
+  padding: 0 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ysrp-fg-primary);
+  font-family: var(--ysrp-font);
+  font-size: 14px;
+  line-height: 20px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ysrp-menu-item:hover, .ysrp-menu-item:focus-visible, .ysrp-menu-item:focus { background: var(--ysrp-surface-l2); outline: none; }
+.ysrp-menu-icon { display: inline-flex; justify-content: center; flex: 0 0 16px; width: 16px; font-size: 16px; color: var(--ysrp-fg-secondary); }
+.ysrp-menu-icon i { font-size: 16px; }
+.ysrp-menu-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.ysrp-menu-sep { height: 1px; margin: 4px 0; background: var(--ysrp-border-l1); }
+
+/* PluginsMenu plugin: "Plugins in the menu" rows (icon + name + switch). */
+.ysrp-menu-choices { display: flex; flex-direction: column; gap: 12px; }
+.ysrp-menu-choice-lead { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1 1 auto; }
+.ysrp-menu-choice-icon { display: inline-flex; justify-content: center; flex: 0 0 16px; width: 16px; font-size: 16px; color: var(--ysrp-fg-secondary); }
+
+/* ---------------------------------------------------------------- records plugin (N-5.4) */
+.ysrp-records-panel { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.ysrp-records-toolbar { display: flex; flex-direction: column; gap: 8px; }
+.ysrp-records-status { display: flex; align-items: center; gap: 8px; min-height: 20px; font-size: 12px; line-height: 16px; color: var(--ysrp-fg-secondary); }
+.ysrp-record-list { display: flex; flex-direction: column; gap: 8px; }
 .ysrp-record .ysrp-card-desc { -webkit-line-clamp: 2; }
 .ysrp-record-title { cursor: default; }
 .ysrp-link-input { cursor: text; }
@@ -163,14 +245,13 @@
 .ysrp-transcript-status.is-error { color: var(--ysrp-fg-danger); }
 .ysrp-transcript-status.is-success { color: var(--ysrp-fg-success); }
 
-/* ---------------------------------------------------------------- plugins tab (N-5.5) */
+/* ---------------------------------------------------------------- plugins page (N-5.5) */
 .ysrp-plugin.is-core { opacity: .4; }
 .ysrp-plugin.is-core:hover { opacity: .7; }
 .ysrp-plugin.is-failed { opacity: .5; border-color: var(--ysrp-danger-border); }
 .ysrp-core-sep { margin: 4px 0; }
-.ysrp-plugin-settings { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; min-height: 0; }
 
-/* ---------------------------------------------------------------- storage tab (N-5.7.1) */
+/* ---------------------------------------------------------------- storage, transcript, drive panels (N-5.7) */
 .ysrp-file-name { font-size: 12px; color: var(--ysrp-fg-tertiary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
 .ysrp-file-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 .ysrp-steps { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 13px; line-height: 1.5; color: var(--ysrp-fg-secondary); }
@@ -179,19 +260,8 @@
 
 /* ---------------------------------------------------------------- N-5.3.7 narrow screens */
 @media (max-width: 640px) {
-  .ysrp-settings-container.is-open { flex-direction: column; }
-  .ysrp-nav {
-    flex: 0 0 auto;
-    width: auto;
-    padding: 8px 12px;
-    border-right: none;
-    border-bottom: 1px solid var(--ysrp-border-l1);
-    overflow-x: auto;
-    overflow-y: hidden;
-  }
-  .ysrp-nav-groups, .ysrp-nav-group { flex-direction: row; }
-  .ysrp-nav-title, .ysrp-nav-footer { display: none; }
-  .ysrp-tab { width: auto; flex: 0 0 auto; }
-  .ysrp-main { padding: 16px 16px 12px; }
+  .ysrp-nav { display: none; }
+  .ysrp-main { padding: 16px 16px 0; }
   .ysrp-pane { margin: 0 -16px; padding: 0 16px 4px; }
+  .ysrp-nav-footer.is-main { display: block; position: static; margin: 0 -16px; }
 }

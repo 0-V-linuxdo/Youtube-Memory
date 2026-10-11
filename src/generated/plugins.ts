@@ -3,8 +3,11 @@ import type { PluginDef } from '../api/plugins';
 import core_engine from '../plugins/_core/engine';
 import core_playerBadge from '../plugins/_core/playerBadge';
 import core_settings from '../plugins/_core/settings';
+import core_storage from '../plugins/_core/storage';
 import plugin_badgeToggle from '../plugins/badgeToggle';
 import plugin_driveSync from '../plugins/driveSync';
+import plugin_pluginsMenu from '../plugins/pluginsMenu';
+import plugin_records from '../plugins/records';
 import plugin_transcript from '../plugins/transcript';
 
-export const plugins: PluginDef[] = [core_engine, core_playerBadge, core_settings, plugin_badgeToggle, plugin_driveSync, plugin_transcript];
+export const plugins: PluginDef[] = [core_engine, core_playerBadge, core_settings, core_storage, plugin_badgeToggle, plugin_driveSync, plugin_pluginsMenu, plugin_records, plugin_transcript];

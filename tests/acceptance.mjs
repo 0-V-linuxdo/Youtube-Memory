@@ -94,11 +94,42 @@ async function seeded(context, records, config) {
 
 
 // The 💾 badge toggle (default-on plugin) hides the badge until it is clicked.
-async function openSettings(page) {
+async function showBadge(page) {
   const hidden = await page.evaluate(() => document.querySelector('.last-save-info-container')?.classList.contains('ysrp-badge-hidden'));
   if (hidden) await page.click('.ysrp-badge-toggle');
+}
+
+// N-5.9: the gear opens the plugin menu (or the window directly when "show the plugin menu" is off).
+async function pressGear(page) {
+  await showBadge(page);
   await page.click('.ysrp-settings-button');
 }
+
+// Open the settings window on its only page, Plugins: gear, then "All plugins" when the menu appears.
+async function openSettings(page) {
+  await pressGear(page);
+  if (await page.locator('.ysrp-plugin-menu').count()) await page.click('.ysrp-plugin-menu .ysrp-menu-item[data-action="all"]');
+  await page.waitForSelector('.ysrp-settings-container.is-open');
+}
+
+// Open one plugin's settings dialog straight from the gear menu (N-5.6.5).
+async function openPlugin(page, name) {
+  await pressGear(page);
+  await page.click(`.ysrp-plugin-menu .ysrp-menu-item[data-plugin="${name}"]`);
+  await page.waitForSelector(`.ysrp-plugin-dialog[data-plugin="${name}"]`);
+}
+
+// Close menus, dialogs and the window (Esc closes the top layer first).
+async function closeAll(page) {
+  for (let i = 0; i < 6; i++) {
+    const open = await page.evaluate(() => Boolean(document.querySelector('.ysrp-plugin-menu, .ysrp-dialog-layer, .ysrp-settings-container.is-open')));
+    if (!open) return;
+    await page.keyboard.press('Escape');
+  }
+}
+
+// Entries of the open gear menu: plugin names, then "#all".
+const menuItems = page => page.$$eval('.ysrp-plugin-menu .ysrp-menu-item', els => els.map(e => e.dataset.plugin || `#${e.dataset.action}`));
 
 
 // In-memory Google OAuth + Drive v3 used by the DriveSync tests.
@@ -421,10 +452,30 @@ const tests = {
     await goto(page, 'v=a13modal');
     await sleep(2000);
     const playingBefore = await page.evaluate(() => window.__mock.state.playing);
-    await openSettings(page);
-    const visible = await page.isVisible('.ysrp-settings-container');
+    // N-5.9.1: the gear pops up the plugin menu without touching playback.
+    await pressGear(page);
+    const menu = await page.evaluate(() => {
+      const m = document.querySelector('.ysrp-plugin-menu');
+      return m ? { role: m.getAttribute('role'), items: m.querySelectorAll('[role="menuitem"]').length, title: m.querySelector('.ysrp-menu-title')?.textContent } : null;
+    });
+    const items = await menuItems(page);
+    const windowWithMenu = await page.isVisible('.ysrp-settings-container');
     const playingAfter = await page.evaluate(() => window.__mock.state.playing);
     const clicks = await page.evaluate(() => window.__mock.state.clicks);
+    await page.keyboard.press('Escape');
+    const menuEsc = await page.locator('.ysrp-plugin-menu').count() === 0;
+    await pressGear(page);
+    await page.mouse.click(5, 5);
+    const menuOutside = await page.locator('.ysrp-plugin-menu').count() === 0;
+    await pressGear(page);
+    await pressGear(page);
+    const menuGearAgain = await page.locator('.ysrp-plugin-menu').count() === 0;
+    // Keyboard: End moves to "All plugins", Enter opens the window on the Plugins page.
+    await pressGear(page);
+    await page.keyboard.press('End');
+    await page.keyboard.press('Enter');
+    const visible = await page.isVisible('.ysrp-settings-container');
+    const menuClosedOnSelect = await page.locator('.ysrp-plugin-menu').count() === 0;
     const host = await page.evaluate(() => document.querySelector('.ysrp-settings-container').parentElement.id);
     await page.keyboard.press('Escape');
     const closedByEsc = !(await page.isVisible('.ysrp-settings-container'));
@@ -435,9 +486,21 @@ const tests = {
     await page.click('.ysrp-close');
     const closedByX = !(await page.isVisible('.ysrp-settings-container'));
     const overflow = await page.evaluate(() => document.body.style.overflow);
-    check('A-13', 'gear opens the dialog outside the player without touching playback; ✖/backdrop/Esc close it',
-      visible && playingBefore === playingAfter && clicks === 0 && host === 'content' && closedByEsc && closedByBackdrop && closedByX && overflow === '',
-      `visible ${visible}, player clicks ${clicks}, host #${host}, esc ${closedByEsc}, backdrop ${closedByBackdrop}, ✖ ${closedByX}`);
+    // "Show the plugin menu on the gear button" off: the gear opens the window directly.
+    await openPlugin(page, 'Settings');
+    await page.click('.ysrp-plugin-dialog .ysrp-switch[data-setting="showMenu"]');
+    const storedOff = await page.evaluate(() => JSON.parse(localStorage.getItem('YSRP_Plugins')).plugins.Settings.showMenu);
+    await closeAll(page);
+    await pressGear(page);
+    const direct = await page.isVisible('.ysrp-settings-container') && await page.locator('.ysrp-plugin-menu').count() === 0;
+    const expected = ['BadgeToggle', 'DriveSync', 'PluginsMenu', 'Records', 'Settings', 'Storage', 'Transcript'];
+    const ok = menu && menu.role === 'menu' && menu.title === '插件' && menu.items === expected.length + 1 &&
+      JSON.stringify(items.slice(0, -1).slice().sort()) === JSON.stringify(expected) && items[items.length - 1] === '#all' && !windowWithMenu &&
+      playingBefore === playingAfter && clicks === 0 && menuEsc && menuOutside && menuGearAgain &&
+      visible && menuClosedOnSelect && host === 'content' && closedByEsc && closedByBackdrop && closedByX && overflow === '' &&
+      storedOff === false && direct;
+    check('A-13', 'gear pops up the plugin menu (menu plugins + All plugins) without touching playback; Esc / outside / gear close it; All plugins opens the window; ✕/backdrop/Esc close it; menu switch off opens the window directly', ok,
+      `menu ${JSON.stringify(menu)}, items ${items.join(',')}, window with menu ${windowWithMenu}, player clicks ${clicks}, menu esc ${menuEsc} outside ${menuOutside} gear ${menuGearAgain}, window ${visible} host #${host}, esc ${closedByEsc}, backdrop ${closedByBackdrop}, ✕ ${closedByX}, showMenu ${storedOff} direct ${direct}`);
     await ctx.close();
   },
 
@@ -449,23 +512,26 @@ const tests = {
     await page.evaluate(() => document.body.appendChild(Object.assign(document.createElement('div'), { style: 'height:3000px' })));
     await sleep(2000);
     const widthBefore = await page.evaluate(() => document.documentElement.clientWidth);
-    await openSettings(page);
+    // The records list now lives in the Records plugin's dialog on top of the window (N-5.4).
+    await openPlugin(page, 'Records');
+    await sleep(500);
     const after = await page.evaluate(() => ({ width: document.documentElement.clientWidth, body: document.body.style.overflow, html: document.documentElement.style.overflow, bodyCs: getComputedStyle(document.body).overflowY }));
     await page.mouse.move(20, 300);
     await page.mouse.wheel(0, 600);
     await sleep(300);
     const pageScrollWhileOpen = await page.evaluate(() => window.scrollY);
-    const box = await page.locator('.ysrp-pane.is-active').boundingBox();
+    const list = '.ysrp-plugin-dialog[data-plugin="Records"] .ysrp-plugin-settings';
+    const box = await page.locator(list).boundingBox();
     await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
     await page.mouse.wheel(0, 300);
     await sleep(300);
-    const paneScroll = await page.evaluate(() => document.querySelector('.ysrp-pane.is-active').scrollTop);
-    await page.keyboard.press('Escape');
+    const paneScroll = await page.evaluate(sel => document.querySelector(sel).scrollTop, list);
+    await closeAll(page);
     await page.mouse.move(20, 300);
     await page.mouse.wheel(0, 400);
     await sleep(300);
     const pageScrollAfterClose = await page.evaluate(() => window.scrollY);
-    check('A-13b', 'open dialog keeps the page scrollbar (no sideways shift) but stops page scrolling; the list still scrolls',
+    check('A-13b', 'open window keeps the page scrollbar (no sideways shift) but stops page scrolling; the list still scrolls',
       after.width === widthBefore && after.body === '' && after.html === '' && after.bodyCs !== 'hidden' && pageScrollWhileOpen === 0 && paneScroll > 0 && pageScrollAfterClose > 0,
       `viewport width ${widthBefore} → ${after.width}, body overflow "${after.body}", page scroll while open ${pageScrollWhileOpen}, list scroll ${paneScroll}, page scroll after close ${pageScrollAfterClose}`);
     await ctx.close();
@@ -479,15 +545,28 @@ const tests = {
     });
     await goto(page, 'v=a14current');
     await sleep(3000);
-    await openSettings(page);
+    // Menu → Records: the window opens with the Records plugin's large dialog on top (N-5.6.5).
+    await openPlugin(page, 'Records');
     await sleep(800);
+    const dlg = '.ysrp-plugin-dialog[data-plugin="Records"]';
+    const shell = await page.evaluate(sel => {
+      const d = document.querySelector(sel);
+      return { window: document.querySelector('.ysrp-settings-container').classList.contains('is-open'), large: d.classList.contains('is-lg'), width: Math.round(d.getBoundingClientRect().width), panel: Boolean(d.querySelector('.ysrp-custom[data-setting="list"] .ysrp-records')) };
+    }, dlg);
     const card = id => `.ysrp-record[data-video-id="${id}"]`;
     const ids = await page.$$eval('.ysrp-record', rows => rows.map(r => r.dataset.videoId));
-    const heading = await page.textContent('.ysrp-header h3');
+    const count = () => page.textContent('.ysrp-records-count');
+    const heading = await count();
+    const badge = await page.textContent('.ysrp-records-storage');
     // N-5.4.2: Void++ card anatomy and the description / footer lines.
     const anatomy = await page.$eval(card('daolder'), el => el.classList.contains('ysrp-card') &&
       ['.ysrp-card-icon', '.ysrp-card-title', '.ysrp-card-controls', '.ysrp-card-desc', '.ysrp-card-sep', '.ysrp-card-footer'].every(sel => el.querySelector(sel)));
-    const columns = await page.$eval('.ysrp-records', g => getComputedStyle(g).gridTemplateColumns.split(' ').length);
+    // Single column, 8px apart.
+    const layout = await page.$$eval('.ysrp-record', cards => {
+      const r = cards.map(c => c.getBoundingClientRect());
+      return { columns: new Set(r.map(x => Math.round(x.left))).size, gap: Math.round(r[1].top - r[0].bottom) };
+    });
+    const columns = layout.columns;
     const pct = await page.textContent(`${card('daolder')} .ysrp-card-desc`);
     const legacyPct = await page.textContent(`${card('plainnew')} .ysrp-card-desc`);
     const footer = await page.textContent(`${card('daolder')} .ysrp-card-footer`);
@@ -510,7 +589,7 @@ const tests = {
     const clip = await page.evaluate(() => navigator.clipboard.readText());
     const copied = (await page.textContent('.ysrp-link-dialog .ysrp-link-copy')).trim();
     await page.keyboard.press('Escape');
-    const linkClosed = await page.locator('.ysrp-link-dialog').count() === 0 && await page.isVisible('.ysrp-settings-container');
+    const linkClosed = await page.locator('.ysrp-link-dialog').count() === 0 && await page.locator(dlg).count() === 1 && await page.isVisible('.ysrp-settings-container');
     // N-5.4.3: nothing ever expands inside a card
     const inlinePanels = await page.$$eval('.ysrp-record', cards => cards.filter(c => c.querySelector('textarea, input, select, .ysrp-panel')).length);
     // delete goes through the confirm dialog
@@ -521,24 +600,39 @@ const tests = {
     await page.click(`${card('daolder')} .ysrp-ibtn.is-delete`);
     await page.click('.ysrp-confirm-ok');
     const afterDelete = await page.$$eval('.ysrp-record', rows => rows.map(r => r.dataset.videoId));
-    const heading2 = await page.textContent('.ysrp-header h3');
+    const heading2 = await count();
     // search + filter bar
     const visibleIds = () => page.$$eval('.ysrp-record', rows => rows.filter(r => r.offsetParent).map(r => r.dataset.videoId).join(','));
     await page.fill('.ysrp-records-search', 'PLAINNEW');
     const searched = await visibleIds();
+    const matches = await count();
     await page.fill('.ysrp-records-search', '');
     await page.selectOption('.ysrp-records-filter', 'notes');
     const withNotes = await visibleIds();
     await page.selectOption('.ysrp-records-filter', 'all');
-    const ok = ids[0] === 'a14current' && ids.join() === 'a14current,plainnew,daolder' && heading.includes('(3)') &&
-      anatomy && columns === 2 && pct === '已看 25.0% · 0:30 / 2:00' && legacyPct === '已看到 0:10' && /^保存于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(footer) &&
+    // N-5.4.9: Records off → not in the menu, progress still saved.
+    await closeAll(page);
+    await openSettings(page);
+    await page.click('.ysrp-cat[data-cat="all"]');
+    await page.click('.ysrp-switch[data-plugin="Records"]');
+    await closeAll(page);
+    const savedBefore = (await record(page, 'a14current')).saveDate;
+    await pressGear(page);
+    const menuWithout = await menuItems(page);
+    await page.keyboard.press('Escape');
+    await sleep(2500);
+    const savedAfter = (await record(page, 'a14current')).saveDate;
+    const ok = shell.window && shell.large && shell.width === 600 && shell.panel &&
+      ids[0] === 'a14current' && ids.join() === 'a14current,plainnew,daolder' && heading === '3 条记录' && badge === '浏览器本地存储' &&
+      anatomy && columns === 1 && layout.gap === 8 && pct === '已看 25.0% · 0:30 / 2:00' && legacyPct === '已看到 0:10' && /^保存于 \d{4}-\d{2}-\d{2} \d{2}:\d{2}$/.test(footer) &&
       currentIcon.includes('fa-play') && daTitle === 'DeArrow daolder' && toggled === 'Original daolder' && plainTitle === 'Original plainnew' &&
       plainHasDa === 0 && noted.videoNote === 'hello note' && noteMark === 1 && linkValue === 'https://www.youtube.com/watch?v=plainnew' &&
       clip === 'https://www.youtube.com/watch?v=plainnew' && copied === '已复制' && linkClosed && inlinePanels === 0 &&
-      confirmShown === 1 && keptOnCancel && afterDelete.join() === 'a14current,plainnew' && heading2.includes('(2)') && !(await record(page, 'daolder')) &&
-      searched === 'plainnew' && withNotes === 'plainnew';
-    check('A-14', 'records tab: ordering, count, Void++ cards in 2 columns, %, DeArrow toggle, note dialog, link dialog copy, confirmed delete, search/filter', ok,
-      `order ${ids.join()}, "${heading}", anatomy ${anatomy}, columns ${columns}, desc "${pct}"/"${legacyPct}", footer "${footer}", titles "${daTitle}"/"${toggled}"/"${plainTitle}", note "${noted.videoNote}" mark ${noteMark}, link ${linkValue}, clip ${clip} (${copied}), inline panels ${inlinePanels}, confirm ${confirmShown} kept ${keptOnCancel}, after delete ${afterDelete.join()} "${heading2}", search "${searched}", notes "${withNotes}"`);
+      confirmShown === 1 && keptOnCancel && afterDelete.join() === 'a14current,plainnew' && heading2 === '2 条记录' && !(await record(page, 'daolder')) &&
+      searched === 'plainnew' && matches === '1 条匹配' && withNotes === 'plainnew' &&
+      !menuWithout.includes('Records') && menuWithout.includes('Storage') && savedAfter > savedBefore;
+    check('A-14', 'records plugin: menu → large dialog, ordering, count, single-column Void++ cards, %, DeArrow toggle, note dialog, link dialog copy, confirmed delete, search/filter; plugin off → not in the menu, progress still saved', ok,
+      `${JSON.stringify(shell)}, order ${ids.join()}, "${heading}" badge "${badge}", anatomy ${anatomy}, layout ${JSON.stringify(layout)}, desc "${pct}"/"${legacyPct}", footer "${footer}", titles "${daTitle}"/"${toggled}"/"${plainTitle}", note "${noted.videoNote}" mark ${noteMark}, link ${linkValue}, clip ${clip} (${copied}), inline panels ${inlinePanels}, confirm ${confirmShown} kept ${keptOnCancel}, after delete ${afterDelete.join()} "${heading2}", search "${searched}" "${matches}", notes "${withNotes}", menu off ${menuWithout.join(',')}, saved ${savedBefore} → ${savedAfter}`);
     await ctx.close();
   },
 
@@ -547,37 +641,41 @@ const tests = {
     const page = await seeded(ctx, { s1: { videoProgress: 11, saveDate: 1, videoName: 'S1' }, s2: { videoProgress: 22, saveDate: 2, videoName: 'S2' } });
     await goto(page, 'v=a15store');
     await sleep(3000);
-    await openSettings(page);
-    await page.click('.ysrp-tab[data-tab-id="storage"]');
-    await page.selectOption('.ysrp-storage-mode', 'gm');
-    await page.click('.ysrp-apply-migrate');
+    // Everything happens in the Storage plugin's settings dialog (N-5.7.1).
+    await openPlugin(page, 'Storage');
+    const dlg = '.ysrp-plugin-dialog[data-plugin="Storage"]';
+    await page.selectOption(`${dlg} .ysrp-storage-mode`, 'gm');
+    await page.click(`${dlg} .ysrp-apply-migrate`);
     const migrateConfirm = await page.locator('.ysrp-dialog.is-confirm').count();
     await page.click('.ysrp-confirm-ok');
     const state = await page.evaluate(() => ({
       local: Object.keys(localStorage).filter(k => k.startsWith('Youtube_SaveResume_Progress-')).length,
       gm: GM_listValues().filter(k => k.startsWith('Youtube_SaveResume_Progress-')).length,
-      mode: localStorage.getItem('YSRP_StorageMode'),
-      badge: document.querySelector('.ysrp-badge').textContent
+      mode: localStorage.getItem('YSRP_StorageMode')
     }));
     // export -> clipboard, wipe one record, overwrite-import (confirmed)
-    await page.click('.ysrp-copy-json');
+    await page.click(`${dlg} .ysrp-copy-json`);
     const exported = JSON.parse(await page.evaluate(() => navigator.clipboard.readText()));
     await page.evaluate(() => { GM_deleteValue('Youtube_SaveResume_Progress-s1'); GM_setValue('Youtube_SaveResume_Progress-junk', '{}'); });
-    await page.click('.ysrp-overwrite');
-    const overwriteOn = await page.getAttribute('.ysrp-overwrite', 'aria-checked');
-    await page.fill('.ysrp-import-text', JSON.stringify(exported));
-    await page.click('.ysrp-import-btn');
+    await page.click(`${dlg} .ysrp-overwrite`);
+    const overwriteOn = await page.getAttribute(`${dlg} .ysrp-overwrite`, 'aria-checked');
+    await page.fill(`${dlg} .ysrp-import-text`, JSON.stringify(exported));
+    await page.click(`${dlg} .ysrp-import-btn`);
     const importConfirm = await page.locator('.ysrp-dialog.is-confirm').count();
     await page.click('.ysrp-confirm-ok');
-    const msg = await page.textContent('.ysrp-import-msg');
+    const msg = await page.textContent(`${dlg} .ysrp-import-msg`);
     const after = await page.evaluate(() => GM_listValues().filter(k => k.startsWith('Youtube_SaveResume_Progress-')).sort());
     const s1 = await page.evaluate(() => JSON.parse(GM_getValue('Youtube_SaveResume_Progress-s1')));
-    const ok = migrateConfirm === 1 && state.local === 0 && state.gm === 3 && state.mode === 'gm' && state.badge === 'GM 存储' &&
+    // The storage badge (now in the records toolbar, N-5.4.1) names the new backend.
+    await closeAll(page);
+    await openPlugin(page, 'Records');
+    const badge = await page.textContent('.ysrp-records-storage');
+    const ok = migrateConfirm === 1 && state.local === 0 && state.gm === 3 && state.mode === 'gm' && badge === 'GM 存储' &&
       exported.version === '1' && exported.storageMode === 'gm' && Object.keys(exported.entries).length === 3 &&
       overwriteOn === 'true' && importConfirm === 1 &&
       after.length === 3 && !after.includes('Youtube_SaveResume_Progress-junk') && s1.videoProgress === 11 && /已导入 3 条记录/.test(msg);
-    check('A-15', 'storage tab: confirmed migration to GM, export, confirmed overwrite import round trip', ok,
-      `confirm ${migrateConfirm}/${importConfirm}, ${JSON.stringify(state)}, exported ${Object.keys(exported.entries).length}, overwrite ${overwriteOn}, after import ${after.length}, msg "${msg}"`);
+    check('A-15', 'storage plugin dialog: confirmed migration to GM, export, confirmed overwrite import round trip', ok,
+      `confirm ${migrateConfirm}/${importConfirm}, ${JSON.stringify(state)}, badge "${badge}", exported ${Object.keys(exported.entries).length}, overwrite ${overwriteOn}, after import ${after.length}, msg "${msg}"`);
     await ctx.close();
   },
 
@@ -593,25 +691,28 @@ const tests = {
     const page = await newPage(ctx);
     await goto(page, 'v=a16tr');
     await sleep(3000);
-    await openSettings(page);
-    await page.click('.ysrp-tab[data-tab-id="transcript"]');
-    await page.fill('.ysrp-pane[data-pane="transcript"] input[data-field="endpoint"]', 'example.com');
-    await page.fill('.ysrp-pane[data-pane="transcript"] input[data-field="apiKey"]', 'sk-test');
-    await page.fill('.ysrp-pane[data-pane="transcript"] input[data-field="timeout"]', '99');
+    // N-5.7.2: settings in the Transcript plugin's dialog, still stored in YSRP_TranscriptSettings.
+    await openPlugin(page, 'Transcript');
+    const dlg = '.ysrp-plugin-dialog[data-plugin="Transcript"]';
+    await page.fill(`${dlg} input[data-setting="endpoint"]`, 'example.com');
+    await page.fill(`${dlg} input[data-setting="apiKey"]`, 'sk-test');
+    await page.fill(`${dlg} input[data-setting="timeout"]`, '99');
     await sleep(600);
     const settings = await page.evaluate(() => JSON.parse(localStorage.getItem('YSRP_TranscriptSettings')));
-    const info = await page.textContent('.ysrp-pane[data-pane="transcript"] .ysrp-mono');
-    await page.click('.ysrp-tab[data-tab-id="records"]');
+    const secret = await page.$eval(`${dlg} input[data-setting="apiKey"]`, i => i.type === 'password' && Boolean(i.closest('.ysrp-secret')?.querySelector('.ysrp-secret-toggle')));
+    const info = await page.textContent(`${dlg} .ysrp-custom[data-setting="currentVideo"] .ysrp-mono`);
+    await closeAll(page);
+    await openPlugin(page, 'Records');
     await page.click('.ysrp-record[data-video-id="a16tr"] .ysrp-ibtn.is-transcript');
     await sleep(1000);
     const text = await page.inputValue('.ysrp-transcript-dialog textarea');
     const rec = await record(page, 'a16tr');
     const ok = settings.endpoint === 'https://example.com/v1/chat/completions' && settings.apiKey === 'sk-test' && settings.timeoutMs === 3600000 &&
-      info === 'a16tr' && requestBody && requestBody.model === 'transcript' &&
+      secret && info === 'a16tr' && requestBody && requestBody.model === 'transcript' &&
       requestBody.messages[0].content === 'https://www.youtube.com/watch?v=a16tr' && auth === 'Bearer sk-test' &&
       text === 'hello transcript' && rec.videoTranscript === 'hello transcript';
-    check('A-16', 'transcript settings, request format and response parsing', ok,
-      `${JSON.stringify(settings)}, body ${JSON.stringify(requestBody)}, auth ${auth}, text "${text}"`);
+    check('A-16', 'transcript plugin dialog saves settings (normalised), request format, response parsing, transcript dialog', ok,
+      `${JSON.stringify(settings)}, secret ${secret}, info "${info}", body ${JSON.stringify(requestBody)}, auth ${auth}, text "${text}"`);
     await ctx.close();
   },
 
@@ -620,54 +721,65 @@ const tests = {
     const page = await newPage(ctx);
     await goto(page, 'v=a17lang');
     await sleep(2500);
-    await openSettings(page);
-    const before = await page.textContent('.ysrp-tab[data-tab-id="records"]');
-    await page.click('.ysrp-tab[data-tab-id="display"]');
-    await page.selectOption('.ysrp-language-select', 'en');
+    // N-5.7.4: the language is a setting of the Settings window plugin.
+    await openPlugin(page, 'Settings');
+    const before = await page.textContent('.ysrp-tab[data-tab-id="plugins"]');
+    const inRow = await page.locator('.ysrp-plugin-dialog .ysrp-srow select[data-setting="language"]').count();
+    await page.selectOption('.ysrp-plugin-dialog select[data-setting="language"]', 'en');
     await sleep(500);
-    const after = await page.textContent('.ysrp-tab[data-tab-id="records"]');
+    const after = await page.textContent('.ysrp-tab[data-tab-id="plugins"]');
     const stillOpen = await page.isVisible('.ysrp-settings-container');
-    const tab = await page.evaluate(() => document.querySelector('.ysrp-settings-container').dataset.activeTab);
+    const dialogTitle = await page.textContent('.ysrp-plugin-dialog[data-plugin="Settings"] .ysrp-dialog-title');
+    const selected = await page.inputValue('.ysrp-plugin-dialog select[data-setting="language"]');
     const stored = await page.evaluate(() => localStorage.getItem('YSRP_LanguagePreference'));
     await page.reload();
     await sleep(2500);
     const gearTitle = await page.getAttribute('.ysrp-settings-button', 'title');
-    check('A-17', 'language switch applies immediately, keeps the dialog open and persists',
-      before.trim() === '记录' && after.trim() === 'Records' && stillOpen && tab === 'display' && stored === 'en' && gearTitle === 'Open settings',
-      `"${before.trim()}" → "${after.trim()}", open ${stillOpen}, tab ${tab}, stored ${stored}, after reload "${gearTitle}"`);
+    check('A-17', 'language switch in the Settings plugin dialog applies immediately, keeps the window and the dialog open and persists',
+      before.trim() === '插件' && inRow === 1 && after.trim() === 'Plugins' && stillOpen && dialogTitle === 'Settings window' && selected === 'en' && stored === 'en' && gearTitle === 'Open settings',
+      `"${before.trim()}" → "${after.trim()}", open ${stillOpen}, dialog "${dialogTitle}" (${selected}), stored ${stored}, after reload "${gearTitle}"`);
     await ctx.close();
   },
+
   async 'A-19'() {
     const ctx = await newContext();
     const page = await seeded(ctx, { a19rec: { videoProgress: 20, saveDate: 1, videoName: 'R', originalTitle: 'R' } });
     await goto(page, 'v=a19plugins');
     await sleep(2000);
     await openSettings(page);
-    await page.click('.ysrp-tab[data-tab-id="plugins"]');
     await page.click('.ysrp-cat[data-cat="all"]');
     const names = await page.$$eval('.ysrp-plugin', els => els.map(e => e.dataset.plugin));
     const coreLocked = await page.$$eval('.ysrp-plugin[data-plugin="Engine"] .ysrp-switch', els => els[0].disabled);
     await page.click('.ysrp-switch[data-plugin="Transcript"]');
     await sleep(300);
-    const tabGone = await page.locator('.ysrp-tab[data-tab-id="transcript"]').count() === 0;
     const activeTab = await page.evaluate(() => document.querySelector('.ysrp-settings-container').dataset.activeTab);
-    await page.click('.ysrp-tab[data-tab-id="records"]');
+    await closeAll(page);
+    // N-4.7: the menu entry and the card button disappear at once.
+    await pressGear(page);
+    const menuGone = !(await menuItems(page)).includes('Transcript');
+    await page.click('.ysrp-plugin-menu .ysrp-menu-item[data-plugin="Records"]');
+    await page.waitForSelector('.ysrp-record');
     const rowButtonGone = await page.locator('.ysrp-record .is-transcript').count() === 0;
     const stored = await page.evaluate(() => JSON.parse(localStorage.getItem('YSRP_Plugins')).plugins.Transcript.enabled);
     await page.reload();
     await sleep(2000);
+    await pressGear(page);
+    const stillOff = !(await menuItems(page)).includes('Transcript');
+    await page.keyboard.press('Escape');
     await openSettings(page);
-    const stillOff = await page.locator('.ysrp-tab[data-tab-id="transcript"]').count() === 0;
-    await page.click('.ysrp-tab[data-tab-id="plugins"]');
     await page.click('.ysrp-cat[data-cat="all"]');
     await page.click('.ysrp-switch[data-plugin="Transcript"]');
     await sleep(300);
-    await page.click('.ysrp-tab[data-tab-id="records"]');
-    const back = await page.locator('.ysrp-tab[data-tab-id="transcript"]').count() === 1 && await page.locator('.ysrp-record .is-transcript').count() > 0;
-    const expected = ['BadgeToggle', 'DriveSync', 'Transcript', 'Engine', 'PlayerBadge', 'Settings'];
-    check('A-19', 'plugins tab lists plugins; turning Transcript off removes its tab and row button, persists, and comes back',
-      JSON.stringify(names) === JSON.stringify(expected) && coreLocked && tabGone && activeTab === 'plugins' && rowButtonGone && stored === false && stillOff && back,
-      `plugins ${names.join(',')}, core locked ${coreLocked}, tab gone ${tabGone} (active ${activeTab}), row button gone ${rowButtonGone}, stored ${stored}, after reload off ${stillOff}, back ${back}`);
+    await closeAll(page);
+    await pressGear(page);
+    const menuBack = (await menuItems(page)).includes('Transcript');
+    await page.click('.ysrp-plugin-menu .ysrp-menu-item[data-plugin="Records"]');
+    await page.waitForSelector('.ysrp-record');
+    const back = menuBack && await page.locator('.ysrp-record .is-transcript').count() > 0;
+    const expected = ['BadgeToggle', 'DriveSync', 'PluginsMenu', 'Records', 'Transcript', 'Engine', 'PlayerBadge', 'Settings', 'Storage'];
+    check('A-19', 'plugins page lists plugins; turning Transcript off removes its menu entry and card button, persists, and comes back',
+      JSON.stringify(names) === JSON.stringify(expected) && coreLocked && menuGone && activeTab === 'plugins' && rowButtonGone && stored === false && stillOff && back,
+      `plugins ${names.join(',')}, core locked ${coreLocked}, menu entry gone ${menuGone} (page ${activeTab}), card button gone ${rowButtonGone}, stored ${stored}, after reload off ${stillOff}, back ${back}`);
     await ctx.close();
   },
 
@@ -691,9 +803,7 @@ const tests = {
     const togglesAfterRebuild = await page.locator('.ysrp-badge-toggle').count();
     await page.click('.ysrp-badge-toggle');
     const hiddenAgain = await style();
-    await page.click('.ysrp-badge-toggle');
-    await page.click('.ysrp-settings-button');
-    await page.click('.ysrp-tab[data-tab-id="plugins"]');
+    await openSettings(page);
     await page.click('.ysrp-cat[data-cat="all"]');
     await page.click('.ysrp-switch[data-plugin="BadgeToggle"]');
     await page.keyboard.press('Escape');
@@ -724,7 +834,7 @@ const tests = {
     const uploads = drive.uploads.filter(u => u.name.endsWith('｜a21upload.json'));
     const latest = JSON.parse(drive.inFolder().find(f => f.name.endsWith('｜a21upload.json')).content);
     const rec = await record(page, 'a21upload');
-    await openSettings(page);
+    await openPlugin(page, 'Records');
     await page.click('.ysrp-record[data-video-id="a21other"] .is-delete');
     await page.click('.ysrp-confirm-ok');
     await sleep(2500);
@@ -796,8 +906,9 @@ const tests = {
     const navWidth = await page.evaluate(() => Math.round(document.querySelector('.ysrp-nav').getBoundingClientRect().width));
     const footer = await page.$$eval('.ysrp-nav-footer .ysrp-version-line', ls => ls.map(l => l.textContent));
     const homeLink = await page.$eval('.ysrp-nav-footer a', a => a.getAttribute('href'));
-    await page.click('.ysrp-tab[data-tab-id="plugins"]');
+    // N-5.3.5: one group with a single item, Plugins, always current.
     const groups = await page.$$eval('.ysrp-nav-group', els => els.length);
+    const navItems = await page.$$eval('.ysrp-tab', els => els.map(e => `${e.dataset.tabId}:${e.textContent.trim()}:${e.classList.contains('is-active')}`).join(','));
     const visible = () => page.$$eval('.ysrp-plugin', els => els.filter(e => e.offsetParent).map(e => e.dataset.plugin).join(','));
     const prefs = () => page.evaluate(() => JSON.parse(localStorage.getItem('YSRP_Plugins') || '{}'));
     // categories: Favorites by default (empty), All lists the core plugins after the separator
@@ -848,21 +959,22 @@ const tests = {
     await page.keyboard.press('Escape');
     const dialogGone = await page.locator('.ysrp-dialog').count() === 0;
     const modalOpen = await page.isVisible('.ysrp-settings-container');
-    const ok = size === '896x640' && navWidth === 224 && groups === 2 &&
+    const ok = size === '896x640' && navWidth === 224 && groups === 1 && navItems === 'plugins:插件:true' &&
       /^Video Memory • v2\.2\.0 • \((?:[0-9a-f]{4,}|dev)\)$/.test(footer[0] || '') && footer[1] === 'Production • Userscript' &&
       homeLink === 'https://github.com/0-V-linuxdo/Youtube-Memory' &&
-      defaultCat === 'favorites' && favEmpty && layout.sepShown && layout.core === 'Engine,PlayerBadge,Settings' && layout.coreFlag &&
+      defaultCat === 'favorites' && favEmpty && layout.sepShown && layout.core === 'Engine,PlayerBadge,Settings,Storage' && layout.coreFlag &&
       searched === 'Transcript' && disabledOnly === '' && emptyShown &&
       JSON.stringify(lists.starred) === '["Transcript"]' && JSON.stringify(lists.pinned) === '["Transcript"]' && firstCard === 'Transcript' && favorites === 'Transcript' &&
       title === '徽标开关' && afterToggle === false && confirmShown === 1 && afterOneClick === false && escClosedConfirmOnly && afterCancel === false &&
       afterReset === true && switchOn === 'true' && dialogGone && modalOpen;
-    check('A-24', 'plugins tab: 896x640 under html 10px, 224px nav, two-line footer, Favorites/All, search and filter, star/pin saved, settings dialog saves, confirmed reset, Esc closes the top dialog first', ok,
-      `size ${size}, nav ${navWidth}, groups ${groups}, footer ${JSON.stringify(footer)}, default ${defaultCat} empty ${favEmpty}, core "${layout.core}" sep ${layout.sepShown}, search "${searched}", disabled "${disabledOnly}" empty ${emptyShown}, starred ${JSON.stringify(lists.starred)} pinned ${JSON.stringify(lists.pinned)} first ${firstCard}, favorites "${favorites}", title ${title}, stored ${afterToggle}/${afterOneClick}/${afterCancel}/${afterReset} confirm ${confirmShown} esc ${escClosedConfirmOnly}, switch ${switchOn}, dialog gone ${dialogGone}, modal open ${modalOpen}`);
+    check('A-24', 'plugins page: 896x640 under html 10px, 224px nav with the single item Plugins, two-line footer, Favorites/All, search and filter, star/pin saved, settings dialog saves, confirmed reset, Esc closes the top dialog first', ok,
+      `size ${size}, nav ${navWidth}, groups ${groups} items ${navItems}, footer ${JSON.stringify(footer)}, default ${defaultCat} empty ${favEmpty}, core "${layout.core}" sep ${layout.sepShown}, search "${searched}", disabled "${disabledOnly}" empty ${emptyShown}, starred ${JSON.stringify(lists.starred)} pinned ${JSON.stringify(lists.pinned)} first ${firstCard}, favorites "${favorites}", title ${title}, stored ${afterToggle}/${afterOneClick}/${afterCancel}/${afterReset} confirm ${confirmShown} esc ${escClosedConfirmOnly}, switch ${switchOn}, dialog gone ${dialogGone}, modal open ${modalOpen}`);
     await ctx.close();
   },
 
   async 'A-25'() {
-    // Every tab is assembled only from the N-5.2 parts; monochrome; colours follow the system scheme.
+    // Everything is a plugin: the window has no feature pages; each feature's UI is only in its plugin dialog,
+    // built from the N-5.2 parts; monochrome; colours follow the system scheme.
     const ctx = await newContext();
     const page = await seeded(ctx, {
       daa25: { videoProgress: 30, saveDate: 10, videoName: 'Unknown Title', videoDuration: 120, videoNote: 'n' },
@@ -871,14 +983,49 @@ const tests = {
     await goto(page, 'v=a25look');
     await sleep(2500);
     await openSettings(page);
+    await page.click('.ysrp-cat[data-cat="all"]');
+    const shell = await page.evaluate(() => {
+      const win = document.querySelector('.ysrp-settings-container');
+      return {
+        navIcons: [...win.querySelectorAll('.ysrp-tab')].map(t => `${t.dataset.tabId}:${[...t.querySelector('i').classList].find(c => c.startsWith('fa-') && c !== 'fa-solid')}`).join(','),
+        panes: [...win.querySelectorAll('.ysrp-pane')].map(p => p.dataset.pane).join(','),
+        features: win.querySelectorAll('.ysrp-record, .ysrp-storage-mode, select[data-setting="language"], input[data-setting="endpoint"], input[data-field="clientId"]').length,
+        plugins: win.querySelectorAll('.ysrp-plugin').length,
+        info: Boolean(win.querySelector('.ysrp-header .ysrp-info-hint'))
+      };
+    });
+    await closeAll(page);
+    // Each feature plugin's dialog: what is on screen, and where the feature's own control sits.
+    const marker = {
+      Storage: '.ysrp-srow select.ysrp-storage-mode',
+      Settings: '.ysrp-srow select[data-setting="language"]',
+      Transcript: '.ysrp-srow input[data-setting="endpoint"]',
+      DriveSync: 'input[data-field="clientId"]'
+    };
+    const dialogs = {};
+    for (const name of Object.keys(marker)) {
+      await openPlugin(page, name);
+      dialogs[name] = await page.evaluate(([n, sel]) => {
+        const d = document.querySelector(`.ysrp-plugin-dialog[data-plugin="${n}"]`);
+        return {
+          rows: d.querySelectorAll('.ysrp-srow').length,
+          radios: d.querySelectorAll('input[type="radio"], input[type="checkbox"], .ysrp-choice').length,
+          cards: d.querySelectorAll('.ysrp-card').length,
+          marker: d.querySelectorAll(sel).length,
+          custom: d.querySelectorAll('.ysrp-custom').length
+        };
+      }, [name, marker[name]]);
+      await closeAll(page);
+    }
+    await openPlugin(page, 'Records');
     await sleep(800);
     const records = await page.evaluate(() => {
       const cards = [...document.querySelectorAll('.ysrp-record')];
-      const g = document.querySelector('.ysrp-records');
       return {
         n: cards.length,
+        inDialog: cards.every(c => c.closest('.ysrp-plugin-dialog[data-plugin="Records"] .ysrp-custom')),
         cards: cards.every(c => c.classList.contains('ysrp-card') && c.querySelector(':scope > .ysrp-card-body .ysrp-card-top .ysrp-card-icon') && c.querySelector(':scope > .ysrp-card-sep + .ysrp-card-footer')),
-        cols: getComputedStyle(g).gridTemplateColumns.split(' ').length,
+        cols: new Set(cards.map(c => Math.round(c.getBoundingClientRect().left))).size,
         radius: [...new Set(cards.map(c => getComputedStyle(c).borderRadius))].join(','),
         leftBar: cards.some(c => { const cs = getComputedStyle(c); return cs.borderLeftWidth !== cs.borderRightWidth || cs.borderLeftColor !== cs.borderRightColor; }),
         inline: cards.some(c => c.querySelector('textarea, input, select, .ysrp-panel'))
@@ -892,38 +1039,19 @@ const tests = {
     const linkDialogOutside = await page.evaluate(() => { const d = document.querySelector('.ysrp-link-dialog'); return Boolean(d) && !d.closest('.ysrp-record'); });
     await page.keyboard.press('Escape');
     const stillNoPanels = await page.$$eval('.ysrp-record', cards => cards.filter(c => c.querySelector('textarea, input, select, .ysrp-panel')).length);
-    // Visit every tab and collect what is on screen.
-    const tabs = {};
-    for (const id of ['records', 'storage', 'display', 'plugins', 'transcript', 'drive']) {
-      await page.click(`.ysrp-tab[data-tab-id="${id}"]`);
-      if (id === 'plugins') await page.click('.ysrp-cat[data-cat="all"]');
-      tabs[id] = await page.evaluate(pid => {
-        const pane = document.querySelector(`.ysrp-pane[data-pane="${pid}"]`);
-        return {
-          groups: pane.querySelectorAll('.ysrp-group').length,
-          rows: pane.querySelectorAll('.ysrp-srow').length,
-          radios: pane.querySelectorAll('input[type="radio"], input[type="checkbox"], .ysrp-choice').length,
-          cards: pane.querySelectorAll('.ysrp-card').length,
-          info: Boolean(document.querySelector('.ysrp-header .ysrp-info-hint'))
-        };
-      }, id);
-    }
-    const controls = await page.evaluate(() => ({
-      storage: document.querySelectorAll('.ysrp-pane[data-pane="storage"] .ysrp-srow select.ysrp-storage-mode').length,
-      language: document.querySelectorAll('.ysrp-pane[data-pane="display"] .ysrp-srow select.ysrp-language-select').length,
-      navIcons: [...document.querySelectorAll('.ysrp-tab')].map(t => `${t.dataset.tabId}:${[...t.querySelector('i').classList].find(c => c.startsWith('fa-') && c !== 'fa-solid')}`).join(',')
-    }));
     // Monochrome: no inline colours, no multi-colour SVG logos, icon buttons only in the grey / primary tokens.
-    await page.click('.ysrp-tab[data-tab-id="records"]');
+    // (The pointer leaves the last-clicked button first so no colour transition is caught half-way.)
+    await page.mouse.move(1, 1);
+    await sleep(300);
     const mono = await page.evaluate(() => {
       const scope = [document.querySelector('.ysrp-settings-container'), ...document.querySelectorAll('.ysrp-dialog-layer')];
       const all = scope.flatMap(el => [el, ...el.querySelectorAll('*')]);
       const probe = v => { const d = document.createElement('div'); d.style.color = `var(${v})`; document.body.appendChild(d); const c = getComputedStyle(d).color; d.remove(); return c; };
       const allowed = new Set(['--ysrp-fg-primary', '--ysrp-fg-secondary', '--ysrp-fg-tertiary'].map(probe));
-      const ibtns = [...document.querySelectorAll('.ysrp-settings-container .ysrp-ibtn')];
+      const ibtns = scope.flatMap(el => [...el.querySelectorAll('.ysrp-ibtn')]);
       return {
         inlineColour: all.filter(el => /(^|;)\s*(color|background|background-color|fill|border-color)\s*:/i.test(el.getAttribute('style') || '')).length,
-        svgFill: document.querySelectorAll('.ysrp-settings-container svg [fill]').length,
+        svgFill: scope.reduce((n, el) => n + el.querySelectorAll('svg [fill]').length, 0),
         offPalette: ibtns.filter(b => !allowed.has(getComputedStyle(b).color)).map(b => b.className),
         ibtnCount: ibtns.length
       };
@@ -938,16 +1066,66 @@ const tests = {
     await sleep(200);
     const dark = await colours();
     await page.emulateMedia({ colorScheme: 'light' });
-    const settingsTabsOk = ['storage', 'display', 'transcript', 'drive'].every(id => tabs[id].groups >= 1 && tabs[id].rows >= 1 && tabs[id].radios === 0 && tabs[id].cards === 0);
-    const ok = records.n === 3 && records.cards && records.cols === 2 && records.radius === '8px' && !records.leftBar && !records.inline &&
+    const dialogsOk = Object.values(dialogs).every(d => d.marker === 1 && d.rows >= 1 && d.radios === 0 && d.cards === 0) && dialogs.Storage.custom === 3 && dialogs.DriveSync.custom === 2;
+    const ok = shell.navIcons === 'plugins:fa-plug' && shell.panes === 'plugins' && shell.features === 0 && shell.plugins === 9 && shell.info &&
+      dialogsOk && records.n === 3 && records.inDialog && records.cards && records.cols === 1 && records.radius === '8px' && !records.leftBar && !records.inline &&
       noteDialogOutside && linkDialogOutside && stillNoPanels === 0 &&
-      settingsTabsOk && tabs.storage.groups === 3 && tabs.plugins.cards === 6 && tabs.records.cards === 3 && Object.values(tabs).every(t => t.info) &&
-      controls.storage === 1 && controls.language === 1 &&
-      controls.navIcons === 'records:fa-clock-rotate-left,storage:fa-database,display:fa-palette,plugins:fa-plug,transcript:fa-closed-captioning,drive:fa-cloud' &&
       mono.inlineColour === 0 && mono.svgFill === 0 && mono.offPalette.length === 0 && mono.ibtnCount > 0 &&
       light.modal === 'rgb(255, 255, 255)' && light.card === 'rgb(244, 244, 245)' && dark.modal === 'rgb(14, 14, 16)' && dark.card === 'rgb(20, 20, 22)';
-    check('A-25', 'unified Void++ look: cards in a 2-column grid, no inline panels / capsules / left bars / colours, settings rows with drop-downs, theme follows the system', ok,
-      `records ${JSON.stringify(records)}, dialogs outside ${noteDialogOutside}/${linkDialogOutside}, tabs ${JSON.stringify(tabs)}, controls ${JSON.stringify(controls)}, mono ${JSON.stringify(mono)}, light ${JSON.stringify(light)}, dark ${JSON.stringify(dark)}`);
+    check('A-25', 'everything is a plugin: no feature pages or nav items; features only in their plugin dialogs, built from N-5.2 parts (settings-row drop-downs, single-column cards, no inline panels / capsules / left bars / colours); theme follows the system', ok,
+      `shell ${JSON.stringify(shell)}, dialogs ${JSON.stringify(dialogs)}, records ${JSON.stringify(records)}, dialogs outside ${noteDialogOutside}/${linkDialogOutside}, mono ${JSON.stringify(mono)}, light ${JSON.stringify(light)}, dark ${JSON.stringify(dark)}`);
+    await ctx.close();
+  },
+
+
+  async 'A-26'() {
+    const ctx = await newContext();
+    const page = await newPage(ctx);
+    await goto(page, 'v=a26menu');
+    await sleep(2000);
+    const choices = () => page.evaluate(() => (JSON.parse(localStorage.getItem('YSRP_Plugins') || '{}').plugins?.PluginsMenu || {}).menuPlugins);
+    // N-5.9.4: the PluginsMenu dialog lists every plugin with a switch.
+    await openPlugin(page, 'PluginsMenu');
+    const dlg = '.ysrp-plugin-dialog[data-plugin="PluginsMenu"]';
+    const listed = await page.$$eval(`${dlg} .ysrp-switch[data-menu-plugin]`, els => els.length);
+    const defaults = await page.$$eval(`${dlg} .ysrp-switch[data-menu-plugin]`, els => Object.fromEntries(els.map(e => [e.dataset.menuPlugin, e.getAttribute('aria-checked')])));
+    await page.click(`${dlg} .ysrp-switch[data-menu-plugin="Storage"]`);
+    const storedOff = await choices();
+    await closeAll(page);
+    await pressGear(page);
+    const withoutStorage = await menuItems(page);
+    await page.keyboard.press('Escape');
+    await openPlugin(page, 'PluginsMenu');
+    await page.click(`${dlg} .ysrp-switch[data-menu-plugin="Storage"]`);
+    await page.click(`${dlg} .ysrp-switch[data-menu-plugin="Engine"]`);
+    const storedOn = await choices();
+    await closeAll(page);
+    await pressGear(page);
+    const withStorage = await menuItems(page);
+    await page.keyboard.press('Escape');
+    // PluginsMenu off: every enabled plugin with visible settings, whatever was chosen.
+    await openPlugin(page, 'PluginsMenu');
+    await page.click(`${dlg} .ysrp-switch[data-menu-plugin="Storage"]`);
+    await closeAll(page);
+    await openSettings(page);
+    await page.click('.ysrp-cat[data-cat="all"]');
+    await page.click('.ysrp-switch[data-plugin="PluginsMenu"]');
+    await closeAll(page);
+    await pressGear(page);
+    const fallback = await menuItems(page);
+    // Choosing a plugin opens the window and that plugin's dialog; closing the dialog leaves the window open.
+    await page.click('.ysrp-plugin-menu .ysrp-menu-item[data-plugin="DriveSync"]');
+    const opened = await page.isVisible('.ysrp-settings-container') && await page.locator('.ysrp-plugin-dialog[data-plugin="DriveSync"]').count() === 1;
+    await page.keyboard.press('Escape');
+    const backToPage = await page.locator('.ysrp-dialog').count() === 0 && await page.isVisible('.ysrp-settings-container');
+    const sorted = list => JSON.stringify(list.filter(x => x !== '#all').sort());
+    const ok = listed === 9 && defaults.Storage === 'true' && defaults.Engine === 'false' && defaults.PlayerBadge === 'false' &&
+      storedOff && storedOff.Storage === false && !withoutStorage.includes('Storage') && withoutStorage.includes('Records') && withoutStorage[withoutStorage.length - 1] === '#all' &&
+      storedOn && storedOn.Storage === true && storedOn.Engine === true && withStorage.includes('Storage') && withStorage.includes('Engine') &&
+      sorted(fallback) === JSON.stringify(['BadgeToggle', 'DriveSync', 'Records', 'Settings', 'Storage', 'Transcript']) &&
+      opened && backToPage;
+    check('A-26', 'plugins menu plugin: switching a plugin off removes it from the gear menu and back on restores it (saved in menuPlugins); with the plugin off the menu lists every enabled plugin with settings; choosing one opens the window and its dialog', ok,
+      `listed ${listed}, defaults ${JSON.stringify(defaults)}, stored ${JSON.stringify(storedOff)} → ${JSON.stringify(storedOn)}, menu without ${withoutStorage.join(',')}, with ${withStorage.join(',')}, fallback ${fallback.join(',')}, opened ${opened}, back ${backToPage}`);
     await ctx.close();
   },
 };
@@ -967,16 +1145,19 @@ const ctxErr = await newContext();
 const page = await newPage(ctxErr);
 await goto(page, 'v=a18tt');
 await sleep(2500);
-await openSettings(page);
-for (const tab of ['records', 'storage', 'transcript', 'drive', 'plugins', 'display']) await page.click(`.ysrp-tab[data-tab-id="${tab}"]`);
-await page.click('.ysrp-tab[data-tab-id="records"]');
+for (const name of ['Storage', 'Transcript', 'DriveSync', 'Settings', 'PluginsMenu']) {
+  await openPlugin(page, name);
+  await closeAll(page);
+}
+await openPlugin(page, 'Records');
 await page.click('.ysrp-record .ysrp-ibtn.is-note');
 await page.click('.ysrp-note-dialog .ysrp-note-save');
 await page.click('.ysrp-record .ysrp-ibtn.is-link');
 await page.keyboard.press('Escape');
 await page.click('.ysrp-record .ysrp-ibtn.is-delete');
 await page.click('.ysrp-confirm-cancel');
-await page.click('.ysrp-tab[data-tab-id="plugins"]');
+await closeAll(page);
+await openSettings(page);
 await page.click('.ysrp-cat[data-cat="all"]');
 await page.click('.ysrp-plugin[data-plugin="BadgeToggle"] .ysrp-plugin-config');
 await page.keyboard.press('Escape');

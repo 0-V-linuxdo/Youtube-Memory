@@ -1,26 +1,42 @@
 // Plugin manager (N-4): definitions, enable state, ordered start, live start/stop with full cleanup.
 
-import type { Bilingual } from '../utils/i18n';
+import { pick, type Bilingual } from '../utils/i18n';
 import { addStyle } from '../utils/dom';
 import { Emitter } from './events';
 import { addBeforeRestoreHook, type BeforeRestoreHook } from './hooks';
 import { setStoredValue, storedValue } from './pluginSettings';
 import { registerRowButton, type RowContribution } from './rows';
-import { registerTab, type TabDef } from './tabs';
 
-export type SettingType = 'switch' | 'text' | 'number' | 'select';
+/** N-4.5: switch, text (optionally secret), number, select, and a custom panel drawn by the plugin. */
+export type SettingType = 'switch' | 'text' | 'number' | 'select' | 'custom';
+
+/** Static bilingual text, or a function evaluated each time the dialog is drawn. */
+export type SettingText = Bilingual | (() => string);
+
+export function settingText(text: SettingText | undefined): string {
+  if (!text) return '';
+  return typeof text === 'function' ? text() : pick(text);
+}
 
 export interface SettingDef {
   type: SettingType;
-  default: string | number | boolean;
-  label: Bilingual;
-  description?: Bilingual;
+  /** Not used by custom panels. */
+  default?: string | number | boolean;
+  label?: SettingText;
+  description?: SettingText;
   hidden?: boolean;
-  options?: Array<{ value: string; label: Bilingual }>;
+  /** text: password input with a Show / Hide button (N-5.6.3). */
+  secret?: boolean;
+  options?: Array<{ value: string; label: SettingText }>;
   min?: number;
   max?: number;
   step?: number;
   placeholder?: string;
+  /** N-5.7.6: map the value onto an existing storage key instead of YSRP_Plugins. */
+  get?(): unknown;
+  set?(value: unknown): void;
+  /** custom: draw the panel (only N-5.2 parts) into the element; may return a cleanup. */
+  render?(el: HTMLElement): void | (() => void);
 }
 
 export interface PluginDef {
@@ -31,9 +47,24 @@ export interface PluginDef {
   icon: string;
   enabledByDefault?: boolean;
   required?: boolean;
+  /** N-5.6.1: size of the plugin settings dialog (default medium). */
+  dialogSize?: 'md' | 'lg';
   settings?: Record<string, SettingDef>;
   start(ctx: PluginContext): void;
   stop?(ctx: PluginContext): void;
+}
+
+export function visibleSettings(plugin: PluginDef): Array<[string, SettingDef]> {
+  return Object.entries(plugin.settings || {}).filter(([, def]) => !def.hidden);
+}
+
+export function hasVisibleSettings(plugin: PluginDef): boolean {
+  return visibleSettings(plugin).length > 0;
+}
+
+/** N-5.6.2: everything except custom panels can be reset. */
+export function isResettable(def: SettingDef): boolean {
+  return def.type !== 'custom';
 }
 
 export function definePlugin(def: PluginDef): PluginDef {
@@ -87,10 +118,6 @@ export class PluginContext {
     return style;
   }
 
-  addTab(def: TabDef): void {
-    this.onDispose(registerTab(def));
-  }
-
   addRowButton(def: RowContribution): void {
     this.onDispose(registerRowButton(def));
   }
@@ -108,14 +135,20 @@ export class PluginContext {
   readonly settings = {
     get: <T = unknown>(key: string): T => getSetting(this.plugin, key) as T,
     set: (key: string, value: unknown): void => {
-      setStoredValue(this.plugin.name, key, value);
+      const def = this.plugin.settings?.[key];
+      if (def && def.set) def.set(value);
+      else setStoredValue(this.plugin.name, key, value);
       this.notify(key, value);
       settingsChanged.emit({ plugin: this.plugin.name, key });
     },
     reset: (): void => {
       // Defaults are written explicitly so the stored value reflects the reset (N-5.6).
-      for (const [key, def] of Object.entries(this.plugin.settings || {})) setStoredValue(this.plugin.name, key, def.default);
-      for (const key of Object.keys(this.plugin.settings || {})) this.notify(key, getSetting(this.plugin, key));
+      const entries = Object.entries(this.plugin.settings || {}).filter(([, def]) => isResettable(def) && def.default !== undefined);
+      for (const [key, def] of entries) {
+        if (def.set) def.set(def.default);
+        else setStoredValue(this.plugin.name, key, def.default);
+      }
+      for (const [key] of entries) this.notify(key, getSetting(this.plugin, key));
       settingsChanged.emit({ plugin: this.plugin.name, key: '*' });
     },
     onChange: (fn: (key: string, value: unknown) => void): void => {
@@ -140,7 +173,7 @@ export class PluginContext {
 
 export function getSetting(plugin: PluginDef, key: string): unknown {
   const def = plugin.settings?.[key];
-  const stored = storedValue(plugin.name, key);
+  const stored = def && def.get ? def.get() : storedValue(plugin.name, key);
   if (stored === undefined || stored === null) return def ? def.default : undefined;
   if (def && typeof def.default === 'boolean') return Boolean(stored);
   if (def && typeof def.default === 'number') {

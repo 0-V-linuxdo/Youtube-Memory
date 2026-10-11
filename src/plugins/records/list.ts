@@ -1,17 +1,19 @@
-// "Records" tab (N-5.4, replacing the layout of part one 1.4): search + filter bar, then a two-column
-// grid of Void++ cards. Data, titles, DeArrow, live updates and ordering (D-5) follow part one.
+// Records list (N-5.4, replacing the layout of part one 1.4): the custom panel of the Records plugin's large
+// settings dialog. Toolbar (search + filter; count, storage badge, refresh spinner), then a single column of
+// Void++ cards. Data, titles, DeArrow, live updates and ordering (D-5) follow part one.
 
-import { confirmDialog } from '../../../api/dialogs';
-import { currentDuration, urlVideoId } from '../../../api/player';
-import { countRecords, listRecords, readRecord, recordChanges, removeRecord, updateRecord, type RecordEntry, type VideoRecord } from '../../../api/records';
-import { listRowButtons, rowsChanged, type RowContext } from '../../../api/rows';
-import { cachedDearrow, cachedOriginalTitle, fetchDearrowTitle, fetchOriginalTitle, getSources, resolveTitle } from '../../../api/titles';
-import { isSettingsOpen, refreshSettingsHeader, type TabDef } from '../../../api/tabs';
-import { card, cardMark, emptyState, grid, iconButton, searchBar, setIconButtonLabel, type CardHandle } from '../../../api/ui';
-import { EVT_DEARROW_READY, EVT_RECORD_UPDATED, EVT_VIDEO_STATUS, UNKNOWN_TITLE, watchUrl } from '../../../utils/constants';
-import { h } from '../../../utils/dom';
-import { tr } from '../../../utils/i18n';
-import { formatTime, isPlaceholderTitle, normalizeTitle, sameTitle } from '../../../utils/text';
+import { confirmDialog } from '../../api/dialogs';
+import { currentDuration, urlVideoId } from '../../api/player';
+import { listRecords, readRecord, recordChanges, removeRecord, updateRecord, type RecordEntry, type VideoRecord } from '../../api/records';
+import { isRunning } from '../../api/plugins';
+import { listRowButtons, rowsChanged, type RowContext } from '../../api/rows';
+import { cachedDearrow, cachedOriginalTitle, fetchDearrowTitle, fetchOriginalTitle, getSources, resolveTitle } from '../../api/titles';
+import { card, cardMark, emptyState, iconButton, searchBar, setIconButtonLabel, type CardHandle } from '../../api/ui';
+import { EVT_DEARROW_READY, EVT_RECORD_UPDATED, EVT_VIDEO_STATUS, UNKNOWN_TITLE, watchUrl } from '../../utils/constants';
+import { h, icon } from '../../utils/dom';
+import { getMode } from '../../utils/storage';
+import { tr } from '../../utils/i18n';
+import { formatTime, isPlaceholderTitle, normalizeTitle, sameTitle } from '../../utils/text';
 
 /** Title shown per video (original vs DeArrow), kept across rebuilds (fixes R-Q6). */
 const showOriginal = new Map<string, boolean>();
@@ -20,9 +22,9 @@ const availability = new Map<string, { state: 'available'; title: string } | { s
 
 const FINISHED_MARGIN_S = 5;
 
-let rowCount = 0;
-export function recordsHeading(): string {
-  return tr('Saved Videos - ({count})', '已保存视频 - ({count})', { count: rowCount });
+/** N-5.4.1: name of the current storage backend for the toolbar badge. */
+function storageName(): string {
+  return getMode() === 'gm' ? tr('GM storage', 'GM 存储') : tr('Browser storage', '浏览器本地存储');
 }
 
 interface Progress { seconds: number; duration: number }
@@ -322,13 +324,18 @@ class RecordCard {
 class RecordsList {
   private readonly grid: HTMLElement;
   private readonly empty: HTMLElement;
+  private readonly countEl: HTMLElement;
+  private readonly badgeEl: HTMLElement;
+  private readonly spinnerEl: HTMLElement;
   private readonly search;
+  private spinUntil = 0;
+  private spinTimer = 0;
   private cards = new Map<string, RecordCard>();
   private renderedCurrent: string | null = null;
   private building = false;
   private disposers: Array<() => void> = [];
 
-  constructor(pane: HTMLElement, private readonly setBusy: (busy: boolean) => void) {
+  constructor(pane: HTMLElement) {
     this.search = searchBar('', [
       { value: 'all', label: tr('All', '全部') },
       { value: 'progress', label: tr('In progress', '未看完') },
@@ -337,12 +344,19 @@ class RecordsList {
     ], () => this.applyFilter());
     this.search.input.classList.add('ysrp-records-search');
     this.search.filter.select.classList.add('ysrp-records-filter');
-    this.grid = grid('ysrp-records');
+    this.countEl = h('span', { class: 'ysrp-records-count' });
+    this.badgeEl = h('span', { class: 'ysrp-badge ysrp-records-storage' });
+    this.spinnerEl = h('span', { class: 'ysrp-refresh', title: tr('Refreshing…', '正在更新列表…') }, icon('arrows-rotate', 'fa-spin'));
+    const status = h('div', { class: 'ysrp-records-status' }, this.countEl, this.badgeEl, this.spinnerEl);
+    // N-5.4.2: one card per row, 8 px apart.
+    this.grid = h('div', { class: 'ysrp-records ysrp-record-list' });
     this.empty = emptyState('', 'ysrp-records-empty');
-    pane.appendChild(h('div', { class: 'ysrp-pane-stack' }, this.search.el, this.grid, this.empty));
+    pane.appendChild(h('div', { class: 'ysrp-records-panel' },
+      h('div', { class: 'ysrp-records-toolbar' }, this.search.el, status), this.grid, this.empty));
 
+    // N-5.4.8: live updates only while the panel is on screen.
     const on = (type: string, fn: (ev: CustomEvent) => void) => {
-      const wrapped = (ev: Event) => { if (isSettingsOpen() && this.grid.isConnected) fn(ev as CustomEvent); };
+      const wrapped = (ev: Event) => { if (this.grid.isConnected) fn(ev as CustomEvent); };
       document.addEventListener(type, wrapped);
       this.disposers.push(() => document.removeEventListener(type, wrapped));
     };
@@ -364,14 +378,28 @@ class RecordsList {
       if (!videoId || !title) return;
       this.cards.get(videoId)?.applyDearrow(title);
     });
-    this.disposers.push(rowsChanged.on(() => { if (isSettingsOpen()) this.rebuild(); }));
+    this.disposers.push(rowsChanged.on(() => { if (this.grid.isConnected) this.rebuild(); }));
     this.disposers.push(recordChanges.on(change => {
-      if (change.kind === 'bulk' && isSettingsOpen()) this.rebuild();
+      if (change.kind === 'bulk' && this.grid.isConnected) this.rebuild();
     }));
+  }
+
+  /** Refresh spinner (U-54/U-55), kept visible at least 300 ms so it can actually be seen (fixes U-Q4). */
+  private setBusy(busy: boolean): void {
+    const el = this.spinnerEl;
+    if (busy) {
+      this.spinUntil = Date.now() + 300;
+      el.classList.add('is-active');
+      return;
+    }
+    const wait = Math.max(0, this.spinUntil - Date.now());
+    if (this.spinTimer) clearTimeout(this.spinTimer);
+    this.spinTimer = window.setTimeout(() => el.classList.remove('is-active'), wait);
   }
 
   destroy(): void {
     for (const fn of this.disposers.splice(0)) fn();
+    if (this.spinTimer) clearTimeout(this.spinTimer);
     for (const c of this.cards.values()) c.destroy();
     this.cards.clear();
   }
@@ -405,6 +433,7 @@ class RecordsList {
           console.error('[Video Memory] Failed to render saved video:', err);
         }
       }
+      this.badgeEl.textContent = storageName();
       this.countChanged();
     } finally {
       this.building = false;
@@ -413,10 +442,8 @@ class RecordsList {
   }
 
   private countChanged(): void {
-    rowCount = this.cards.size;
-    this.search.setPlaceholder(tr('Search {n} records...', '搜索 {n} 条记录...', { n: rowCount }));
+    this.search.setPlaceholder(tr('Search {n} records...', '搜索 {n} 条记录...', { n: this.cards.size }));
     this.applyFilter();
-    refreshSettingsHeader();
   }
 
   private applyFilter(): void {
@@ -429,6 +456,10 @@ class RecordsList {
       if (ok) shown++;
     }
     this.grid.style.display = shown ? '' : 'none';
+    // N-5.4.1: "N records", or "N matches" while searching or filtering.
+    this.countEl.textContent = q || filter !== 'all'
+      ? tr('{n} matches', '{n} 条匹配', { n: shown })
+      : tr('{n} records', '{n} 条记录', { n: this.cards.size });
     this.empty.textContent = this.cards.size
       ? tr('No records match your search.', '没有符合条件的记录。')
       : tr('No saved videos yet.', '还没有保存的视频。');
@@ -441,28 +472,14 @@ class RecordsList {
   }
 }
 
-export function createRecordsTab(setBusy: (busy: boolean) => void): TabDef {
-  let list: RecordsList | null = null;
-  return {
-    id: 'records',
-    group: 'main',
-    order: 10,
-    icon: 'clock-rotate-left',
-    label: () => tr('Records', '记录'),
-    heading: () => recordsHeading(),
-    info: () => tr('Your saved videos: the one playing now comes first, then the most recently saved. Use the buttons on a card for the link, notes or deletion.',
-      '已保存的视频：正在播放的排在最前，其余按保存时间从新到旧。用卡片上的按钮查看链接、编辑笔记或删除。'),
-    storageBadge: true,
-    render(pane) {
-      rowCount = countRecords();
-      list = new RecordsList(pane, setBusy);
-      return () => {
-        list?.destroy();
-        list = null;
-      };
-    },
-    onShow() {
-      list?.rebuild();
-    }
-  };
+/** Custom panel renderer for the Records plugin (N-5.4): builds the list now and cleans up on close. */
+export function renderRecordsPanel(el: HTMLElement): (() => void) | void {
+  // N-5.4.9: with the plugin off the list is shown nowhere, not even in its own settings dialog.
+  if (!isRunning('Records')) {
+    el.appendChild(emptyState(tr('The Records plugin is off. Turn it on to see your saved videos.', '记录插件已关闭。开启后才会显示已保存的视频。'), 'ysrp-records-off'));
+    return;
+  }
+  const list = new RecordsList(el);
+  list.rebuild();
+  return () => list.destroy();
 }

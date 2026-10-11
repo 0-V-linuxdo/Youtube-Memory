@@ -1,5 +1,6 @@
-// Transcript plugin (N-4.6/N-4.7): the Transcript settings tab (N-5.7.2; L-6..L-32) and the record-card
-// transcript button opening the transcript dialog (N-5.4.6; R-49..R-62).
+// Transcript plugin (N-4.6/N-4.7): endpoint settings in its plugin settings dialog (N-5.7.2; L-6..L-32), mapped
+// onto YSRP_TranscriptSettings (N-5.7.6), and the record-card transcript button opening the transcript dialog
+// (N-5.4.6; R-49..R-62).
 
 import { openDialog } from '../../api/dialogs';
 import { definePlugin } from '../../api/plugins';
@@ -7,45 +8,15 @@ import { urlVideoId } from '../../api/player';
 import { recordChanges } from '../../api/records';
 import type { RowContext } from '../../api/rows';
 import { currentStatus, type VideoStatus } from '../../api/titles';
-import { button, copyText, group, iconButton, secretInput, settingsRow, textArea, textInput } from '../../api/ui';
+import { button, copyText, iconButton, textArea } from '../../api/ui';
 import { EVT_VIDEO_STATUS, UNKNOWN_TITLE } from '../../utils/constants';
 import { h } from '../../utils/dom';
 import { tr } from '../../utils/i18n';
 import { errorMessage } from '../../utils/text';
-import { cachedTranscript, fetchTranscript, forgetTranscript, getSettings, timeoutMinutes, updateSettings } from './service';
+import { cachedTranscript, DEFAULTS, fetchTranscript, forgetTranscript, getSettings, timeoutMinutes, updateSettings } from './service';
 
-/** N-5.7.2: "Endpoint" and "Current video" groups made of settings rows. */
-function renderTab(pane: HTMLElement): () => void {
-  const settings = getSettings();
-  const endpoint = textInput({ value: settings.endpoint, placeholder: 'https://example.com/v1/chat/completions', field: 'endpoint' });
-  const model = textInput({ value: settings.model, placeholder: 'transcript', field: 'model' });
-  const apiKey = textInput({ type: 'password', value: settings.apiKey, placeholder: 'sk-***', field: 'apiKey' });
-  const minutes = Math.min(60, Math.max(1, timeoutMinutes(settings.timeoutMs)));
-  const timeout = textInput({ type: 'number', value: String(minutes), placeholder: '10', cls: 'is-number', field: 'timeout' });
-  timeout.min = '1';
-  timeout.max = '60';
-  timeout.step = '1';
-
-  let timer = 0;
-  const save = () => {
-    const mins = parseFloat(timeout.value);
-    updateSettings({
-      endpoint: endpoint.value,
-      model: model.value,
-      apiKey: apiKey.value,
-      timeoutMinutes: Number.isFinite(mins) && mins > 0 ? mins : undefined
-    });
-  };
-  // L-19: 250 ms debounce on input/change.
-  const schedule = () => {
-    if (timer) clearTimeout(timer);
-    timer = window.setTimeout(save, 250);
-  };
-  for (const el of [endpoint, model, apiKey, timeout]) {
-    el.addEventListener('input', schedule);
-    el.addEventListener('change', schedule);
-  }
-
+/** N-5.7.2 custom panel "Current video": title and video ID lines, kept up to date while shown. */
+function renderCurrentVideo(el: HTMLElement): () => void {
   const titleValue = h('span', { class: 'ysrp-transcript-video-title' });
   const idValue = h('span', { class: 'ysrp-mono' });
   const idLine = h('div', {}, tr('Video ID: ', '视频 ID：'), idValue);
@@ -63,27 +34,9 @@ function renderTab(pane: HTMLElement): () => void {
   update(currentStatus());
   const onStatus = (ev: Event) => update((ev as CustomEvent).detail || null);
   document.addEventListener(EVT_VIDEO_STATUS, onStatus);
-
-  pane.appendChild(h('div', { class: 'ysrp-groups' },
-    group(tr('Endpoint', '接口'),
-      settingsRow({ title: tr('API endpoint', '接口地址'), desc: tr('OpenAI-compatible chat/completions URL; a bare host gets the path added.', '兼容 OpenAI 的 chat/completions 地址；只填域名时自动补全路径。'), below: [endpoint] }).el,
-      settingsRow({ title: tr('Model', '模型'), below: [model] }).el,
-      settingsRow({ title: tr('API key', 'API 密钥'), desc: tr('Leave empty to send no key.', '留空则不发送密钥。'), below: [secretInput(apiKey)] }).el,
-      settingsRow({ title: tr('Timeout (minutes)', '超时（分钟）'), desc: tr('1–60 minutes.', '1–60 分钟。'), control: timeout }).el
-    ),
-    group(tr('Current video', '当前视频'),
-      h('div', { class: 'ysrp-info-lines' }, h('div', {}, tr('Title: ', '标题：'), titleValue), idLine),
-      h('div', { class: 'ysrp-note', text: tr('Fetch transcripts from the cards in the Records tab.', '在“记录”标签的卡片上获取字幕。') })
-    )
-  ));
-  return () => {
-    // Fix L-Q10: the status listener is removed with the pane.
-    document.removeEventListener(EVT_VIDEO_STATUS, onStatus);
-    if (timer) {
-      clearTimeout(timer);
-      save();
-    }
-  };
+  el.appendChild(h('div', { class: 'ysrp-info-lines ysrp-transcript-current' }, h('div', {}, tr('Title: ', '标题：'), titleValue), idLine));
+  // Fix L-Q10: the status listener is removed with the dialog.
+  return () => document.removeEventListener(EVT_VIDEO_STATUS, onStatus);
 }
 
 /** N-5.4.6: large dialog with the status, a read-only text area, Refresh and Copy. Fetch rules R-49..R-62. */
@@ -164,16 +117,57 @@ export default definePlugin({
   authors: ['0_V'],
   icon: 'closed-captioning',
   enabledByDefault: true,
+  // N-5.7.2 / N-5.7.6: values stay in YSRP_TranscriptSettings with part one's normalisation.
+  settings: {
+    endpoint: {
+      type: 'text',
+      default: DEFAULTS.endpoint,
+      label: { en: 'API endpoint', zh: '接口地址' },
+      description: { en: 'OpenAI-compatible chat/completions URL; a bare host gets the path added.', zh: '兼容 OpenAI 的 chat/completions 地址；只填域名时自动补全路径。' },
+      placeholder: 'https://example.com/v1/chat/completions',
+      get: () => getSettings().endpoint,
+      set: value => { updateSettings({ endpoint: String(value ?? '') }); }
+    },
+    model: {
+      type: 'text',
+      default: DEFAULTS.model,
+      label: { en: 'Model', zh: '模型' },
+      placeholder: 'transcript',
+      get: () => getSettings().model,
+      set: value => { updateSettings({ model: String(value ?? '') }); }
+    },
+    apiKey: {
+      type: 'text',
+      secret: true,
+      default: DEFAULTS.apiKey,
+      label: { en: 'API key', zh: 'API 密钥' },
+      description: { en: 'Leave empty to send no key.', zh: '留空则不发送密钥。' },
+      placeholder: 'sk-***',
+      get: () => getSettings().apiKey,
+      set: value => { updateSettings({ apiKey: String(value ?? '') }); }
+    },
+    timeout: {
+      type: 'number',
+      default: timeoutMinutes(DEFAULTS.timeoutMs),
+      label: { en: 'Timeout (minutes)', zh: '超时（分钟）' },
+      description: { en: '1–60 minutes.', zh: '1–60 分钟。' },
+      placeholder: '10',
+      min: 1,
+      max: 60,
+      step: 1,
+      get: () => Math.min(60, Math.max(1, timeoutMinutes(getSettings().timeoutMs))),
+      set: value => {
+        const mins = Number(value);
+        if (Number.isFinite(mins) && mins > 0) updateSettings({ timeoutMinutes: mins });
+      }
+    },
+    currentVideo: {
+      type: 'custom',
+      label: { en: 'Current video', zh: '当前视频' },
+      render: renderCurrentVideo
+    }
+  },
   start(ctx) {
-    ctx.addTab({
-      id: 'transcript',
-      group: 'plugins',
-      order: 20,
-      icon: 'closed-captioning',
-      label: () => tr('Transcript', '字幕'),
-      info: () => tr('Configure the OpenAI-compatible endpoint used for transcripts. Fetching lives on the record cards.', '配置字幕接口（兼容 OpenAI）。字幕获取在记录卡片上。'),
-      render: renderTab
-    });
     ctx.addRowButton({
       id: 'transcript',
       order: 10,
