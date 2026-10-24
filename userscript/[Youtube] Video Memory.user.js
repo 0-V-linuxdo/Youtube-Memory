@@ -1,15 +1,17 @@
 // ==UserScript==
-// @name         [Youtube] Video Memory [20261010] v2.2.0
+// @name         [Youtube] Video Memory [20261024] v2.3.0
 // @namespace    0_V userscripts/Youtube Save & Resume Progress
-// @version      [20261010] v2.2.0
-// @description  Save & resume YouTube playback progress reliably (waits for the player, skips ads, per-video sessions), timestamp-link choice dialog, records/storage/transcript settings, void++-style plugins, 💾 badge toggle and optional Google Drive sync.
-// @update-log   [20261010] v2.2.0 · Clean-room rewrite: new progress engine (no lost progress), &t= choice dialog, void++-style plugin architecture and settings UI, 💾 badge toggle plugin, per-video Google Drive sync, page scrollbar kept while the dialog is open.
+// @version      [20261024] v2.3.0
+// @description  Save & resume YouTube playback progress reliably (waits for the player, skips ads, per-video sessions), timestamp-link choice dialog, records/storage/transcript settings, void++-style plugins, toasts, tab sync, 💾 badge toggle and optional Google Drive sync.
+// @update-log   [20261024] v2.3.0 · Automatic updates, toasts, tab sync (records, settings and progress protection across tabs), setting validation with sliders, plugin dependencies.
 // @author       0_V
 // @license      MIT
 // @match        *://*.youtube.com/*
 // @icon         https://github.com/0-V-linuxdo/Youtube-Memory/raw/refs/heads/main/main_icon/main_icon.svg
 // @homepageURL  https://github.com/0-V-linuxdo/Youtube-Memory
 // @supportURL   https://github.com/0-V-linuxdo/Youtube-Memory/issues
+// @updateURL    https://raw.githubusercontent.com/0-V-linuxdo/Youtube-Memory/main/userscript/%5BYoutube%5D%20Video%20Memory.meta.js
+// @downloadURL  https://raw.githubusercontent.com/0-V-linuxdo/Youtube-Memory/main/userscript/%5BYoutube%5D%20Video%20Memory.user.js
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
@@ -32,8 +34,8 @@
 'use strict';
 (() => {
   // src/utils/constants.ts
-  var VERSION = "[20261010] v2.2.0";
-  var COMMIT = "53bc5b2";
+  var VERSION = "[20261024] v2.3.0";
+  var COMMIT = "801d3c0";
   var IS_DEV_BUILD = false;
   var VERSION_SHORT = (VERSION.match(/v[\d.]+/) || [VERSION])[0];
   var RECORD_PREFIX = "Youtube_SaveResume_Progress-";
@@ -154,6 +156,22 @@
     }
     return out;
   }
+  var settingWriteListeners = new Set;
+  function onSettingWrite(fn) {
+    settingWriteListeners.add(fn);
+    return () => {
+      settingWriteListeners.delete(fn);
+    };
+  }
+  function settingWritten(key) {
+    for (const fn of Array.from(settingWriteListeners)) {
+      try {
+        fn(key);
+      } catch (err) {
+        console.error("[Video Memory] setting listener failed:", err);
+      }
+    }
+  }
   function gmGetRaw(key) {
     if (typeof GM_getValue !== "function")
       return null;
@@ -191,6 +209,8 @@
     } catch {}
     if (gmSetRaw(key, value))
       ok = true;
+    if (ok)
+      settingWritten(key);
     return ok;
   }
   function readSecretSetting(key) {
@@ -201,11 +221,11 @@
     return typeof local === "string" && local !== "" ? local : null;
   }
   function writeSecretSetting(key, value) {
-    if (gmSetRaw(key, value)) {
+    if (gmSetRaw(key, value))
       localBackend.remove(key);
-      return;
-    }
-    localBackend.set(key, value);
+    else
+      localBackend.set(key, value);
+    settingWritten(key);
   }
   var currentMode = null;
   function detectMode() {
@@ -230,6 +250,9 @@
       persistMode(currentMode);
     }
     return currentMode;
+  }
+  function reloadMode() {
+    currentMode = null;
   }
   function activeBackend() {
     return backendFor(getMode());
@@ -271,6 +294,7 @@
     }
     currentMode = target;
     persistMode(target);
+    settingWritten(KEY_STORAGE_MODE);
     return { ok: true, moved };
   }
   function exportData() {
@@ -380,6 +404,13 @@
     activeBackend().remove(recordKey(videoId));
     recordChanges.emit({ videoId, kind, record: null });
   }
+  function notifyBulkChange() {
+    recordChanges.emit({ videoId: "", kind: "bulk", record: null });
+  }
+  function applyRemoteChange(videoId, kind) {
+    const record = videoId ? readRecord(videoId) : null;
+    recordChanges.emit({ videoId, kind: videoId ? kind : "bulk", record, remote: true });
+  }
   function listRecords() {
     return listPrefixed(activeBackend()).map(([key, raw]) => ({
       videoId: key.slice(RECORD_PREFIX.length),
@@ -458,6 +489,15 @@
   }
   function getLanguage() {
     return preference === "auto" ? detectBrowserLanguage() : preference;
+  }
+  function reloadPreference() {
+    const next = normalizePreference(readSetting(KEY_LANGUAGE));
+    if (next === preference)
+      return;
+    preference = next;
+    try {
+      document.dispatchEvent(new CustomEvent(EVT_LANGUAGE, { detail: { preference: next, resolved: getLanguage() } }));
+    } catch {}
   }
   function setPreference(value) {
     const next = normalizePreference(value);
@@ -676,6 +716,9 @@
     };
     return cache;
   }
+  function reloadPluginStore() {
+    cache = null;
+  }
   function save() {
     writeSetting(KEY_PLUGINS, JSON.stringify(load()));
   }
@@ -717,6 +760,383 @@
   }
   function listRowButtons() {
     return Array.from(contributions.values()).sort((a, b) => a.order - b.order);
+  }
+
+  // src/api/ui.ts
+  function button(label, opts = {}) {
+    const btn = h("button", {
+      class: `ysrp-btn is-${opts.variant || "secondary"}${opts.small ? " is-small" : ""}${opts.cls ? ` ${opts.cls}` : ""}`,
+      type: "button",
+      title: opts.title
+    }, opts.icon ? icon(opts.icon) : null, h("span", { class: "ysrp-btn-label", text: label }));
+    if (opts.onClick)
+      btn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        opts.onClick?.(ev);
+      });
+    return btn;
+  }
+  function setButtonLabel(btn, label) {
+    const span = btn.querySelector(".ysrp-btn-label");
+    if (span)
+      span.textContent = label;
+  }
+  function iconButton(iconName, label, cls = "", onClick) {
+    const btn = h("button", { class: `ysrp-ibtn${cls ? ` ${cls}` : ""}`, type: "button" }, icon(iconName));
+    setIconButtonLabel(btn, label);
+    if (onClick)
+      btn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        onClick(ev);
+      });
+    return btn;
+  }
+  function setIconButtonLabel(btn, label) {
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+  }
+  function setIcon(btn, iconName, variant = "solid") {
+    const i = btn.querySelector("i");
+    if (i)
+      i.className = `fa-${variant} fa-${iconName}`;
+  }
+  function switchControl(checked, onChange, opts = {}) {
+    const el = h("button", {
+      class: `ysrp-switch${opts.cls ? ` ${opts.cls}` : ""}`,
+      type: "button",
+      disabled: Boolean(opts.disabled),
+      dataset: opts.dataset,
+      attrs: { role: "switch", "aria-label": opts.label }
+    }, h("span", { class: "ysrp-switch-knob" }));
+    let on = checked;
+    const set = (next) => {
+      on = next;
+      el.setAttribute("aria-checked", String(next));
+      el.classList.toggle("is-on", next);
+    };
+    set(checked);
+    el.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      if (el.disabled)
+        return;
+      set(!on);
+      onChange(on);
+    });
+    return { el, set, value: () => on };
+  }
+  function textInput(opts = {}) {
+    return h("input", {
+      class: `ysrp-input${opts.cls ? ` ${opts.cls}` : ""}`,
+      type: opts.type || "text",
+      value: opts.value ?? "",
+      placeholder: opts.placeholder,
+      autocomplete: opts.type === "password" ? "new-password" : "off",
+      spellcheck: false,
+      dataset: opts.field ? { field: opts.field } : undefined
+    });
+  }
+  function textArea(opts = {}) {
+    return h("textarea", {
+      class: `ysrp-textarea${opts.cls ? ` ${opts.cls}` : ""}`,
+      value: opts.value ?? "",
+      placeholder: opts.placeholder,
+      readOnly: Boolean(opts.readOnly),
+      spellcheck: false
+    });
+  }
+  function selectControl(options, value, onChange, opts = {}) {
+    const select = h("select", {
+      class: `ysrp-select${opts.cls ? ` ${opts.cls}` : ""}`,
+      dataset: opts.dataset,
+      attrs: { "aria-label": opts.label }
+    }, options.map((o) => h("option", { value: o.value, text: o.label, disabled: Boolean(o.disabled), selected: o.value === value })));
+    select.value = value;
+    select.addEventListener("change", () => onChange(select.value));
+    const el = h("span", { class: "ysrp-select-wrap" }, select, h("span", { class: "ysrp-select-arrow" }, icon("chevron-down")));
+    return { el, select, value: () => select.value, set: (v) => {
+      select.value = v;
+    } };
+  }
+  function sliderControl(value, opts) {
+    const input = h("input", {
+      class: "ysrp-slider",
+      type: "range",
+      dataset: opts.dataset,
+      attrs: { min: String(opts.min), max: String(opts.max), step: String(opts.step ?? 1), "aria-label": opts.label }
+    });
+    const label = h("span", { class: "ysrp-slider-value" });
+    const show = () => {
+      const n = Number(input.value);
+      const span = opts.max - opts.min;
+      input.style.setProperty("--ysrp-fill", `${span > 0 ? (n - opts.min) / span * 100 : 0}%`);
+      label.textContent = opts.format ? opts.format(n) : String(n);
+      input.setAttribute("aria-valuetext", label.textContent);
+    };
+    const set = (n) => {
+      input.value = String(n);
+      show();
+    };
+    set(value);
+    input.addEventListener("input", show);
+    input.addEventListener("change", () => {
+      show();
+      opts.onChange(Number(input.value));
+    });
+    return { el: h("span", { class: "ysrp-slider-wrap" }, input, label), input, value: () => Number(input.value), set };
+  }
+  function secretInput(input) {
+    input.type = "password";
+    const toggle = button(tr("Show", "显示"), { variant: "tertiary", small: true, cls: "ysrp-secret-toggle" });
+    toggle.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      const reveal = input.type === "password";
+      input.type = reveal ? "text" : "password";
+      setButtonLabel(toggle, reveal ? tr("Hide", "隐藏") : tr("Show", "显示"));
+    });
+    return h("div", { class: "ysrp-secret" }, input, toggle);
+  }
+  var NBSP = " ";
+  function card(opts) {
+    const iconEl = h("span", { class: "ysrp-card-icon" }, icon(opts.icon));
+    const titleEl = h("span", { class: "ysrp-card-title" });
+    const marksEl = h("span", { class: "ysrp-card-marks" }, opts.marks || []);
+    const controlsEl = h("span", { class: "ysrp-card-controls" }, opts.controls || []);
+    const descEl = h("div", { class: "ysrp-card-desc" });
+    const footerEl = h("div", { class: "ysrp-card-footer" });
+    const el = h("div", { class: `ysrp-card${opts.cls ? ` ${opts.cls}` : ""}`, dataset: opts.dataset }, h("div", { class: "ysrp-card-body" }, h("div", { class: "ysrp-card-top" }, h("div", { class: "ysrp-card-lead" }, iconEl, titleEl, marksEl), controlsEl), descEl), h("div", { class: "ysrp-card-sep" }), footerEl);
+    const handle = {
+      el,
+      iconEl,
+      titleEl,
+      marksEl,
+      controlsEl,
+      descEl,
+      footerEl,
+      setIcon(name) {
+        iconEl.replaceChildren(icon(name));
+      },
+      setTitle(text, tip) {
+        titleEl.textContent = text;
+        titleEl.title = tip ?? text;
+      },
+      setDesc(text) {
+        descEl.textContent = text;
+        descEl.title = text;
+      },
+      setFooter(text) {
+        footerEl.textContent = text || NBSP;
+      }
+    };
+    handle.setTitle(opts.title, opts.titleTip);
+    handle.setDesc(opts.desc || "");
+    handle.setFooter(opts.footer || "");
+    return handle;
+  }
+  function cardMark(iconName, tip, cls = "") {
+    return h("span", { class: `ysrp-card-mark${cls ? ` ${cls}` : ""}`, title: tip, attrs: { "aria-label": tip, role: "img" } }, icon(iconName));
+  }
+  function grid(cls = "", ...children) {
+    return h("div", { class: `ysrp-grid${cls ? ` ${cls}` : ""}` }, children);
+  }
+  function settingsRow(opts) {
+    const descEl = h("div", { class: "ysrp-srow-desc", text: opts.desc || "" });
+    if (!opts.desc)
+      descEl.style.display = "none";
+    const below = h("div", { class: "ysrp-srow-below" }, opts.below || []);
+    if (!opts.below || !opts.below.length)
+      below.style.display = "none";
+    const el = h("div", { class: `ysrp-srow${opts.cls ? ` ${opts.cls}` : ""}`, dataset: opts.dataset }, h("div", { class: "ysrp-srow-main" }, h("div", { class: "ysrp-srow-text" }, h("div", { class: "ysrp-srow-title", text: opts.title }), descEl), opts.control ? h("div", { class: "ysrp-srow-control" }, opts.control) : null), below);
+    return { el, descEl, below };
+  }
+  function setRowDesc(row, text) {
+    row.descEl.textContent = text;
+    row.descEl.style.display = text ? "" : "none";
+  }
+  function actions(...children) {
+    return h("div", { class: "ysrp-actions" }, children);
+  }
+  function searchBar(placeholder, filters, onChange) {
+    const input = h("input", { class: "ysrp-input ysrp-search", type: "search", placeholder, spellcheck: false, autocomplete: "off" });
+    input.addEventListener("input", onChange);
+    const filter = selectControl(filters, filters[0]?.value || "all", onChange, { cls: "ysrp-filter", label: tr("Filter", "筛选") });
+    return {
+      el: h("div", { class: "ysrp-searchbar" }, input, filter.el),
+      input,
+      filter,
+      query: () => input.value.trim().toLowerCase(),
+      setPlaceholder: (text) => {
+        input.placeholder = text;
+      }
+    };
+  }
+  function categoryStrip(cats, active, onSelect) {
+    let current = active;
+    const buttons = cats.map((c) => {
+      const btn = button(c.label, { variant: "tertiary", small: true, cls: "ysrp-cat" });
+      btn.dataset.cat = c.id;
+      btn.addEventListener("click", (ev) => {
+        ev.preventDefault();
+        if (current === c.id)
+          return;
+        set(c.id);
+        onSelect(c.id);
+      });
+      return btn;
+    });
+    const set = (id) => {
+      current = id;
+      for (const b of buttons) {
+        const on = b.dataset.cat === id;
+        b.classList.toggle("is-active", on);
+        b.setAttribute("aria-selected", String(on));
+      }
+    };
+    set(active);
+    return { el: h("div", { class: "ysrp-cats", attrs: { role: "tablist" } }, buttons), value: () => current, set };
+  }
+  function infoHint(text) {
+    return h("span", { class: "ysrp-info-hint", title: text, attrs: { "aria-label": text, role: "img", tabindex: "0" } }, icon("circle-info"));
+  }
+  function emptyState(text, cls = "") {
+    return h("p", { class: `ysrp-empty${cls ? ` ${cls}` : ""}`, text });
+  }
+  function field(label, ...content) {
+    return h("div", { class: "ysrp-field" }, h("div", { class: "ysrp-field-label", text: label }), content);
+  }
+  function messageLine(cls = "") {
+    const el = h("div", { class: `ysrp-msg${cls ? ` ${cls}` : ""}`, attrs: { role: "status", "aria-live": "polite" } });
+    return {
+      el,
+      set(text, tone = "neutral") {
+        const value = (text || "").trim();
+        el.textContent = value;
+        el.classList.toggle("is-visible", Boolean(value));
+        el.classList.toggle("is-success", Boolean(value) && tone === "success");
+        el.classList.toggle("is-error", Boolean(value) && tone === "error");
+      }
+    };
+  }
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        await navigator.clipboard.writeText(text);
+        return;
+      }
+    } catch (err) {
+      if (!legacyCopy(text))
+        throw err;
+      return;
+    }
+    if (!legacyCopy(text))
+      throw new Error(tr("Clipboard is not available", "剪贴板不可用"));
+  }
+  function legacyCopy(text) {
+    try {
+      const area = h("textarea", { value: text, style: "position:fixed;top:-1000px;left:-1000px;opacity:0" });
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand("copy");
+      area.remove();
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+
+  // src/api/toast.ts
+  var MAX_TOASTS = 3;
+  var ICONS = {
+    info: "circle-info",
+    success: "circle-check",
+    warning: "triangle-exclamation",
+    error: "circle-xmark"
+  };
+  var config = null;
+  var root = null;
+  var seq = 0;
+  var live = new Map;
+  function configureToasts(next) {
+    config = next;
+    if (!next)
+      clearToasts();
+  }
+  function host() {
+    return document.fullscreenElement || document.body;
+  }
+  function ensureRoot() {
+    if (!root) {
+      root = h("div", { class: "ysrp-ui ysrp-toasts" });
+      for (const type of ["pointerdown", "mousedown", "click", "dblclick", "keydown", "keyup", "wheel", "contextmenu"]) {
+        root.addEventListener(type, (ev) => ev.stopPropagation());
+      }
+      document.addEventListener("fullscreenchange", onFullscreen);
+    }
+    const target = host();
+    if (root.parentElement !== target)
+      target.appendChild(root);
+    return root;
+  }
+  function onFullscreen() {
+    if (root && root.childElementCount)
+      host().appendChild(root);
+  }
+  function arm(id, item) {
+    if (item.timer)
+      clearTimeout(item.timer);
+    item.timer = window.setTimeout(() => dismissToast(id), item.ms);
+  }
+  function dismissToast(id) {
+    const item = live.get(id);
+    if (!item)
+      return;
+    live.delete(id);
+    if (item.timer)
+      clearTimeout(item.timer);
+    item.el.remove();
+    if (root && !root.childElementCount)
+      root.remove();
+  }
+  function clearToasts() {
+    for (const id of Array.from(live.keys()))
+      dismissToast(id);
+    if (root) {
+      root.remove();
+      document.removeEventListener("fullscreenchange", onFullscreen);
+      root = null;
+    }
+  }
+  function showToast(opts) {
+    if (!config)
+      return "";
+    if (opts.topic && !config.topics[opts.topic])
+      return "";
+    const type = opts.type || "info";
+    const id = opts.id || `toast-${++seq}`;
+    dismissToast(id);
+    const close = iconButton("xmark", tr("Close", "关闭"), "ysrp-toast-close", () => dismissToast(id));
+    const el = h("div", {
+      class: "ysrp-toast",
+      dataset: { type, toastId: id },
+      attrs: { role: type === "error" ? "alert" : "status", "aria-live": type === "error" ? "assertive" : "polite" }
+    }, h("span", { class: "ysrp-toast-icon" }, icon(ICONS[type])), h("span", { class: "ysrp-toast-text", text: opts.text }), close);
+    const base = opts.duration ?? config.durationMs;
+    const item = { el, timer: 0, ms: type === "error" ? base * 2 : base };
+    el.addEventListener("mouseenter", () => {
+      if (item.timer)
+        clearTimeout(item.timer);
+      item.timer = 0;
+    });
+    el.addEventListener("mouseleave", () => {
+      if (live.get(id) === item)
+        arm(id, item);
+    });
+    ensureRoot().appendChild(el);
+    live.set(id, item);
+    while (live.size > MAX_TOASTS)
+      dismissToast(live.keys().next().value);
+    arm(id, item);
+    return id;
   }
 
   // src/api/plugins.ts
@@ -788,12 +1208,15 @@
       get: (key) => getSetting(this.plugin, key),
       set: (key, value) => {
         const def = this.plugin.settings?.[key];
+        if (def && def.validate && def.validate(value))
+          return false;
         if (def && def.set)
           def.set(value);
         else
           setStoredValue(this.plugin.name, key, value);
         this.notify(key, value);
         settingsChanged.emit({ plugin: this.plugin.name, key });
+        return true;
       },
       reset: () => {
         const entries = Object.entries(this.plugin.settings || {}).filter(([, def]) => isResettable(def) && def.default !== undefined);
@@ -869,6 +1292,12 @@
   function isRunning(name) {
     return running.has(name);
   }
+  function dependenciesOf(plugin) {
+    return (plugin.dependencies || []).map(findPlugin).filter((p) => Boolean(p));
+  }
+  function dependentsOf(plugin) {
+    return registry.filter((p) => (p.dependencies || []).includes(plugin.name));
+  }
   function settingsContext(plugin) {
     return running.get(plugin.name) || contexts.get(plugin.name) || (() => {
       const ctx = new PluginContext(plugin);
@@ -894,7 +1323,6 @@
     if (!ctx)
       return;
     running.delete(plugin.name);
-    failed.delete(plugin.name);
     try {
       plugin.stop?.(ctx);
     } catch (err) {
@@ -902,25 +1330,110 @@
     }
     ctx.dispose();
   }
+  function startOrder() {
+    const order = [];
+    const broken = new Map;
+    const state = new Map;
+    const visit = (plugin, path) => {
+      const st = state.get(plugin.name);
+      if (st === "done")
+        return !broken.has(plugin.name);
+      if (st === "visiting") {
+        broken.set(plugin.name, `circular dependency ${[...path, plugin.name].join(" -> ")}`);
+        return false;
+      }
+      state.set(plugin.name, "visiting");
+      let ok = true;
+      for (const dep of plugin.dependencies || []) {
+        const target = findPlugin(dep);
+        if (!target) {
+          broken.set(plugin.name, `missing dependency ${dep}`);
+          ok = false;
+        } else if (!visit(target, [...path, plugin.name]) && !broken.has(plugin.name)) {
+          broken.set(plugin.name, broken.get(target.name) || `dependency ${dep} is broken`);
+          ok = false;
+        }
+      }
+      state.set(plugin.name, "done");
+      order.push(plugin);
+      return ok && !broken.has(plugin.name);
+    };
+    for (const plugin of [...registry.filter((p) => p.required), ...registry.filter((p) => !p.required)])
+      visit(plugin, []);
+    return { order, broken };
+  }
+  var reported = new Set;
+  function reconcile() {
+    const { order, broken } = startOrder();
+    for (const plugin of order.slice().reverse()) {
+      const wanted = isEnabled(plugin) && !broken.has(plugin.name) && (plugin.dependencies || []).every((d) => {
+        const dep = findPlugin(d);
+        return Boolean(dep && isEnabled(dep));
+      });
+      if (!wanted && running.has(plugin.name))
+        stopPlugin(plugin);
+    }
+    for (const plugin of order) {
+      if (!isEnabled(plugin)) {
+        failed.delete(plugin.name);
+        continue;
+      }
+      const reason = broken.get(plugin.name) || (plugin.dependencies || []).filter((d) => !running.has(d) || failed.has(d)).map((d) => `dependency ${d} is not running`)[0];
+      if (reason) {
+        if (running.has(plugin.name))
+          stopPlugin(plugin);
+        failed.add(plugin.name);
+        const key = `${plugin.name}: ${reason}`;
+        if (!reported.has(key)) {
+          reported.add(key);
+          console.error(`[Video Memory] Plugin ${plugin.name} was not started: ${reason}`);
+        }
+        continue;
+      }
+      startPlugin(plugin);
+    }
+  }
   function startPlugins(plugins) {
     registry.push(...plugins);
-    const ordered = [...plugins.filter((p) => p.required), ...plugins.filter((p) => !p.required)];
-    for (const plugin of ordered) {
-      if (isEnabled(plugin))
-        startPlugin(plugin);
-    }
+    reconcile();
     pluginsChanged.emit();
   }
+  var names = (list) => list.map((p) => pick(p.displayName)).join(tr(", ", "、"));
   function setPluginEnabled(name, enabled) {
     const plugin = findPlugin(name);
     if (!plugin || plugin.required)
       return;
+    const also = [];
+    const seen = new Set([name]);
+    const walk = (p) => {
+      const next = enabled ? dependenciesOf(p) : dependentsOf(p);
+      for (const q of next) {
+        if (seen.has(q.name))
+          continue;
+        seen.add(q.name);
+        if (!q.required && isEnabled(q) !== enabled)
+          also.push(q);
+        walk(q);
+      }
+    };
+    walk(plugin);
+    for (const p of also)
+      setStoredValue(p.name, "enabled", enabled);
     setStoredValue(name, "enabled", enabled);
-    if (enabled)
-      startPlugin(plugin);
-    else
-      stopPlugin(plugin);
+    reconcile();
     pluginsChanged.emit();
+    if (also.length) {
+      showToast({
+        id: "plugin-deps",
+        text: enabled ? tr("Also enabled: {names}", "已同时开启：{names}", { names: names(also) }) : tr("Also disabled: {names}", "已同时关闭：{names}", { names: names(also) })
+      });
+    }
+  }
+  function reloadPluginChoices() {
+    reloadPluginStore();
+    reconcile();
+    pluginsChanged.emit();
+    settingsChanged.emit({ plugin: "*", key: "*" });
   }
 
   // src/api/theme.css
@@ -1332,6 +1845,82 @@
 @media (max-width: 640px) {
   .ysrp-grid { grid-template-columns: 1fr; }
 }
+
+/* ---------------------------------------------------------------- N-10.2 toasts */
+.ysrp-toasts {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: 10010;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  width: min(400px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.ysrp-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--ysrp-border-l1);
+  border-radius: 12px;
+  background: var(--ysrp-surface-base);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .28);
+  pointer-events: auto;
+}
+.ysrp-toast-icon { flex: 0 0 auto; display: inline-flex; align-items: center; height: 20px; color: var(--ysrp-fg-secondary); }
+.ysrp-toast-icon i { font-size: 16px; }
+.ysrp-toast[data-type="error"] .ysrp-toast-icon { color: var(--ysrp-fg-danger); }
+.ysrp-toast[data-type="success"] .ysrp-toast-icon { color: var(--ysrp-fg-success); }
+.ysrp-toast-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ysrp-fg-primary);
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ysrp-toast-close { margin: -2px -4px -2px 0; }
+
+/* ---------------------------------------------------------------- N-12 validation, disabled rows, slider */
+.ysrp-srow.is-disabled { opacity: .5; }
+.ysrp-srow.is-disabled .ysrp-srow-control,
+.ysrp-srow.is-disabled .ysrp-srow-below { pointer-events: none; }
+.ysrp-input.is-invalid,
+.ysrp-input.is-invalid:focus { border-color: var(--ysrp-fg-danger); }
+.ysrp-srow-error { font-size: 12px; line-height: 16px; color: var(--ysrp-fg-danger); }
+.ysrp-srow-error:empty { display: none; }
+.ysrp-slider-wrap { display: inline-flex; align-items: center; gap: 8px; }
+.ysrp-slider-value { min-width: 40px; font-size: 13px; color: var(--ysrp-fg-secondary); text-align: right; white-space: nowrap; }
+.ysrp-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 160px;
+  height: 4px;
+  margin: 0;
+  border-radius: 2px;
+  background: linear-gradient(to right, var(--ysrp-fg-primary) 0 var(--ysrp-fill, 0%), var(--ysrp-surface-l2) var(--ysrp-fill, 0%) 100%);
+  outline: none;
+  cursor: pointer;
+}
+.ysrp-slider:disabled { opacity: .5; cursor: default; }
+.ysrp-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: var(--ysrp-fg-primary);
+}
+.ysrp-slider::-moz-range-thumb { width: 14px; height: 14px; border: none; border-radius: 50%; background: var(--ysrp-fg-primary); }
+.ysrp-slider:focus-visible { outline: 2px solid var(--ysrp-border-l2); outline-offset: 4px; }
 `;
 
   // src/utils/text.ts
@@ -1777,6 +2366,20 @@
         if (this.session)
           this.endSession(this.session);
       });
+      ctx.onDispose(recordChanges.on((change) => {
+        const s = this.session;
+        if (!change.remote || !s || change.videoId !== s.id || s.phase !== "tracking" || !change.record)
+          return;
+        if (change.kind !== "content" && change.kind !== "sync")
+          return;
+        const player = readyPlayer(s.id);
+        s.remoteReading = player ? playerTime(player) : s.lastReadyTime;
+        if (document.visibilityState === "hidden")
+          s.yielded = true;
+        const progress = Number(change.record.videoProgress);
+        if (Number.isFinite(progress))
+          showSavedTime(progress);
+      }));
       ctx.timeout(() => this.tick(), 0);
     }
     flush() {
@@ -1833,7 +2436,10 @@
         lastSaveAt: 0,
         restore: null,
         prompt: null,
-        ended: false
+        ended: false,
+        failureShown: false,
+        remoteReading: null,
+        yielded: false
       };
       this.session = s;
       runBeforeRestoreHooks(id, HOOK_TIMEOUT_MS, () => {
@@ -1960,8 +2566,10 @@
       const target = s.restore ? s.restore.target : 0;
       s.restore = null;
       this.startTracking(s);
-      if (ok)
+      if (ok) {
         flashStatus("Resumed {t}", "已恢复 {t}", { t: formatTime(target) }, 2500);
+        showToast({ id: "resume", topic: "resume", type: "success", text: tr("Resumed at {t}", "已恢复到 {t}", { t: formatTime(target) }) });
+      }
     }
     startTracking(s) {
       s.phase = "tracking";
@@ -1971,6 +2579,11 @@
     save(s, useLastReading) {
       if (s.phase !== "tracking")
         return;
+      if (s.yielded) {
+        if (document.visibilityState === "hidden")
+          return;
+        s.yielded = false;
+      }
       s.lastSaveAt = Date.now();
       let time = null;
       let duration = s.lastDuration;
@@ -1985,6 +2598,11 @@
       }
       if (time === null)
         return;
+      if (s.remoteReading !== null) {
+        if (Math.abs(time - s.remoteReading) < MIN_DELTA_S)
+          return;
+        s.remoteReading = null;
+      }
       if (s.lastWritten !== null && Math.abs(time - s.lastWritten) < MIN_DELTA_S)
         return;
       this.write(s, time, duration);
@@ -2005,6 +2623,10 @@
           };
         }, "content");
         s.lastWritten = time;
+        if (s.failureShown) {
+          s.failureShown = false;
+          dismissToast("save-failed");
+        }
         if (this.session === s)
           showSavedTime(time);
         dispatch(EVT_RECORD_UPDATED, { videoId: id, videoProgress: time });
@@ -2012,6 +2634,10 @@
         console.error("[Video Memory] Failed to save video progress:", err);
         if (this.session === s)
           showStatus("⚠ Save failed", "⚠ 保存失败", undefined, { tooltip: errorMessage(err), error: true });
+        if (!s.failureShown) {
+          s.failureShown = true;
+          showToast({ id: "save-failed", type: "error", text: tr("Could not save the progress: {e}", "进度保存失败：{e}", { e: errorMessage(err) }) });
+        }
       }
     }
   }
@@ -2248,261 +2874,6 @@
       ctx.onDispose(() => setResumePromptImpl(null));
     }
   });
-
-  // src/api/ui.ts
-  function button(label, opts = {}) {
-    const btn = h("button", {
-      class: `ysrp-btn is-${opts.variant || "secondary"}${opts.small ? " is-small" : ""}${opts.cls ? ` ${opts.cls}` : ""}`,
-      type: "button",
-      title: opts.title
-    }, opts.icon ? icon(opts.icon) : null, h("span", { class: "ysrp-btn-label", text: label }));
-    if (opts.onClick)
-      btn.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        opts.onClick?.(ev);
-      });
-    return btn;
-  }
-  function setButtonLabel(btn, label) {
-    const span = btn.querySelector(".ysrp-btn-label");
-    if (span)
-      span.textContent = label;
-  }
-  function iconButton(iconName, label, cls = "", onClick) {
-    const btn = h("button", { class: `ysrp-ibtn${cls ? ` ${cls}` : ""}`, type: "button" }, icon(iconName));
-    setIconButtonLabel(btn, label);
-    if (onClick)
-      btn.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        ev.stopPropagation();
-        onClick(ev);
-      });
-    return btn;
-  }
-  function setIconButtonLabel(btn, label) {
-    btn.title = label;
-    btn.setAttribute("aria-label", label);
-  }
-  function setIcon(btn, iconName, variant = "solid") {
-    const i = btn.querySelector("i");
-    if (i)
-      i.className = `fa-${variant} fa-${iconName}`;
-  }
-  function switchControl(checked, onChange, opts = {}) {
-    const el = h("button", {
-      class: `ysrp-switch${opts.cls ? ` ${opts.cls}` : ""}`,
-      type: "button",
-      disabled: Boolean(opts.disabled),
-      dataset: opts.dataset,
-      attrs: { role: "switch", "aria-label": opts.label }
-    }, h("span", { class: "ysrp-switch-knob" }));
-    let on = checked;
-    const set = (next) => {
-      on = next;
-      el.setAttribute("aria-checked", String(next));
-      el.classList.toggle("is-on", next);
-    };
-    set(checked);
-    el.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      if (el.disabled)
-        return;
-      set(!on);
-      onChange(on);
-    });
-    return { el, set, value: () => on };
-  }
-  function textInput(opts = {}) {
-    return h("input", {
-      class: `ysrp-input${opts.cls ? ` ${opts.cls}` : ""}`,
-      type: opts.type || "text",
-      value: opts.value ?? "",
-      placeholder: opts.placeholder,
-      autocomplete: opts.type === "password" ? "new-password" : "off",
-      spellcheck: false,
-      dataset: opts.field ? { field: opts.field } : undefined
-    });
-  }
-  function textArea(opts = {}) {
-    return h("textarea", {
-      class: `ysrp-textarea${opts.cls ? ` ${opts.cls}` : ""}`,
-      value: opts.value ?? "",
-      placeholder: opts.placeholder,
-      readOnly: Boolean(opts.readOnly),
-      spellcheck: false
-    });
-  }
-  function selectControl(options, value, onChange, opts = {}) {
-    const select = h("select", {
-      class: `ysrp-select${opts.cls ? ` ${opts.cls}` : ""}`,
-      dataset: opts.dataset,
-      attrs: { "aria-label": opts.label }
-    }, options.map((o) => h("option", { value: o.value, text: o.label, disabled: Boolean(o.disabled), selected: o.value === value })));
-    select.value = value;
-    select.addEventListener("change", () => onChange(select.value));
-    const el = h("span", { class: "ysrp-select-wrap" }, select, h("span", { class: "ysrp-select-arrow" }, icon("chevron-down")));
-    return { el, select, value: () => select.value, set: (v) => {
-      select.value = v;
-    } };
-  }
-  function secretInput(input) {
-    input.type = "password";
-    const toggle = button(tr("Show", "显示"), { variant: "tertiary", small: true, cls: "ysrp-secret-toggle" });
-    toggle.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      const reveal = input.type === "password";
-      input.type = reveal ? "text" : "password";
-      setButtonLabel(toggle, reveal ? tr("Hide", "隐藏") : tr("Show", "显示"));
-    });
-    return h("div", { class: "ysrp-secret" }, input, toggle);
-  }
-  var NBSP = " ";
-  function card(opts) {
-    const iconEl = h("span", { class: "ysrp-card-icon" }, icon(opts.icon));
-    const titleEl = h("span", { class: "ysrp-card-title" });
-    const marksEl = h("span", { class: "ysrp-card-marks" }, opts.marks || []);
-    const controlsEl = h("span", { class: "ysrp-card-controls" }, opts.controls || []);
-    const descEl = h("div", { class: "ysrp-card-desc" });
-    const footerEl = h("div", { class: "ysrp-card-footer" });
-    const el = h("div", { class: `ysrp-card${opts.cls ? ` ${opts.cls}` : ""}`, dataset: opts.dataset }, h("div", { class: "ysrp-card-body" }, h("div", { class: "ysrp-card-top" }, h("div", { class: "ysrp-card-lead" }, iconEl, titleEl, marksEl), controlsEl), descEl), h("div", { class: "ysrp-card-sep" }), footerEl);
-    const handle = {
-      el,
-      iconEl,
-      titleEl,
-      marksEl,
-      controlsEl,
-      descEl,
-      footerEl,
-      setIcon(name) {
-        iconEl.replaceChildren(icon(name));
-      },
-      setTitle(text, tip) {
-        titleEl.textContent = text;
-        titleEl.title = tip ?? text;
-      },
-      setDesc(text) {
-        descEl.textContent = text;
-        descEl.title = text;
-      },
-      setFooter(text) {
-        footerEl.textContent = text || NBSP;
-      }
-    };
-    handle.setTitle(opts.title, opts.titleTip);
-    handle.setDesc(opts.desc || "");
-    handle.setFooter(opts.footer || "");
-    return handle;
-  }
-  function cardMark(iconName, tip, cls = "") {
-    return h("span", { class: `ysrp-card-mark${cls ? ` ${cls}` : ""}`, title: tip, attrs: { "aria-label": tip, role: "img" } }, icon(iconName));
-  }
-  function grid(cls = "", ...children) {
-    return h("div", { class: `ysrp-grid${cls ? ` ${cls}` : ""}` }, children);
-  }
-  function settingsRow(opts) {
-    const descEl = h("div", { class: "ysrp-srow-desc", text: opts.desc || "" });
-    if (!opts.desc)
-      descEl.style.display = "none";
-    const below = h("div", { class: "ysrp-srow-below" }, opts.below || []);
-    if (!opts.below || !opts.below.length)
-      below.style.display = "none";
-    const el = h("div", { class: `ysrp-srow${opts.cls ? ` ${opts.cls}` : ""}`, dataset: opts.dataset }, h("div", { class: "ysrp-srow-main" }, h("div", { class: "ysrp-srow-text" }, h("div", { class: "ysrp-srow-title", text: opts.title }), descEl), opts.control ? h("div", { class: "ysrp-srow-control" }, opts.control) : null), below);
-    return { el, descEl, below };
-  }
-  function setRowDesc(row, text) {
-    row.descEl.textContent = text;
-    row.descEl.style.display = text ? "" : "none";
-  }
-  function actions(...children) {
-    return h("div", { class: "ysrp-actions" }, children);
-  }
-  function searchBar(placeholder, filters, onChange) {
-    const input = h("input", { class: "ysrp-input ysrp-search", type: "search", placeholder, spellcheck: false, autocomplete: "off" });
-    input.addEventListener("input", onChange);
-    const filter = selectControl(filters, filters[0]?.value || "all", onChange, { cls: "ysrp-filter", label: tr("Filter", "筛选") });
-    return {
-      el: h("div", { class: "ysrp-searchbar" }, input, filter.el),
-      input,
-      filter,
-      query: () => input.value.trim().toLowerCase(),
-      setPlaceholder: (text) => {
-        input.placeholder = text;
-      }
-    };
-  }
-  function categoryStrip(cats, active, onSelect) {
-    let current = active;
-    const buttons = cats.map((c) => {
-      const btn = button(c.label, { variant: "tertiary", small: true, cls: "ysrp-cat" });
-      btn.dataset.cat = c.id;
-      btn.addEventListener("click", (ev) => {
-        ev.preventDefault();
-        if (current === c.id)
-          return;
-        set(c.id);
-        onSelect(c.id);
-      });
-      return btn;
-    });
-    const set = (id) => {
-      current = id;
-      for (const b of buttons) {
-        const on = b.dataset.cat === id;
-        b.classList.toggle("is-active", on);
-        b.setAttribute("aria-selected", String(on));
-      }
-    };
-    set(active);
-    return { el: h("div", { class: "ysrp-cats", attrs: { role: "tablist" } }, buttons), value: () => current, set };
-  }
-  function infoHint(text) {
-    return h("span", { class: "ysrp-info-hint", title: text, attrs: { "aria-label": text, role: "img", tabindex: "0" } }, icon("circle-info"));
-  }
-  function emptyState(text, cls = "") {
-    return h("p", { class: `ysrp-empty${cls ? ` ${cls}` : ""}`, text });
-  }
-  function field(label, ...content) {
-    return h("div", { class: "ysrp-field" }, h("div", { class: "ysrp-field-label", text: label }), content);
-  }
-  function messageLine(cls = "") {
-    const el = h("div", { class: `ysrp-msg${cls ? ` ${cls}` : ""}`, attrs: { role: "status", "aria-live": "polite" } });
-    return {
-      el,
-      set(text, tone = "neutral") {
-        const value = (text || "").trim();
-        el.textContent = value;
-        el.classList.toggle("is-visible", Boolean(value));
-        el.classList.toggle("is-success", Boolean(value) && tone === "success");
-        el.classList.toggle("is-error", Boolean(value) && tone === "error");
-      }
-    };
-  }
-  async function copyText(text) {
-    try {
-      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
-        await navigator.clipboard.writeText(text);
-        return;
-      }
-    } catch (err) {
-      if (!legacyCopy(text))
-        throw err;
-      return;
-    }
-    if (!legacyCopy(text))
-      throw new Error(tr("Clipboard is not available", "剪贴板不可用"));
-  }
-  function legacyCopy(text) {
-    try {
-      const area = h("textarea", { value: text, style: "position:fixed;top:-1000px;left:-1000px;opacity:0" });
-      document.body.appendChild(area);
-      area.select();
-      const ok = document.execCommand("copy");
-      area.remove();
-      return ok;
-    } catch {
-      return false;
-    }
-  }
 
   // src/api/dialogs.ts
   var stack = [];
@@ -2795,7 +3166,45 @@
     });
     return flush;
   }
+  function showValidity(row, input, def, value) {
+    const error = def.validate ? def.validate(value) : null;
+    let line = row.querySelector(":scope > .ysrp-srow-error");
+    if (!line) {
+      line = h("div", { class: "ysrp-srow-error", attrs: { role: "alert" } });
+      row.appendChild(line);
+    }
+    line.textContent = error || "";
+    if (input) {
+      input.classList.toggle("is-invalid", Boolean(error));
+      if (error)
+        input.setAttribute("aria-invalid", "true");
+      else
+        input.removeAttribute("aria-invalid");
+    }
+    return !error;
+  }
+  function applyDisabled(row, def, desc) {
+    if (!def.disabled)
+      return;
+    const off = Boolean(def.disabled());
+    row.classList.toggle("is-disabled", off);
+    row.querySelectorAll("input, button, select, textarea").forEach((el) => {
+      el.disabled = off;
+    });
+    const descEl = row.querySelector(".ysrp-srow-desc");
+    const reason = settingText(def.disabledReason);
+    if (descEl && reason) {
+      const text = off ? reason : desc;
+      descEl.textContent = text;
+      descEl.style.display = text ? "" : "none";
+    }
+  }
   function settingRow(plugin, key, def, flushers) {
+    const row = buildRow(plugin, key, def, flushers);
+    applyDisabled(row, def, settingText(def.description));
+    return row;
+  }
+  function buildRow(plugin, key, def, flushers) {
     const ctx = settingsContext(plugin);
     const value = getSetting(plugin, key);
     const title = settingText(def.label) || key;
@@ -2811,6 +3220,18 @@
           dataset,
           control: selectControl((def.options || []).map((o) => ({ value: o.value, label: settingText(o.label) })), String(value), (v) => ctx.settings.set(key, v), { dataset, label: title }).el
         }).el;
+      case "slider": {
+        const slider = sliderControl(Number(value), {
+          min: def.min ?? 0,
+          max: def.max ?? 100,
+          step: def.step,
+          format: def.format,
+          label: title,
+          dataset,
+          onChange: (n) => ctx.settings.set(key, n)
+        });
+        return settingsRow({ title, desc, dataset, control: slider.el }).el;
+      }
       case "number": {
         const input = textInput({ type: "number", value: String(value ?? ""), placeholder: def.placeholder, cls: "is-number" });
         input.dataset.setting = key;
@@ -2820,18 +3241,26 @@
           input.max = String(def.max);
         if (def.step !== undefined)
           input.step = String(def.step);
+        const row = settingsRow({ title, desc, dataset, below: [input] }).el;
         flushers.push(bindInput(input, () => {
-          const n = Number(input.value);
-          if (input.value.trim() !== "" && Number.isFinite(n))
+          const raw = input.value.trim();
+          const n = raw === "" ? NaN : Number(raw);
+          if (!def.validate && !Number.isFinite(n))
+            return;
+          if (showValidity(row, input, def, n))
             ctx.settings.set(key, n);
         }));
-        return settingsRow({ title, desc, dataset, below: [input] }).el;
+        return row;
       }
       default: {
         const input = textInput({ type: def.secret ? "password" : "text", value: String(value ?? ""), placeholder: def.placeholder });
         input.dataset.setting = key;
-        flushers.push(bindInput(input, () => ctx.settings.set(key, input.value)));
-        return settingsRow({ title, desc, dataset, below: [def.secret ? secretInput(input) : input] }).el;
+        const row = settingsRow({ title, desc, dataset, below: [def.secret ? secretInput(input) : input] }).el;
+        flushers.push(bindInput(input, () => {
+          if (showValidity(row, input, def, input.value))
+            ctx.settings.set(key, input.value);
+        }));
+        return row;
       }
     }
   }
@@ -2871,6 +3300,20 @@
         slot.el.appendChild(customPanel(slot.key, slot.def, cleanups));
     }
     renderRows();
+    const refreshDisabled = () => {
+      for (const slot of slots) {
+        const row = slot.el.firstElementChild;
+        if (row && slot.def.type !== "custom")
+          applyDisabled(row, slot.def, settingText(slot.def.description));
+      }
+    };
+    cleanups.push(pluginsChanged.on(refreshDisabled));
+    cleanups.push(settingsChanged.on((change) => {
+      if (change.plugin === "*")
+        renderRows();
+      else
+        refreshDisabled();
+    }));
     const list = h("div", { class: "ysrp-plugin-settings" }, slots.map((s) => s.el));
     const footer = [];
     if (settings.some(([, def]) => isResettable(def))) {
@@ -2955,6 +3398,13 @@
       const failed = isEnabled(plugin) && hasFailed(plugin.name);
       if (failed)
         marks.push(cardMark("triangle-exclamation", tr("This plugin failed to start", "插件启动失败"), "is-danger"));
+      const list = (ps) => ps.map((p) => pick(p.displayName)).join(tr(", ", "、"));
+      const deps = dependenciesOf(plugin);
+      if (deps.length)
+        marks.push(cardMark("puzzle-piece", tr("Requires: {names}", "依赖：{names}", { names: list(deps) }), "is-deps-mark"));
+      const users = dependentsOf(plugin);
+      if (users.length)
+        marks.push(cardMark("link", tr("Required by: {names}", "被以下插件依赖：{names}", { names: list(users) }), "is-used-by-mark"));
       const star = iconButton("star", "", `is-star${starred ? " is-active" : ""}`, () => {
         setListed("starred", plugin.name, !starred);
         build();
@@ -3774,6 +4224,7 @@
       try {
         const result = switchMode(target, { migrate: true, clearSource: true });
         if (result.ok) {
+          notifyBulkChange();
           backendMsg.set(tr("Moved {count} record(s) to {mode}.", "已将 {count} 条记录迁移到{mode}。", { count: result.moved, mode: modeName(target) }), "success");
         } else {
           mode.set(getMode());
@@ -3879,6 +4330,7 @@
       }
       try {
         const count = importData(payload, { overwrite: overwrite.value() });
+        notifyBulkChange();
         importMsg.set(tr("Imported {count} record(s).", "已导入 {count} 条记录。", { count }), "success");
       } catch (err) {
         console.warn("[Video Memory] Import failed:", err);
@@ -4334,8 +4786,16 @@
       this.pending.clear();
       this.deletes = [];
     }
+    lastErrorToast = { message: "", at: 0 };
     setStatus(state, done, total, message) {
       this.status = { state, done, total, message, at: Date.now() };
+      if (state === "error") {
+        const now = Date.now();
+        if (message !== this.lastErrorToast.message || now - this.lastErrorToast.at > 60000) {
+          this.lastErrorToast = { message, at: now };
+          showToast({ id: "drive-sync", type: "error", text: tr("Drive sync failed: {e}", "云同步出错：{e}", { e: message }) });
+        }
+      }
       dispatch(EVT_DRIVE_STATUS, { state, done, total, message });
       this.onStatus?.(this.status);
     }
@@ -4501,6 +4961,10 @@
           driveSync: { ...current.driveSync || {}, lastDownloadAt: now, lastUploadAt: now, remoteModifiedAt: remoteMs }
         }, "sync");
         this.setStatus("done", 1, 1, "");
+        const progress = Number(incoming.videoProgress);
+        if (Number.isFinite(progress) && progress > 0) {
+          showToast({ id: "drive-pull", topic: "cloud", type: "info", text: tr("Applied cloud progress {t}", "已应用云端进度 {t}", { t: formatTime(progress) }) });
+        }
       } catch (err) {
         console.warn("[Video Memory] Drive pull failed:", err);
         this.setStatus("error", 0, 0, errorMessage(err));
@@ -5179,8 +5643,17 @@
           this.rebuild();
       }));
       this.disposers.push(recordChanges.on((change) => {
-        if (change.kind === "bulk" && this.grid.isConnected)
+        if (!this.grid.isConnected)
+          return;
+        if (change.kind === "bulk")
+          return this.rebuild();
+        if (!change.remote)
+          return;
+        const c = this.cards.get(change.videoId);
+        if (!c || !change.record)
           this.rebuild();
+        else
+          c.updateProgress();
       }));
     }
     setBusy(busy) {
@@ -5299,6 +5772,137 @@
     }
   });
 
+  // src/plugins/tabSync/index.ts
+  var CHANNEL = "ysrp-video-memory";
+  var KINDS = ["content", "meta", "sync", "delete", "bulk"];
+  function receive(msg) {
+    if (msg.type === "record") {
+      if (typeof msg.videoId !== "string" || !KINDS.includes(msg.kind))
+        return;
+      applyRemoteChange(msg.videoId, msg.kind);
+      return;
+    }
+    if (msg.type !== "setting" || typeof msg.key !== "string" || !msg.key.startsWith("YSRP_"))
+      return;
+    switch (msg.key) {
+      case KEY_PLUGINS:
+        reloadPluginChoices();
+        break;
+      case KEY_LANGUAGE:
+        reloadPreference();
+        break;
+      case KEY_STORAGE_MODE:
+        reloadMode();
+        applyRemoteChange("", "bulk");
+        break;
+      default:
+        settingsChanged.emit({ plugin: "*", key: msg.key });
+    }
+  }
+  var tabSync_default = definePlugin({
+    name: "TabSync",
+    displayName: { en: "Tab sync", zh: "多标签页同步" },
+    description: {
+      en: "Keeps records, settings and the interface language in step across open YouTube tabs; a paused tab never overwrites newer progress.",
+      zh: "在打开的多个 YouTube 标签页之间同步记录、设置和界面语言；暂停的旧标签页不会覆盖更新的进度。"
+    },
+    authors: ["0_V"],
+    icon: "clone",
+    enabledByDefault: true,
+    start(ctx) {
+      if (typeof BroadcastChannel !== "function")
+        return;
+      const tab = Math.random().toString(36).slice(2) + Date.now().toString(36);
+      const channel = new BroadcastChannel(CHANNEL);
+      ctx.onDispose(() => channel.close());
+      const post = (msg) => {
+        try {
+          channel.postMessage(msg);
+        } catch (err) {
+          console.warn("[Video Memory] Tab sync post failed:", err);
+        }
+      };
+      let applying = false;
+      channel.onmessage = (ev) => {
+        const msg = ev.data;
+        if (!msg || typeof msg !== "object" || msg.tab === tab)
+          return;
+        applying = true;
+        try {
+          receive(msg);
+        } catch (err) {
+          console.error("[Video Memory] Tab sync failed:", err);
+        } finally {
+          applying = false;
+        }
+      };
+      ctx.onDispose(recordChanges.on((change) => {
+        if (change.remote || applying)
+          return;
+        post({ tab, type: "record", videoId: change.videoId, kind: change.kind });
+      }));
+      ctx.onDispose(onSettingWrite((key) => {
+        if (!applying && key.startsWith("YSRP_"))
+          post({ tab, type: "setting", key });
+      }));
+    }
+  });
+
+  // src/plugins/toasts/index.ts
+  var cloudOn = () => {
+    const drive = findPlugin("DriveSync");
+    return Boolean(drive && isEnabled(drive));
+  };
+  function apply(ctx) {
+    configureToasts({
+      durationMs: Math.min(10, Math.max(2, Number(ctx.settings.get("duration")) || 4)) * 1000,
+      topics: {
+        resume: ctx.settings.get("resume") !== false,
+        cloud: ctx.settings.get("cloud") !== false && cloudOn()
+      }
+    });
+  }
+  var toasts_default = definePlugin({
+    name: "Toasts",
+    displayName: { en: "Toasts", zh: "提示" },
+    description: {
+      en: "Short notices at the bottom of the page: restored progress, save and sync errors.",
+      zh: "在页面底部弹出简短提示：已恢复进度、保存或同步出错。"
+    },
+    authors: ["0_V"],
+    icon: "bell",
+    enabledByDefault: true,
+    settings: {
+      resume: {
+        type: "switch",
+        default: true,
+        label: { en: "Notify when progress is restored", zh: "恢复进度时提示" }
+      },
+      cloud: {
+        type: "switch",
+        default: true,
+        label: { en: "Notify when cloud progress is applied", zh: "云端进度更新时提示" },
+        disabled: () => !cloudOn(),
+        disabledReason: { en: "Requires the Drive sync plugin", zh: "需要开启云同步插件" }
+      },
+      duration: {
+        type: "slider",
+        default: 4,
+        min: 2,
+        max: 10,
+        step: 1,
+        label: { en: "Toast duration (seconds)", zh: "提示停留时间（秒）" },
+        format: (n) => tr("{n} s", "{n} 秒", { n })
+      }
+    },
+    start(ctx) {
+      apply(ctx);
+      ctx.settings.onChange(() => apply(ctx));
+      ctx.onDispose(pluginsChanged.on(() => apply(ctx)));
+      ctx.onDispose(() => configureToasts(null));
+    }
+  });
+
   // src/plugins/transcript/service.ts
   var ENDPOINT_SUFFIX = "/v1/chat/completions";
   var DEFAULT_ENDPOINT_RAW = "https://0-v-YouTube-Transcript-Generator-api.hf.space/v1/chat/completions";
@@ -5319,6 +5923,25 @@
     if (!Number.isFinite(n) || n <= 0)
       return 10;
     return Math.round(n / 60000);
+  }
+  function endpointError(value) {
+    const s = typeof value === "string" ? value.trim() : "";
+    if (!s)
+      return null;
+    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `https://${s}`;
+    let ok = /^https?:\/\//i.test(withScheme);
+    if (ok) {
+      try {
+        ok = Boolean(new URL(withScheme).hostname);
+      } catch {
+        ok = false;
+      }
+    }
+    return ok ? null : tr("Enter an http(s) URL", "请输入 http(s) 地址");
+  }
+  function timeoutError(value) {
+    const n = Number(value);
+    return Number.isInteger(n) && n >= 1 && n <= 60 ? null : tr("Enter a whole number from 1 to 60", "请输入 1–60 之间的整数");
   }
   function normalizeEndpoint(value) {
     if (typeof value !== "string")
@@ -5656,6 +6279,7 @@
     authors: ["0_V"],
     icon: "closed-captioning",
     enabledByDefault: true,
+    dependencies: ["Records"],
     settings: {
       endpoint: {
         type: "text",
@@ -5663,6 +6287,7 @@
         label: { en: "API endpoint", zh: "接口地址" },
         description: { en: "OpenAI-compatible chat/completions URL; a bare host gets the path added.", zh: "兼容 OpenAI 的 chat/completions 地址；只填域名时自动补全路径。" },
         placeholder: "https://example.com/v1/chat/completions",
+        validate: endpointError,
         get: () => getSettings().endpoint,
         set: (value) => {
           updateSettings({ endpoint: String(value ?? "") });
@@ -5699,6 +6324,7 @@
         min: 1,
         max: 60,
         step: 1,
+        validate: timeoutError,
         get: () => Math.min(60, Math.max(1, timeoutMinutes(getSettings().timeoutMs))),
         set: (value) => {
           const mins = Number(value);
@@ -5726,7 +6352,7 @@
   });
 
   // src/generated/plugins.ts
-  var plugins = [engine_default, playerBadge_default, settings_default, storage_default, badgeToggle_default, driveSync_default, pluginsMenu_default, records_default, transcript_default];
+  var plugins = [engine_default, playerBadge_default, settings_default, storage_default, badgeToggle_default, driveSync_default, pluginsMenu_default, records_default, tabSync_default, toasts_default, transcript_default];
 
   // src/index.ts
   function bootstrap() {
