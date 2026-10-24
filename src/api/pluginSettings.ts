@@ -35,6 +35,11 @@ function load(): Store {
   return cache;
 }
 
+/** N-11.5: drop the cache so the next read sees what another tab wrote. */
+export function reloadPluginStore(): void {
+  cache = null;
+}
+
 function save(): void {
   writeSetting(KEY_PLUGINS, JSON.stringify(load()));
 }

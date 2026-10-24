@@ -13,7 +13,7 @@ import { EVT_VIDEO_STATUS, UNKNOWN_TITLE } from '../../utils/constants';
 import { h } from '../../utils/dom';
 import { tr } from '../../utils/i18n';
 import { errorMessage } from '../../utils/text';
-import { cachedTranscript, DEFAULTS, fetchTranscript, forgetTranscript, getSettings, timeoutMinutes, updateSettings } from './service';
+import { cachedTranscript, DEFAULTS, endpointError, fetchTranscript, forgetTranscript, getSettings, timeoutError, timeoutMinutes, updateSettings } from './service';
 
 /** N-5.7.2 custom panel "Current video": title and video ID lines, kept up to date while shown. */
 function renderCurrentVideo(el: HTMLElement): () => void {
@@ -117,6 +117,8 @@ export default definePlugin({
   authors: ['0_V'],
   icon: 'closed-captioning',
   enabledByDefault: true,
+  // N-13.5: its only entry point is the button on the record cards.
+  dependencies: ['Records'],
   // N-5.7.2 / N-5.7.6: values stay in YSRP_TranscriptSettings with part one's normalisation.
   settings: {
     endpoint: {
@@ -125,6 +127,7 @@ export default definePlugin({
       label: { en: 'API endpoint', zh: '接口地址' },
       description: { en: 'OpenAI-compatible chat/completions URL; a bare host gets the path added.', zh: '兼容 OpenAI 的 chat/completions 地址；只填域名时自动补全路径。' },
       placeholder: 'https://example.com/v1/chat/completions',
+      validate: endpointError,
       get: () => getSettings().endpoint,
       set: value => { updateSettings({ endpoint: String(value ?? '') }); }
     },
@@ -155,6 +158,7 @@ export default definePlugin({
       min: 1,
       max: 60,
       step: 1,
+      validate: timeoutError,
       get: () => Math.min(60, Math.max(1, timeoutMinutes(getSettings().timeoutMs))),
       set: value => {
         const mins = Number(value);

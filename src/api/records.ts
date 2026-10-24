@@ -35,9 +35,12 @@ export interface VideoRecord {
 export type ChangeKind = 'content' | 'meta' | 'sync' | 'delete' | 'bulk';
 
 export interface RecordChange {
+  /** Empty for a bulk change that touched many records. */
   videoId: string;
   kind: ChangeKind;
   record: VideoRecord | null;
+  /** N-11.3: the write happened in another tab (never uploaded or re-broadcast here). */
+  remote?: boolean;
 }
 
 export const recordChanges = new Emitter<RecordChange>();
@@ -93,6 +96,17 @@ export function removeRecord(videoId: string, kind: ChangeKind = 'delete'): void
   if (!videoId) return;
   activeBackend().remove(recordKey(videoId));
   recordChanges.emit({ videoId, kind, record: null });
+}
+
+/** Import / migration finished: every listener should re-read all records. */
+export function notifyBulkChange(): void {
+  recordChanges.emit({ videoId: '', kind: 'bulk', record: null });
+}
+
+/** N-11.3: another tab changed a record (or many, when videoId is empty); re-read it and tell everyone here. */
+export function applyRemoteChange(videoId: string, kind: ChangeKind): void {
+  const record = videoId ? readRecord(videoId) : null;
+  recordChanges.emit({ videoId, kind: videoId ? kind : 'bulk', record, remote: true });
 }
 
 export interface RecordEntry {

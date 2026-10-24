@@ -121,6 +121,36 @@ export function selectControl(options: SelectOption[], value: string, onChange: 
   return { el, select, value: () => select.value, set: v => { select.value = v; } };
 }
 
+export interface SliderHandle {
+  el: HTMLElement;
+  input: HTMLInputElement;
+  value(): number;
+  set(value: number): void;
+}
+
+/** N-12.3: 160 px range input with the current value (and unit) after it; saves on change. */
+export function sliderControl(value: number, opts: { min: number; max: number; step?: number; format?: (n: number) => string; onChange: (n: number) => void; label?: string; dataset?: Record<string, string> }): SliderHandle {
+  const input = h('input', {
+    class: 'ysrp-slider',
+    type: 'range',
+    dataset: opts.dataset,
+    attrs: { min: String(opts.min), max: String(opts.max), step: String(opts.step ?? 1), 'aria-label': opts.label }
+  });
+  const label = h('span', { class: 'ysrp-slider-value' });
+  const show = () => {
+    const n = Number(input.value);
+    const span = opts.max - opts.min;
+    input.style.setProperty('--ysrp-fill', `${span > 0 ? ((n - opts.min) / span) * 100 : 0}%`);
+    label.textContent = opts.format ? opts.format(n) : String(n);
+    input.setAttribute('aria-valuetext', label.textContent);
+  };
+  const set = (n: number) => { input.value = String(n); show(); };
+  set(value);
+  input.addEventListener('input', show);
+  input.addEventListener('change', () => { show(); opts.onChange(Number(input.value)); });
+  return { el: h('span', { class: 'ysrp-slider-wrap' }, input, label), input, value: () => Number(input.value), set };
+}
+
 /** Password input plus a tertiary "Show / Hide" button (N-5.7.2, N-5.7.3). */
 export function secretInput(input: HTMLInputElement): HTMLElement {
   input.type = 'password';

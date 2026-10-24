@@ -2,7 +2,7 @@
 // backend drop-down + confirmed migration, export (copy / download / iOS share), import with a confirmed overwrite.
 
 import { confirmDialog } from '../../../api/dialogs';
-import { countRecords } from '../../../api/records';
+import { countRecords, notifyBulkChange } from '../../../api/records';
 import {
   actions, button, copyText, messageLine, selectControl, setButtonLabel, setRowDesc, settingsRow, switchControl, textArea
 } from '../../../api/ui';
@@ -101,6 +101,7 @@ export function renderLocationPanel(el: HTMLElement): void {
     try {
       const result = switchMode(target, { migrate: true, clearSource: true });
       if (result.ok) {
+        notifyBulkChange();
         backendMsg.set(tr('Moved {count} record(s) to {mode}.', '已将 {count} 条记录迁移到{mode}。', { count: result.moved, mode: modeName(target) }), 'success');
       } else {
         mode.set(getMode());
@@ -213,6 +214,7 @@ export function renderImportPanel(el: HTMLElement): void {
     }
     try {
       const count = importData(payload, { overwrite: overwrite.value() });
+      notifyBulkChange();
       importMsg.set(tr('Imported {count} record(s).', '已导入 {count} 条记录。', { count }), 'success');
         } catch (err) {
       console.warn('[Video Memory] Import failed:', err);

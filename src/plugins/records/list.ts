@@ -380,7 +380,13 @@ class RecordsList {
     });
     this.disposers.push(rowsChanged.on(() => { if (this.grid.isConnected) this.rebuild(); }));
     this.disposers.push(recordChanges.on(change => {
-      if (change.kind === 'bulk' && this.grid.isConnected) this.rebuild();
+      if (!this.grid.isConnected) return;
+      if (change.kind === 'bulk') return this.rebuild();
+      // N-11.3: changes made in another tab update this list like local ones.
+      if (!change.remote) return;
+      const c = this.cards.get(change.videoId);
+      if (!c || !change.record) this.rebuild();
+      else c.updateProgress();
     }));
   }
 

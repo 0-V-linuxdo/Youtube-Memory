@@ -88,6 +88,20 @@ export function listPrefixed(backend: Backend, prefix = RECORD_PREFIX): Array<[s
 
 /* ----------------------------------------------------------- settings keys */
 
+/** N-11.2: told about every settings key this tab writes (the Tab sync plugin broadcasts them). */
+const settingWriteListeners = new Set<(key: string) => void>();
+
+export function onSettingWrite(fn: (key: string) => void): () => void {
+  settingWriteListeners.add(fn);
+  return () => { settingWriteListeners.delete(fn); };
+}
+
+function settingWritten(key: string): void {
+  for (const fn of Array.from(settingWriteListeners)) {
+    try { fn(key); } catch (err) { console.error('[Video Memory] setting listener failed:', err); }
+  }
+}
+
 function gmGetRaw(key: string): unknown {
   if (typeof GM_getValue !== 'function') return null;
   try {
@@ -115,6 +129,7 @@ export function writeSetting(key: string, value: string): boolean {
   let ok = false;
   try { localBackend.set(key, value); ok = true; } catch { /* ignore */ }
   if (gmSetRaw(key, value)) ok = true;
+  if (ok) settingWritten(key);
   return ok;
 }
 
@@ -123,6 +138,7 @@ export function removeSetting(key: string): void {
   if (typeof GM_deleteValue === 'function') {
     try { GM_deleteValue(key); } catch { /* ignore */ }
   }
+  settingWritten(key);
 }
 
 /** Secret settings (N-1.3 YSRP_DriveSettings): read GM first, write GM only (localStorage only without GM). */
@@ -134,11 +150,9 @@ export function readSecretSetting(key: string): string | null {
 }
 
 export function writeSecretSetting(key: string, value: string): void {
-  if (gmSetRaw(key, value)) {
-    localBackend.remove(key);
-    return;
-  }
-  localBackend.set(key, value);
+  if (gmSetRaw(key, value)) localBackend.remove(key);
+  else localBackend.set(key, value);
+  settingWritten(key);
 }
 
 /* ----------------------------------------------------------- storage mode */
@@ -165,6 +179,11 @@ export function getMode(): StorageMode {
     persistMode(currentMode);
   }
   return currentMode;
+}
+
+/** N-11.5: another tab switched the backend; detect it again on next use. */
+export function reloadMode(): void {
+  currentMode = null;
 }
 
 export function activeBackend(): Backend {
@@ -213,6 +232,7 @@ export function switchMode(target: StorageMode, options: { migrate?: boolean; cl
   }
   currentMode = target;
   persistMode(target);
+  settingWritten(KEY_STORAGE_MODE);
   return { ok: true, moved };
 }
 

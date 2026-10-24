@@ -493,7 +493,7 @@ const tests = {
     await closeAll(page);
     await pressGear(page);
     const direct = await page.isVisible('.ysrp-settings-container') && await page.locator('.ysrp-plugin-menu').count() === 0;
-    const expected = ['BadgeToggle', 'DriveSync', 'PluginsMenu', 'Records', 'Settings', 'Storage', 'Transcript'];
+    const expected = ['BadgeToggle', 'DriveSync', 'PluginsMenu', 'Records', 'Settings', 'Storage', 'Toasts', 'Transcript'];
     const ok = menu && menu.role === 'menu' && menu.title === '插件' && menu.items === expected.length + 1 &&
       JSON.stringify(items.slice(0, -1).slice().sort()) === JSON.stringify(expected) && items[items.length - 1] === '#all' && !windowWithMenu &&
       playingBefore === playingAfter && clicks === 0 && menuEsc && menuOutside && menuGearAgain &&
@@ -696,7 +696,7 @@ const tests = {
     const dlg = '.ysrp-plugin-dialog[data-plugin="Transcript"]';
     await page.fill(`${dlg} input[data-setting="endpoint"]`, 'example.com');
     await page.fill(`${dlg} input[data-setting="apiKey"]`, 'sk-test');
-    await page.fill(`${dlg} input[data-setting="timeout"]`, '99');
+    await page.fill(`${dlg} input[data-setting="timeout"]`, '60');
     await sleep(600);
     const settings = await page.evaluate(() => JSON.parse(localStorage.getItem('YSRP_TranscriptSettings')));
     const secret = await page.$eval(`${dlg} input[data-setting="apiKey"]`, i => i.type === 'password' && Boolean(i.closest('.ysrp-secret')?.querySelector('.ysrp-secret-toggle')));
@@ -776,7 +776,7 @@ const tests = {
     await page.click('.ysrp-plugin-menu .ysrp-menu-item[data-plugin="Records"]');
     await page.waitForSelector('.ysrp-record');
     const back = menuBack && await page.locator('.ysrp-record .is-transcript').count() > 0;
-    const expected = ['BadgeToggle', 'DriveSync', 'PluginsMenu', 'Records', 'Transcript', 'Engine', 'PlayerBadge', 'Settings', 'Storage'];
+    const expected = ['BadgeToggle', 'DriveSync', 'PluginsMenu', 'Records', 'TabSync', 'Toasts', 'Transcript', 'Engine', 'PlayerBadge', 'Settings', 'Storage'];
     check('A-19', 'plugins page lists plugins; turning Transcript off removes its menu entry and card button, persists, and comes back',
       JSON.stringify(names) === JSON.stringify(expected) && coreLocked && menuGone && activeTab === 'plugins' && rowButtonGone && stored === false && stillOff && back,
       `plugins ${names.join(',')}, core locked ${coreLocked}, menu entry gone ${menuGone} (page ${activeTab}), card button gone ${rowButtonGone}, stored ${stored}, after reload off ${stillOff}, back ${back}`);
@@ -960,7 +960,7 @@ const tests = {
     const dialogGone = await page.locator('.ysrp-dialog').count() === 0;
     const modalOpen = await page.isVisible('.ysrp-settings-container');
     const ok = size === '896x640' && navWidth === 224 && groups === 1 && navItems === 'plugins:插件:true' &&
-      /^Video Memory • v2\.2\.0 • \((?:[0-9a-f]{4,}|dev)\)$/.test(footer[0] || '') && footer[1] === 'Production • Userscript' &&
+      /^Video Memory • v\d+\.\d+\.\d+ • \((?:[0-9a-f]{4,}|dev)\)$/.test(footer[0] || '') && footer[1] === 'Production • Userscript' &&
       homeLink === 'https://github.com/0-V-linuxdo/Youtube-Memory' &&
       defaultCat === 'favorites' && favEmpty && layout.sepShown && layout.core === 'Engine,PlayerBadge,Settings,Storage' && layout.coreFlag &&
       searched === 'Transcript' && disabledOnly === '' && emptyShown &&
@@ -1067,7 +1067,7 @@ const tests = {
     const dark = await colours();
     await page.emulateMedia({ colorScheme: 'light' });
     const dialogsOk = Object.values(dialogs).every(d => d.marker === 1 && d.rows >= 1 && d.radios === 0 && d.cards === 0) && dialogs.Storage.custom === 3 && dialogs.DriveSync.custom === 2;
-    const ok = shell.navIcons === 'plugins:fa-plug' && shell.panes === 'plugins' && shell.features === 0 && shell.plugins === 9 && shell.info &&
+    const ok = shell.navIcons === 'plugins:fa-plug' && shell.panes === 'plugins' && shell.features === 0 && shell.plugins === 11 && shell.info &&
       dialogsOk && records.n === 3 && records.inDialog && records.cards && records.cols === 1 && records.radius === '8px' && !records.leftBar && !records.inline &&
       noteDialogOutside && linkDialogOutside && stillNoPanels === 0 &&
       mono.inlineColour === 0 && mono.svgFill === 0 && mono.offPalette.length === 0 && mono.ibtnCount > 0 &&
@@ -1119,14 +1119,224 @@ const tests = {
     await page.keyboard.press('Escape');
     const backToPage = await page.locator('.ysrp-dialog').count() === 0 && await page.isVisible('.ysrp-settings-container');
     const sorted = list => JSON.stringify(list.filter(x => x !== '#all').sort());
-    const ok = listed === 9 && defaults.Storage === 'true' && defaults.Engine === 'false' && defaults.PlayerBadge === 'false' &&
+    const ok = listed === 11 && defaults.Storage === 'true' && defaults.Engine === 'false' && defaults.PlayerBadge === 'false' &&
       storedOff && storedOff.Storage === false && !withoutStorage.includes('Storage') && withoutStorage.includes('Records') && withoutStorage[withoutStorage.length - 1] === '#all' &&
       storedOn && storedOn.Storage === true && storedOn.Engine === true && withStorage.includes('Storage') && withStorage.includes('Engine') &&
-      sorted(fallback) === JSON.stringify(['BadgeToggle', 'DriveSync', 'Records', 'Settings', 'Storage', 'Transcript']) &&
+      sorted(fallback) === JSON.stringify(['BadgeToggle', 'DriveSync', 'Records', 'Settings', 'Storage', 'Toasts', 'Transcript']) &&
       opened && backToPage;
     check('A-26', 'plugins menu plugin: switching a plugin off removes it from the gear menu and back on restores it (saved in menuPlugins); with the plugin off the menu lists every enabled plugin with settings; choosing one opens the window and its dialog', ok,
       `listed ${listed}, defaults ${JSON.stringify(defaults)}, stored ${JSON.stringify(storedOff)} → ${JSON.stringify(storedOn)}, menu without ${withoutStorage.join(',')}, with ${withStorage.join(',')}, fallback ${fallback.join(',')}, opened ${opened}, back ${backToPage}`);
     await ctx.close();
+  },
+  async 'A-27'() {
+    const meta = fs.readFileSync(scriptPath.replace(/\.user\.js$/, '.meta.js'), 'utf8');
+    const base = 'https://raw.githubusercontent.com/0-V-linuxdo/Youtube-Memory/main/userscript/%5BYoutube%5D%20Video%20Memory';
+    const has = (text, key, url) => new RegExp(`^// @${key}\\s+${url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm').test(text);
+    const ok = [userscript, meta].every(t => has(t, 'updateURL', `${base}.meta.js`) && has(t, 'downloadURL', `${base}.user.js`));
+    check('A-27', 'script and .meta.js carry @updateURL / @downloadURL on the main branch', ok,
+      `updateURL ${(meta.match(/@updateURL\s+(\S+)/) || [])[1]}, downloadURL ${(meta.match(/@downloadURL\s+(\S+)/) || [])[1]}`);
+  },
+
+  async 'A-28'() {
+    const ctx = await newContext();
+    const page = await seeded(ctx, {
+      a28toast: { videoProgress: 50, saveDate: 1, videoName: 'Toast' },
+      a28next: { videoProgress: 40, saveDate: 1, videoName: 'Next' }
+    });
+    await goto(page, 'v=a28toast');
+    await page.waitForSelector('.ysrp-toast[data-toast-id="resume"]', { timeout: 8000 }).catch(() => null);
+    const resumeText = await page.locator('.ysrp-toast[data-toast-id="resume"]').textContent().catch(() => '');
+    const inBody = await page.evaluate(() => document.querySelector('.ysrp-toasts')?.parentElement === document.body);
+    await sleep(5000);
+    const goneAfter = await page.locator('.ysrp-toast[data-toast-id="resume"]').count() === 0;
+
+    // Slider and disabled switch in the Toasts dialog.
+    await openPlugin(page, 'Toasts');
+    const dlg = '.ysrp-plugin-dialog[data-plugin="Toasts"]';
+    await page.$eval(`${dlg} input.ysrp-slider[data-setting="duration"]`, el => {
+      el.value = '2';
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    const sliderLabel = await page.textContent(`${dlg} .ysrp-slider-value`);
+    const storedDuration = await page.evaluate(() => JSON.parse(localStorage.getItem('YSRP_Plugins')).plugins.Toasts.duration);
+    const cloudEnabledBefore = await page.$eval(`${dlg} .ysrp-switch[data-setting="cloud"]`, el => !el.disabled);
+    await closeAll(page);
+    await openSettings(page);
+    await page.click('.ysrp-cat[data-cat="all"]');
+    await page.click('.ysrp-switch[data-plugin="DriveSync"]');
+    await page.click('.ysrp-plugin[data-plugin="Toasts"] .ysrp-plugin-config');
+    const cloudDisabled = await page.$eval(`${dlg} .ysrp-switch[data-setting="cloud"]`, el => el.disabled && el.closest('.ysrp-srow').classList.contains('is-disabled'));
+    const reason = await page.textContent(`${dlg} .ysrp-srow[data-setting="cloud"] .ysrp-srow-desc`);
+    await page.keyboard.press('Escape');
+
+    // Turning the plugin off: no more toasts.
+    await page.click('.ysrp-switch[data-plugin="Toasts"]');
+    await closeAll(page);
+    await page.evaluate(() => window.__mock.nav('a28next'));
+    await sleep(4000);
+    const noToastWhenOff = await page.locator('.ysrp-toast').count() === 0;
+    await ctx.close();
+
+    // Persistent save failures: one toast only.
+    const ctx2 = await newContext();
+    const page2 = await newPage(ctx2);
+    await page2.addInitScript(() => {
+      const original = Storage.prototype.setItem;
+      Storage.prototype.setItem = function (k, v) {
+        if (String(k).startsWith('Youtube_SaveResume_Progress-')) throw new DOMException('Quota exceeded', 'QuotaExceededError');
+        return original.call(this, k, v);
+      };
+    });
+    await goto(page2, 'v=a28quota');
+    await sleep(6000);
+    const failToasts = await page2.locator('.ysrp-toast[data-type="error"]').count();
+    const failText = await page2.locator('.ysrp-toast[data-toast-id="save-failed"]').textContent().catch(() => '');
+    await ctx2.close();
+
+    const ok = /已恢复到 0:50/.test(resumeText || '') && inBody && goneAfter && sliderLabel === '2 秒' && storedDuration === 2 &&
+      cloudEnabledBefore && cloudDisabled && /需要开启云同步插件/.test(reason || '') && noToastWhenOff &&
+      failToasts === 1 && /进度保存失败/.test(failText || '');
+    check('A-28', 'toasts: resume toast that times out, slider saved, cloud switch disabled without Drive sync, none when the plugin is off, one toast for repeated save failures', ok,
+      `resume "${resumeText}" body ${inBody} gone ${goneAfter}, slider "${sliderLabel}" stored ${storedDuration}, cloud ${cloudEnabledBefore}→disabled ${cloudDisabled} "${reason}", off ${noToastWhenOff}, failures ${failToasts} "${failText}"`);
+  },
+
+  async 'A-29'() {
+    const ctx = await newContext();
+    const p2 = await seeded(ctx, {
+      a29x: { videoProgress: 30, saveDate: 3, videoName: 'X', videoDuration: 600 },
+      a29del: { videoProgress: 10, saveDate: 2, videoName: 'Del', videoDuration: 600 },
+      a29s: { videoProgress: 20, saveDate: 1, videoName: 'S', videoDuration: 600 }
+    });
+    await goto(p2, 'v=a29other');
+    await sleep(2500);
+    await openPlugin(p2, 'Records');
+    const desc = id => p2.textContent(`.ysrp-record[data-video-id="${id}"] .ysrp-card-desc`).catch(() => null);
+    const before = await desc('a29x');
+
+    const p1 = await newPage(ctx);
+    await goto(p1, 'v=a29x');
+    await sleep(2500);
+    await p1.evaluate(() => window.__mock.player.seekTo(200));
+    await sleep(1500);
+    const after = await desc('a29x');
+    const listUpdated = before !== after && /3:2\d/.test(after || '');
+
+    // Delete in p1, the card disappears in p2.
+    await openPlugin(p1, 'Records');
+    await p1.click('.ysrp-record[data-video-id="a29del"] .ysrp-ibtn.is-delete');
+    await p1.click('.ysrp-confirm-ok, .ysrp-dialog.is-confirm .ysrp-btn.is-danger');
+    await sleep(800);
+    const deletedThere = await p2.locator('.ysrp-record[data-video-id="a29del"]').count() === 0;
+    await closeAll(p1);
+
+    // Plugin choice: Transcript off in p1, its card button disappears in p2.
+    const buttonsBefore = await p2.locator('.ysrp-record .is-transcript').count();
+    await openSettings(p1);
+    await p1.click('.ysrp-cat[data-cat="all"]');
+    await p1.click('.ysrp-switch[data-plugin="Transcript"]');
+    await sleep(800);
+    const buttonsAfter = await p2.locator('.ysrp-record .is-transcript').count();
+    await closeAll(p1);
+
+    // Language: English in p1, p2 follows.
+    await openPlugin(p1, 'Settings');
+    await p1.selectOption('select[data-setting="language"]', 'en');
+    await sleep(1000);
+    const p2Title = await p2.textContent('.ysrp-plugin-dialog .ysrp-dialog-title').catch(() => '');
+    const p2Pref = await p2.evaluate(() => localStorage.getItem('YSRP_LanguagePreference'));
+    await closeAll(p1);
+    await closeAll(p2);
+
+    // Stale tabs: p2 plays S in the background while p1 moves S to 250 s; then p2 pauses and closes.
+    await p2.evaluate(() => window.__mock.nav('a29s'));
+    await sleep(3000);
+    await p2.evaluate(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await p1.evaluate(() => window.__mock.nav('a29s'));
+    await sleep(3000);
+    await p1.evaluate(() => { window.__mock.player.seekTo(250); window.__mock.pause(); });
+    await sleep(3500);
+    const whileHidden = (await record(p1, 'a29s')).videoProgress;
+    const p2Time = await p2.evaluate(() => window.__mock.player.getCurrentTime());
+    await p2.evaluate(() => window.__mock.pause());
+    await sleep(300);
+    await showBadge(p2);
+    const p2Badge = await p2.textContent('.last-save-info-text');
+    await p2.close({ runBeforeUnload: true });
+    await sleep(500);
+    const rec = await record(p1, 'a29s');
+    await ctx.close();
+
+    const ok = listUpdated && deletedThere && buttonsBefore > 0 && buttonsAfter === 0 && p2Title === 'Records' && p2Pref === 'en' &&
+      whileHidden >= 249 && p2Time < 100 && rec && rec.videoProgress >= 249 && /4:1\d/.test(p2Badge || '');
+    check('A-29', 'tab sync: progress, deletion, plugin choice and language reach the other tab; a paused stale tab does not overwrite newer progress', ok,
+      `card "${before}" → "${after}", deleted ${deletedThere}, transcript buttons ${buttonsBefore} → ${buttonsAfter}, other tab title "${p2Title}" pref ${p2Pref}, background tab at ${p2Time.toFixed(1)}s, record while hidden ${whileHidden.toFixed(1)}, stale badge "${p2Badge}", record ${rec && rec.videoProgress.toFixed(1)}`);
+  },
+
+  async 'A-30'() {
+    const ctx = await newContext();
+    const page = await newPage(ctx);
+    await goto(page, 'v=a30valid');
+    await sleep(2500);
+    await openPlugin(page, 'Transcript');
+    const dlg = '.ysrp-plugin-dialog[data-plugin="Transcript"]';
+    const stored = () => page.evaluate(() => JSON.parse(localStorage.getItem('YSRP_TranscriptSettings') || '{}'));
+    const state = async key => page.$eval(`${dlg} .ysrp-srow[data-setting="${key}"]`, row => ({
+      error: row.querySelector('.ysrp-srow-error')?.textContent || '',
+      invalid: row.querySelector('input')?.getAttribute('aria-invalid') === 'true'
+    }));
+    const results = {};
+    for (const v of ['0', '61']) {
+      await page.fill(`${dlg} input[data-setting="timeout"]`, v);
+      await sleep(500);
+      results[v] = { ...(await state('timeout')), saved: (await stored()).timeoutMs };
+    }
+    await page.fill(`${dlg} input[data-setting="timeout"]`, '5');
+    await sleep(500);
+    results['5'] = { ...(await state('timeout')), saved: (await stored()).timeoutMs };
+    await page.fill(`${dlg} input[data-setting="endpoint"]`, 'ftp://x');
+    await sleep(500);
+    const ftp = { ...(await state('endpoint')), saved: (await stored()).endpoint };
+    await ctx.close();
+    const bad = r => /1–60/.test(r.error) && r.invalid && r.saved !== 0 && r.saved !== 61 * 60000;
+    const ok = bad(results['0']) && bad(results['61']) && results['5'].error === '' && !results['5'].invalid && results['5'].saved === 300000 &&
+      /http\(s\)/.test(ftp.error) && ftp.invalid && !/^ftp/.test(ftp.saved || '');
+    check('A-30', 'setting validation: invalid timeout / endpoint show an error, are marked invalid and are not saved; a valid value clears the error and saves', ok, JSON.stringify({ ...results, ftp }));
+  },
+
+  async 'A-31'() {
+    const ctx = await newContext();
+    const page = await newPage(ctx);
+    await goto(page, 'v=a31deps');
+    await sleep(2500);
+    await openSettings(page);
+    await page.click('.ysrp-cat[data-cat="all"]');
+    const mark = (plugin, cls) => page.getAttribute(`.ysrp-plugin[data-plugin="${plugin}"] .${cls}`, 'title').catch(() => null);
+    const requires = await mark('Transcript', 'is-deps-mark');
+    const usedBy = await mark('Records', 'is-used-by-mark');
+    const prefs = () => page.evaluate(() => JSON.parse(localStorage.getItem('YSRP_Plugins')).plugins);
+    const checked = name => page.getAttribute(`.ysrp-switch[data-plugin="${name}"]`, 'aria-checked');
+    await page.click('.ysrp-switch[data-plugin="Records"]');
+    await sleep(300);
+    const offToast = await page.locator('.ysrp-toast[data-toast-id="plugin-deps"]').textContent().catch(() => '');
+    const off = await prefs();
+    const offSwitch = await checked('Transcript');
+    await page.click('.ysrp-switch[data-plugin="Transcript"]');
+    await sleep(300);
+    const onToast = await page.locator('.ysrp-toast[data-toast-id="plugin-deps"]').textContent().catch(() => '');
+    const on = await prefs();
+    const recordsSwitch = await checked('Records');
+    const menu = (await closeAll(page), await (async () => { await pressGear(page); const m = await menuItems(page); await closeAll(page); return m; })());
+    await ctx.close();
+    const ok = /依赖：记录/.test(requires || '') && /被以下插件依赖：字幕/.test(usedBy || '') &&
+      off.Records.enabled === false && off.Transcript.enabled === false && offSwitch === 'false' && /已同时关闭：字幕/.test(offToast || '') &&
+      on.Records.enabled === true && on.Transcript.enabled === true && recordsSwitch === 'true' && /已同时开启：记录/.test(onToast || '') &&
+      menu.includes('Records') && menu.includes('Transcript');
+    check('A-31', 'plugin dependencies: marks on both cards; disabling Records disables Transcript, enabling Transcript enables Records, each with a toast', ok,
+      `requires "${requires}", used by "${usedBy}", off ${JSON.stringify([off.Records, off.Transcript])} switch ${offSwitch} toast "${offToast}", on ${JSON.stringify([on.Records, on.Transcript])} switch ${recordsSwitch} toast "${onToast}", menu ${menu.join(',')}`);
   },
 };
 

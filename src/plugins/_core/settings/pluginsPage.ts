@@ -2,7 +2,7 @@
 // search + filter bar, Void++ plugin cards with star, pin, settings (opens N-5.6) and switch.
 
 import {
-  hasFailed, hasVisibleSettings, isEnabled, listPlugins, pluginsChanged, setPluginEnabled, type PluginDef
+  dependenciesOf, dependentsOf, hasFailed, hasVisibleSettings, isEnabled, listPlugins, pluginsChanged, setPluginEnabled, type PluginDef
 } from '../../../api/plugins';
 import { pinnedPlugins, setListed, starredPlugins } from '../../../api/pluginSettings';
 import {
@@ -43,6 +43,12 @@ export function renderPluginsPage(pane: HTMLElement): () => void {
     if (plugin.required) marks.push(cardMark('circle-exclamation', tr('Core plugin, always on', '核心插件，始终开启'), 'is-core-mark'));
     const failed = isEnabled(plugin) && hasFailed(plugin.name);
     if (failed) marks.push(cardMark('triangle-exclamation', tr('This plugin failed to start', '插件启动失败'), 'is-danger'));
+    // N-13.4: dependency marks.
+    const list = (ps: PluginDef[]) => ps.map(p => pick(p.displayName)).join(tr(', ', '、'));
+    const deps = dependenciesOf(plugin);
+    if (deps.length) marks.push(cardMark('puzzle-piece', tr('Requires: {names}', '依赖：{names}', { names: list(deps) }), 'is-deps-mark'));
+    const users = dependentsOf(plugin);
+    if (users.length) marks.push(cardMark('link', tr('Required by: {names}', '被以下插件依赖：{names}', { names: list(users) }), 'is-used-by-mark'));
 
     const star = iconButton('star', '', `is-star${starred ? ' is-active' : ''}`, () => {
       setListed('starred', plugin.name, !starred);

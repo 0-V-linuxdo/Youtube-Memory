@@ -8,6 +8,8 @@ import plugin_badgeToggle from '../plugins/badgeToggle';
 import plugin_driveSync from '../plugins/driveSync';
 import plugin_pluginsMenu from '../plugins/pluginsMenu';
 import plugin_records from '../plugins/records';
+import plugin_tabSync from '../plugins/tabSync';
+import plugin_toasts from '../plugins/toasts';
 import plugin_transcript from '../plugins/transcript';
 
-export const plugins: PluginDef[] = [core_engine, core_playerBadge, core_settings, core_storage, plugin_badgeToggle, plugin_driveSync, plugin_pluginsMenu, plugin_records, plugin_transcript];
+export const plugins: PluginDef[] = [core_engine, core_playerBadge, core_settings, core_storage, plugin_badgeToggle, plugin_driveSync, plugin_pluginsMenu, plugin_records, plugin_tabSync, plugin_toasts, plugin_transcript];

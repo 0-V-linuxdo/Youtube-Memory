@@ -366,6 +366,17 @@
 | D-13 | 被 N-5.4.3 取代：卡片内不再有任何面板，链接/笔记/字幕都在子弹窗里（`plugins/records/cardButtons.ts`、`transcript/index.ts`） |
 | D-14 | 一切皆插件：`settings/shell.ts`（只有插件页）、`settings/menu.ts`（齿轮菜单）、`settings/pluginDialog.ts`（所有功能界面）、`plugins/records`、`_core/storage`、`pluginsMenu` |
 
+### N-9 … N-14
+
+| 编号 | 实现 |
+|---|---|
+| N-9 | `build.ts`（`RAW_BASE`、`@updateURL`、`@downloadURL`）、`README.md` |
+| N-10 | `api/toast.ts`、`api/ui.css`（toasts）、`plugins/toasts/`；接入：引擎 `finishRestore()` / `write()`、`driveSync/sync.ts`（`setStatus()`、`pull()`） |
+| N-11 | `plugins/tabSync/`、`api/records.ts`（`applyRemoteChange()`、`notifyBulkChange()`、`RecordChange.remote`）、`utils/storage.ts`（`onSettingWrite()`、`reloadMode()`）、`utils/i18n.ts`（`reloadPreference()`）、`api/plugins.ts`（`reloadPluginChoices()`）、引擎 `remoteReading` / `yielded`、`records/list.ts` |
+| N-12 | `api/plugins.ts`（`validate` / `disabled` / `slider`）、`settings/pluginDialog.ts`（`showValidity()`、`applyDisabled()`）、`api/ui.ts`（`sliderControl()`）、`transcript/service.ts`（`endpointError()`、`timeoutError()`） |
+| N-13 | `api/plugins.ts`（`dependencies`、`startOrder()`、`reconcile()`、`setPluginEnabled()`）、`settings/pluginsPage.ts`（依赖小标记）、`transcript/index.ts` |
+| D-15 … D-19 | 同上 |
+
 ## 第三部分 · 验收清单
 
 | 编号 | 主要实现 | 自动化 |
@@ -393,3 +404,8 @@
 | A-24 | `settings/pluginsPage.ts`、`settings/pluginDialog.ts`、`api/pluginSettings.ts`（`starred`/`pinned`）、`api/dialogs.ts`、`shell.ts`（导航、版本页脚）、`build.ts`（提交哈希） | ✓ |
 | A-25 | `settings/shell.ts`、`settings/pluginDialog.ts`、各插件 `index.ts`、`api/theme.css`、`api/ui.css`、`api/ui.ts` | ✓ |
 | A-26 | `plugins/pluginsMenu/index.ts`、`api/pluginMenu.ts`、`settings/menu.ts` | ✓ |
+| A-27 | `build.ts` | ✓ |
+| A-28 | `api/toast.ts`、`plugins/toasts/`、引擎 | ✓ |
+| A-29 | `plugins/tabSync/`、引擎进度保护、`records/list.ts` | ✓ |
+| A-30 | `settings/pluginDialog.ts`、`transcript/service.ts` | ✓ |
+| A-31 | `api/plugins.ts`、`settings/pluginsPage.ts` | ✓ |

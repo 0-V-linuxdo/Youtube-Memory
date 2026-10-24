@@ -6,26 +6,31 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-const VERSION_NUMBER = '2.2.0';
-const DATE = '20261010';
+const VERSION_NUMBER = '2.3.0';
+const DATE = '20261024';
 const VERSION = `[${DATE}] v${VERSION_NUMBER}`;
 const OUT_DIR = 'userscript';
 const OUT_FILE = join(OUT_DIR, '[Youtube] Video Memory.user.js');
 const META_FILE = join(OUT_DIR, '[Youtube] Video Memory.meta.js');
 const HOMEPAGE = 'https://github.com/0-V-linuxdo/Youtube-Memory';
+// N-9.1: script managers check these for updates (files on the main branch).
+const RAW_BASE = 'https://raw.githubusercontent.com/0-V-linuxdo/Youtube-Memory/main/userscript/';
+const fileUrl = (file: string) => RAW_BASE + encodeURIComponent(file);
 
 const header = `// ==UserScript==
 // @name         [Youtube] Video Memory [${DATE}] v${VERSION_NUMBER}
 // @namespace    0_V userscripts/Youtube Save & Resume Progress
 // @version      ${VERSION}
-// @description  Save & resume YouTube playback progress reliably (waits for the player, skips ads, per-video sessions), timestamp-link choice dialog, records/storage/transcript settings, void++-style plugins, 💾 badge toggle and optional Google Drive sync.
-// @update-log   ${VERSION} · Clean-room rewrite: new progress engine (no lost progress), &t= choice dialog, void++-style plugin architecture and settings UI, 💾 badge toggle plugin, per-video Google Drive sync, page scrollbar kept while the dialog is open.
+// @description  Save & resume YouTube playback progress reliably (waits for the player, skips ads, per-video sessions), timestamp-link choice dialog, records/storage/transcript settings, void++-style plugins, toasts, tab sync, 💾 badge toggle and optional Google Drive sync.
+// @update-log   ${VERSION} · Automatic updates, toasts, tab sync (records, settings and progress protection across tabs), setting validation with sliders, plugin dependencies.
 // @author       0_V
 // @license      MIT
 // @match        *://*.youtube.com/*
 // @icon         ${HOMEPAGE}/raw/refs/heads/main/main_icon/main_icon.svg
 // @homepageURL  ${HOMEPAGE}
 // @supportURL   ${HOMEPAGE}/issues
+// @updateURL    ${fileUrl('[Youtube] Video Memory.meta.js')}
+// @downloadURL  ${fileUrl('[Youtube] Video Memory.user.js')}
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue

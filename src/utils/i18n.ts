@@ -48,6 +48,16 @@ export function getLanguage(): Language {
   return preference === 'auto' ? detectBrowserLanguage() : preference;
 }
 
+/** N-11.5: another tab changed the preference; apply it without writing it back. */
+export function reloadPreference(): void {
+  const next = normalizePreference(readSetting(KEY_LANGUAGE));
+  if (next === preference) return;
+  preference = next;
+  try {
+    document.dispatchEvent(new CustomEvent(EVT_LANGUAGE, { detail: { preference: next, resolved: getLanguage() } }));
+  } catch { /* ignore */ }
+}
+
 /** C-48: change the preference, persist to both stores, broadcast. */
 export function setPreference(value: unknown): boolean {
   const next = normalizePreference(value);

@@ -4,9 +4,9 @@
 
 import { confirmDialog, openDialog, type DialogHandle } from '../../../api/dialogs';
 import {
-  getSetting, isResettable, settingsContext, settingText, visibleSettings, type PluginDef, type SettingDef
+  getSetting, isResettable, pluginsChanged, settingsChanged, settingsContext, settingText, visibleSettings, type PluginDef, type SettingDef
 } from '../../../api/plugins';
-import { button, field, secretInput, selectControl, settingsRow, switchControl, textInput } from '../../../api/ui';
+import { button, field, secretInput, selectControl, settingsRow, sliderControl, switchControl, textInput } from '../../../api/ui';
 import { h } from '../../../utils/dom';
 import { pick, tr } from '../../../utils/i18n';
 
@@ -36,7 +36,45 @@ function bindInput(input: HTMLInputElement, commit: () => void): () => void {
   return flush;
 }
 
+/** N-12.1: show or clear the validation error of a row; returns whether the value is valid. */
+function showValidity(row: HTMLElement, input: HTMLInputElement | null, def: SettingDef, value: unknown): boolean {
+  const error = def.validate ? def.validate(value) : null;
+  let line = row.querySelector<HTMLElement>(':scope > .ysrp-srow-error');
+  if (!line) {
+    line = h('div', { class: 'ysrp-srow-error', attrs: { role: 'alert' } });
+    row.appendChild(line);
+  }
+  line.textContent = error || '';
+  if (input) {
+    input.classList.toggle('is-invalid', Boolean(error));
+    if (error) input.setAttribute('aria-invalid', 'true');
+    else input.removeAttribute('aria-invalid');
+  }
+  return !error;
+}
+
+/** N-12.2: disabled rows are dimmed, their controls disabled, and the reason replaces the description. */
+function applyDisabled(row: HTMLElement, def: SettingDef, desc: string): void {
+  if (!def.disabled) return;
+  const off = Boolean(def.disabled());
+  row.classList.toggle('is-disabled', off);
+  row.querySelectorAll<HTMLInputElement | HTMLButtonElement | HTMLSelectElement>('input, button, select, textarea').forEach(el => { el.disabled = off; });
+  const descEl = row.querySelector<HTMLElement>('.ysrp-srow-desc');
+  const reason = settingText(def.disabledReason);
+  if (descEl && reason) {
+    const text = off ? reason : desc;
+    descEl.textContent = text;
+    descEl.style.display = text ? '' : 'none';
+  }
+}
+
 function settingRow(plugin: PluginDef, key: string, def: SettingDef, flushers: Array<() => void>): HTMLElement {
+  const row = buildRow(plugin, key, def, flushers);
+  applyDisabled(row, def, settingText(def.description));
+  return row;
+}
+
+function buildRow(plugin: PluginDef, key: string, def: SettingDef, flushers: Array<() => void>): HTMLElement {
   const ctx = settingsContext(plugin);
   const value = getSetting(plugin, key);
   const title = settingText(def.label) || key;
@@ -50,23 +88,37 @@ function settingRow(plugin: PluginDef, key: string, def: SettingDef, flushers: A
         title, desc, dataset,
         control: selectControl((def.options || []).map(o => ({ value: o.value, label: settingText(o.label) })), String(value), v => ctx.settings.set(key, v), { dataset, label: title }).el
       }).el;
+    case 'slider': {
+      const slider = sliderControl(Number(value), {
+        min: def.min ?? 0, max: def.max ?? 100, step: def.step, format: def.format, label: title, dataset,
+        onChange: n => ctx.settings.set(key, n)
+      });
+      return settingsRow({ title, desc, dataset, control: slider.el }).el;
+    }
     case 'number': {
       const input = textInput({ type: 'number', value: String(value ?? ''), placeholder: def.placeholder, cls: 'is-number' });
       input.dataset.setting = key;
       if (def.min !== undefined) input.min = String(def.min);
       if (def.max !== undefined) input.max = String(def.max);
       if (def.step !== undefined) input.step = String(def.step);
+      const row = settingsRow({ title, desc, dataset, below: [input] }).el;
       flushers.push(bindInput(input, () => {
-        const n = Number(input.value);
-        if (input.value.trim() !== '' && Number.isFinite(n)) ctx.settings.set(key, n);
+        const raw = input.value.trim();
+        const n = raw === '' ? NaN : Number(raw);
+        // Without a validator an unparsable number is simply not saved (as before).
+        if (!def.validate && !Number.isFinite(n)) return;
+        if (showValidity(row, input, def, n)) ctx.settings.set(key, n);
       }));
-      return settingsRow({ title, desc, dataset, below: [input] }).el;
+      return row;
     }
     default: {
       const input = textInput({ type: def.secret ? 'password' : 'text', value: String(value ?? ''), placeholder: def.placeholder });
       input.dataset.setting = key;
-      flushers.push(bindInput(input, () => ctx.settings.set(key, input.value)));
-      return settingsRow({ title, desc, dataset, below: [def.secret ? secretInput(input) : input] }).el;
+      const row = settingsRow({ title, desc, dataset, below: [def.secret ? secretInput(input) : input] }).el;
+      flushers.push(bindInput(input, () => {
+        if (showValidity(row, input, def, input.value)) ctx.settings.set(key, input.value);
+      }));
+      return row;
     }
   }
 }
@@ -109,6 +161,18 @@ export function openPluginDialog(plugin: PluginDef): DialogHandle {
     if (slot.def.type === 'custom') slot.el.appendChild(customPanel(slot.key, slot.def, cleanups));
   }
   renderRows();
+  const refreshDisabled = () => {
+    for (const slot of slots) {
+      const row = slot.el.firstElementChild as HTMLElement | null;
+      if (row && slot.def.type !== 'custom') applyDisabled(row, slot.def, settingText(slot.def.description));
+    }
+  };
+  // N-12.2: re-evaluate after any change; N-11.5: a change made in another tab redraws the controls.
+  cleanups.push(pluginsChanged.on(refreshDisabled));
+  cleanups.push(settingsChanged.on(change => {
+    if (change.plugin === '*') renderRows();
+    else refreshDisabled();
+  }));
 
   const list = h('div', { class: 'ysrp-plugin-settings' }, slots.map(s => s.el));
   const footer: HTMLElement[] = [];

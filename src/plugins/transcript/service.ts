@@ -35,6 +35,24 @@ export function timeoutMinutes(ms: unknown): number {
   return Math.round(n / 60000);
 }
 
+/** N-12.4: empty (default) or an http(s) URL / bare host; any other scheme is rejected. */
+export function endpointError(value: unknown): string | null {
+  const s = typeof value === 'string' ? value.trim() : '';
+  if (!s) return null;
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `https://${s}`;
+  let ok = /^https?:\/\//i.test(withScheme);
+  if (ok) {
+    try { ok = Boolean(new URL(withScheme).hostname); } catch { ok = false; }
+  }
+  return ok ? null : tr('Enter an http(s) URL', '请输入 http(s) 地址');
+}
+
+/** N-12.4: whole minutes from 1 to 60. */
+export function timeoutError(value: unknown): string | null {
+  const n = Number(value);
+  return Number.isInteger(n) && n >= 1 && n <= 60 ? null : tr('Enter a whole number from 1 to 60', '请输入 1–60 之间的整数');
+}
+
 /** S-44..S-47 / L-22: endpoint normalisation. */
 export function normalizeEndpoint(value: unknown): string {
   if (typeof value !== 'string') return '';

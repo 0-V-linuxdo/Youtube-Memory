@@ -1,10 +1,12 @@
 // Drive synchronisation engine (N-7.6..N-7.10): upload queue, delete, per-session pull, first full sync.
 
 import { dispatch } from '../../api/events';
+import { showToast } from '../../api/toast';
 import { listRecords, readRecord, updateRecord, writeRecord, type RecordChange, type VideoRecord } from '../../api/records';
 import { EVT_DRIVE_STATUS, KEY_DRIVE_FULL_SYNC, RECORD_PREFIX, watchUrl } from '../../utils/constants';
 import { readSetting, writeSetting } from '../../utils/storage';
-import { errorMessage } from '../../utils/text';
+import { tr } from '../../utils/i18n';
+import { errorMessage, formatTime } from '../../utils/text';
 import { DriveClient, fileNameFor, hasCredentials, LEGACY_FILE_NAME, readCredentials, type DriveCredentials } from './drive';
 
 const FIRST_DELAY_MS = 1500;
@@ -68,8 +70,18 @@ export class DriveSync {
     this.deletes = [];
   }
 
+  private lastErrorToast = { message: '', at: 0 };
+
   private setStatus(state: SyncState, done: number, total: number, message: string): void {
     this.status = { state, done, total, message, at: Date.now() };
+    // N-10.6: the same error is toasted at most once a minute.
+    if (state === 'error') {
+      const now = Date.now();
+      if (message !== this.lastErrorToast.message || now - this.lastErrorToast.at > 60000) {
+        this.lastErrorToast = { message, at: now };
+        showToast({ id: 'drive-sync', type: 'error', text: tr('Drive sync failed: {e}', '云同步出错：{e}', { e: message }) });
+      }
+    }
     dispatch(EVT_DRIVE_STATUS, { state, done, total, message });
     this.onStatus?.(this.status);
   }
@@ -227,6 +239,10 @@ export class DriveSync {
         driveSync: { ...(current.driveSync || {}), lastDownloadAt: now, lastUploadAt: now, remoteModifiedAt: remoteMs }
       }, 'sync');
       this.setStatus('done', 1, 1, '');
+      const progress = Number(incoming.videoProgress);
+      if (Number.isFinite(progress) && progress > 0) {
+        showToast({ id: 'drive-pull', topic: 'cloud', type: 'info', text: tr('Applied cloud progress {t}', '已应用云端进度 {t}', { t: formatTime(progress) }) });
+      }
     } catch (err) {
       console.warn('[Video Memory] Drive pull failed:', err);
       this.setStatus('error', 0, 0, errorMessage(err));

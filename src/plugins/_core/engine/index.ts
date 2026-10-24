@@ -6,10 +6,12 @@ import { dispatch } from '../../../api/events';
 import { runBeforeRestoreHooks } from '../../../api/hooks';
 import { getPlayer, isPlaying, linkStartTime, playerDuration, playerTime, readyPlayer, urlVideoId, videoData, type YtPlayer } from '../../../api/player';
 import { definePlugin, type PluginContext } from '../../../api/plugins';
-import { readRecord, updateRecord } from '../../../api/records';
+import { readRecord, recordChanges, updateRecord } from '../../../api/records';
 import { askResume, type ResumePromptHandle } from '../../../api/resumePrompt';
+import { dismissToast, showToast } from '../../../api/toast';
 import { cachedOriginalTitle, getSources, knownOriginalTitle, setCurrentVideo, titleForRecord } from '../../../api/titles';
 import { EVT_RECORD_UPDATED } from '../../../utils/constants';
+import { tr } from '../../../utils/i18n';
 import { errorMessage, formatTime } from '../../../utils/text';
 
 const TICK_MS = 250;
@@ -44,6 +46,12 @@ interface Session {
   restore: RestoreState | null;
   prompt: ResumePromptHandle | null;
   ended: boolean;
+  /** N-10.6: a save failure was already toasted in this session. */
+  failureShown: boolean;
+  /** N-11.4: this tab's reading when another tab last wrote this video; null when none. */
+  remoteReading: number | null;
+  /** N-11.4: hidden while another tab wrote this video; no writes until this tab is visible again. */
+  yielded: boolean;
 }
 
 class Engine {
@@ -69,6 +77,17 @@ class Engine {
     ctx.listen(document, 'pause', onMedia, true);
     ctx.listen(document, 'seeked', onMedia, true);
     ctx.onDispose(() => { if (this.session) this.endSession(this.session); });
+    ctx.onDispose(recordChanges.on(change => {
+      const s = this.session;
+      if (!change.remote || !s || change.videoId !== s.id || s.phase !== 'tracking' || !change.record) return;
+      if (change.kind !== 'content' && change.kind !== 'sync') return;
+      // N-11.4: remember where this tab was; only a real play or seek here may overwrite the other tab.
+      const player = readyPlayer(s.id);
+      s.remoteReading = player ? playerTime(player) : s.lastReadyTime;
+      if (document.visibilityState === 'hidden') s.yielded = true;
+      const progress = Number(change.record.videoProgress);
+      if (Number.isFinite(progress)) showSavedTime(progress);
+    }));
     // First tick after every plugin has started, so "before restore" hooks are registered.
     ctx.timeout(() => this.tick(), 0);
   }
@@ -118,7 +137,7 @@ class Engine {
     if (!id) return;
     const s: Session = {
       id, phase: 'sync', lastReadyTime: null, lastDuration: 0, lastWritten: null,
-      lastSaveAt: 0, restore: null, prompt: null, ended: false
+      lastSaveAt: 0, restore: null, prompt: null, ended: false, failureShown: false, remoteReading: null, yielded: false
     };
     this.session = s;
     // N-2.4.6: wait (max 4 s) for "before restore" hooks such as the Drive pull.
@@ -234,7 +253,10 @@ class Engine {
     const target = s.restore ? s.restore.target : 0;
     s.restore = null;
     this.startTracking(s);
-    if (ok) flashStatus('Resumed {t}', '已恢复 {t}', { t: formatTime(target) }, 2500);
+    if (ok) {
+      flashStatus('Resumed {t}', '已恢复 {t}', { t: formatTime(target) }, 2500);
+      showToast({ id: 'resume', topic: 'resume', type: 'success', text: tr('Resumed at {t}', '已恢复到 {t}', { t: formatTime(target) }) });
+    }
   }
 
   private startTracking(s: Session): void {
@@ -246,6 +268,10 @@ class Engine {
   /** N-2.5: only while tracking and with a ready player (or the session's last ready reading). */
   private save(s: Session, useLastReading: boolean): void {
     if (s.phase !== 'tracking') return;
+    if (s.yielded) {
+      if (document.visibilityState === 'hidden') return;
+      s.yielded = false;
+    }
     s.lastSaveAt = Date.now();
     let time: number | null = null;
     let duration = s.lastDuration;
@@ -259,6 +285,10 @@ class Engine {
       time = s.lastReadyTime;
     }
     if (time === null) return;
+    if (s.remoteReading !== null) {
+      if (Math.abs(time - s.remoteReading) < MIN_DELTA_S) return;
+      s.remoteReading = null;
+    }
     if (s.lastWritten !== null && Math.abs(time - s.lastWritten) < MIN_DELTA_S) return;
     this.write(s, time, duration);
   }
@@ -280,12 +310,20 @@ class Engine {
         };
       }, 'content');
       s.lastWritten = time;
+      if (s.failureShown) {
+        s.failureShown = false;
+        dismissToast('save-failed');
+      }
       if (this.session === s) showSavedTime(time);
       dispatch(EVT_RECORD_UPDATED, { videoId: id, videoProgress: time });
     } catch (err) {
       // N-2.5.5 / fix BUG-6: failures are reported instead of swallowed.
       console.error('[Video Memory] Failed to save video progress:', err);
       if (this.session === s) showStatus('⚠ Save failed', '⚠ 保存失败', undefined, { tooltip: errorMessage(err), error: true });
+      if (!s.failureShown) {
+        s.failureShown = true;
+        showToast({ id: 'save-failed', type: 'error', text: tr('Could not save the progress: {e}', '进度保存失败：{e}', { e: errorMessage(err) }) });
+      }
     }
   }
 }
